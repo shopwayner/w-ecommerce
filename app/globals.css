@@ -1,0 +1,266 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --background: 247 245 240;
+  --foreground: 20 20 18;
+  --card: 255 255 255;
+  --card-strong: 250 247 241;
+  --border: 224 214 197;
+  --muted: 242 238 229;
+  --muted-foreground: 95 86 73;
+  --sidebar-background: 255 255 255;
+  --sidebar-foreground: 28 26 23;
+  --sidebar-active: 18 17 15;
+  --gold: 198 135 10;
+  --gold-soft: 250 226 176;
+  --gold-dark: 121 78 0;
+  --shadow: 50 40 22;
+  --success: 22 163 74;
+  --danger: 185 28 28;
+  --warning: 202 112 9;
+  --info: 15 118 110;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --background: 10 10 9;
+  --foreground: 245 241 232;
+  --card: 18 18 16;
+  --card-strong: 25 24 21;
+  --border: 66 55 34;
+  --muted: 31 29 25;
+  --muted-foreground: 186 176 157;
+  --sidebar-background: 8 8 7;
+  --sidebar-foreground: 245 241 232;
+  --sidebar-active: 236 178 57;
+  --gold: 224 166 45;
+  --gold-soft: 92 69 28;
+  --gold-dark: 255 215 128;
+  --shadow: 0 0 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgb(var(--gold) / 0.10), transparent 34rem),
+    linear-gradient(180deg, rgb(var(--background)) 0%, rgb(var(--card-strong)) 58%, rgb(var(--background)) 100%);
+  color: rgb(var(--foreground));
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--border));
+  border-radius: 999px;
+}
+
+.matrix-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--border)) transparent;
+}
+
+[data-theme="light"] .text-white,
+[data-theme="light"] .text-slate-100,
+[data-theme="light"] .text-slate-200 {
+  color: rgb(var(--foreground)) !important;
+}
+
+[data-theme="light"] .text-slate-300,
+[data-theme="light"] .text-slate-400,
+[data-theme="light"] .text-slate-500 {
+  color: rgb(var(--muted-foreground)) !important;
+}
+
+[data-theme="light"] .placeholder\:text-slate-600::placeholder {
+  color: rgb(var(--muted-foreground) / 0.7) !important;
+}
+
+[data-theme="light"] .bg-white\/\[0\.02\],
+[data-theme="light"] .bg-white\/\[0\.03\],
+[data-theme="light"] .bg-white\/\[0\.04\],
+[data-theme="light"] .bg-white\/5,
+[data-theme="light"] .bg-white\/\[0\.06\] {
+  background-color: rgb(var(--card-strong) / 0.84) !important;
+}
+
+[data-theme="light"] .bg-black\/50,
+[data-theme="light"] .bg-black\/60,
+[data-theme="light"] .bg-black\/70 {
+  background-color: rgb(20 20 18 / 0.38) !important;
+}
+
+.gold-ring {
+  box-shadow: inset 0 0 0 1px rgb(var(--gold) / 0.28), 0 18px 50px rgb(var(--shadow) / 0.10);
+}
+
+.login-premium-shell {
+  background-image:
+    linear-gradient(90deg, rgb(255 255 255 / 0.78) 0%, rgb(255 255 255 / 0.54) 42%, rgb(255 255 255 / 0.20) 100%),
+    radial-gradient(circle at 18% 18%, rgb(var(--gold) / 0.16), transparent 28rem),
+    url("/assets/login-gold-background.png");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+.plans-public-shell {
+  background:
+    radial-gradient(circle at 12% 16%, rgb(var(--gold) / 0.14), transparent 27rem),
+    radial-gradient(circle at 86% 20%, rgb(var(--gold) / 0.18), transparent 32rem),
+    linear-gradient(180deg, rgb(var(--background)) 0%, rgb(var(--card)) 38%, rgb(var(--card-strong)) 100%);
+}
+
+[data-theme="dark"] .plans-public-shell {
+  background:
+    radial-gradient(circle at 12% 16%, rgb(var(--gold) / 0.10), transparent 27rem),
+    radial-gradient(circle at 86% 20%, rgb(var(--gold) / 0.13), transparent 32rem),
+    linear-gradient(180deg, rgb(8 8 7) 0%, rgb(var(--background)) 42%, rgb(19 17 13) 100%);
+}
+
+[data-theme="dark"] .login-premium-shell {
+  background-image:
+    linear-gradient(90deg, rgb(0 0 0 / 0.72) 0%, rgb(0 0 0 / 0.58) 46%, rgb(0 0 0 / 0.34) 100%),
+    radial-gradient(circle at 18% 18%, rgb(var(--gold) / 0.12), transparent 28rem),
+    url("/assets/login-gold-background.png");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+}
+
+.login-gold-lines {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  opacity: 0.78;
+  background:
+    linear-gradient(116deg, transparent 0 38%, rgb(var(--gold) / 0.13) 38.2% 38.35%, transparent 38.55%),
+    linear-gradient(124deg, transparent 0 72%, rgb(var(--gold) / 0.18) 72.2% 72.35%, transparent 72.55%),
+    repeating-linear-gradient(150deg, transparent 0 5.5rem, rgb(var(--gold) / 0.065) 5.55rem 5.62rem, transparent 5.7rem 11rem);
+}
+
+.login-premium-shell .login-gold-lines {
+  opacity: 0.18;
+}
+
+.login-card-motion {
+  animation: loginCardEnter 760ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.login-float-card {
+  opacity: 0;
+  animation: loginMetricEnter 700ms cubic-bezier(0.16, 1, 0.3, 1) both, loginMetricFloat 7s ease-in-out 1.2s infinite;
+}
+
+.login-hero-wave {
+  pointer-events: none;
+  position: absolute;
+  inset: auto -12% 8% -8%;
+  height: 46%;
+  opacity: 0.86;
+  background:
+    radial-gradient(ellipse at 52% 62%, rgb(var(--gold) / 0.34), transparent 42%),
+    linear-gradient(100deg, transparent 0 9%, rgb(var(--gold) / 0.24) 19%, rgb(var(--gold) / 0.08) 33%, transparent 58%),
+    repeating-linear-gradient(170deg, transparent 0 1.1rem, rgb(var(--gold) / 0.18) 1.14rem 1.2rem, transparent 1.25rem 2.4rem);
+  filter: blur(0.4px);
+  transform: rotate(-6deg);
+  border-radius: 999px;
+}
+
+.login-plans-panel {
+  width: 0;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transform: translateX(-12px);
+  transition:
+    width 520ms cubic-bezier(0.16, 1, 0.3, 1),
+    max-width 520ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 420ms ease,
+    transform 520ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.login-plans-panel-open {
+  width: 340px;
+  max-width: 340px;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+@keyframes loginCardEnter {
+  from {
+    opacity: 0;
+    transform: translateX(-32px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes loginCardFloat {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes loginMetricEnter {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes loginMetricFloat {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+@media (max-height: 820px) and (min-width: 1024px) {
+  .login-float-card {
+    transform-origin: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-card-motion,
+  .login-float-card {
+    animation: none;
+    opacity: 1;
+  }
+
+  .login-plans-panel {
+    transition: none;
+  }
+}

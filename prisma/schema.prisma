@@ -1,0 +1,596 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PlanCode {
+  START
+  MATRIX
+  ENTERPRISE
+}
+
+enum UserStatus {
+  ACTIVE
+  INVITED
+  DISABLED
+}
+
+enum OrganizationStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  OPERATOR
+  VIEWER
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELED
+}
+
+enum ConnectionRole {
+  MATRIX
+  BRANCH
+  OTHER
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  EXPIRED
+  ERROR
+  DISCONNECTED
+  PENDING
+  DISABLED
+}
+
+enum BlingEnvironment {
+  PRODUCTION
+  SANDBOX
+}
+
+enum OAuthProvider {
+  BLING
+}
+
+enum SyncDirection {
+  MATRIX_TO_BRANCHES
+  BRANCHES_TO_MATRIX
+  BIDIRECTIONAL
+  READ_ONLY
+}
+
+enum ConflictStrategy {
+  MATRIX_WINS
+  LATEST_WINS
+  MANUAL_REVIEW
+}
+
+enum JobStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+  CANCELED
+}
+
+model User {
+  id                String             @id @default(cuid())
+  email             String             @unique
+  name              String?
+  passwordHash      String?
+  status            UserStatus         @default(ACTIVE)
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  organizationUsers OrganizationUser[]
+  auditLogs         AuditLog[]
+
+  @@index([email])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Organization {
+  id                  String                 @id @default(cuid())
+  name                String
+  slug                String?                @unique
+  document            String?
+  cnpj                String?
+  status              OrganizationStatus     @default(ACTIVE)
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+  users               OrganizationUser[]
+  subscription        Subscription?
+  blingConnections    BlingConnection[]
+  oauthStates         OAuthState[]
+  syncRules           SyncRule[]
+  syncJobs            SyncJob[]
+  products            Product[]
+  orders              Order[]
+  publicationQueue    PublicationQueue[]
+  webhookEvents       WebhookEvent[]
+  auditLogs           AuditLog[]
+  usageCounters       UsageCounter[]
+  notifications       Notification[]
+  stockTransferRules  StockTransferRule[]
+  stockTransferRuns   StockTransferRun[]
+
+  @@index([createdAt])
+  @@index([status])
+}
+
+model OrganizationUser {
+  id             String       @id @default(cuid())
+  organizationId String
+  userId         String
+  role           Role         @default(ADMIN)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @default(now()) @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+  @@index([userId])
+  @@index([role])
+}
+
+model Plan {
+  id                   String         @id @default(cuid())
+  code                 PlanCode       @unique
+  name                 String
+  blingLimit           Int
+  operationLimit       Int
+  maxBlingConnections  Int            @default(1)
+  maxMonthlyOperations Int            @default(1000)
+  maxUsers             Int            @default(3)
+  features             Json?
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @default(now()) @updatedAt
+  subscriptions        Subscription[]
+}
+
+model Subscription {
+  id                 String             @id @default(cuid())
+  organizationId     String             @unique
+  planId             String
+  status             SubscriptionStatus @default(ACTIVE)
+  enterpriseLimit    Int?
+  currentPeriodStart DateTime           @default(now())
+  currentPeriodEnd   DateTime           @default(now())
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  organization       Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan               Plan               @relation(fields: [planId], references: [id])
+
+  @@index([organizationId])
+  @@index([planId])
+  @@index([status])
+}
+
+model BlingConnection {
+  id                      String             @id @default(cuid())
+  organizationId          String
+  name                    String
+  role                    ConnectionRole
+  status                  ConnectionStatus   @default(PENDING)
+  environment             BlingEnvironment   @default(PRODUCTION)
+  externalCompanyName     String?
+  externalCompanyDocument String?
+  externalCompanyId       String?
+  scopes                  String?
+  externalAccountId       String?
+  lastSyncAt              DateTime?
+  lastTestAt              DateTime?
+  lastError               String?
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+  organization            Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  tokens                  BlingToken[]
+  syncRules               SyncRule[]
+  syncJobs                SyncJob[]
+  mappings                ProductExternalMapping[]
+  orderMappings           OrderExternalMapping[]
+  inventory               InventoryBalance[]
+
+  @@index([organizationId])
+  @@index([organizationId, role])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model BlingToken {
+  id                    String          @id @default(cuid())
+  organizationId        String
+  blingConnectionId     String          @map("connectionId")
+  accessTokenEncrypted  String          @map("accessTokenEnc")
+  refreshTokenEncrypted String          @map("refreshTokenEnc")
+  tokenType             String          @default("Bearer")
+  scope                 String?
+  expiresAt             DateTime
+  refreshExpiresAt      DateTime?
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+  connection            BlingConnection @relation(fields: [blingConnectionId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([blingConnectionId])
+  @@index([organizationId, blingConnectionId])
+}
+
+model OAuthState {
+  id             String        @id @default(cuid())
+  organizationId String
+  userId         String
+  provider       OAuthProvider @default(BLING)
+  stateHash      String        @unique
+  connectionName String
+  connectionRole ConnectionRole
+  expiresAt      DateTime
+  usedAt         DateTime?
+  createdAt      DateTime      @default(now())
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([userId])
+  @@index([provider])
+  @@index([expiresAt])
+  @@index([createdAt])
+}
+
+model SyncRule {
+  id                     String           @id @default(cuid())
+  organizationId          String
+  connectionId            String?
+  productsEnabled         Boolean          @default(true)
+  pricesEnabled           Boolean          @default(true)
+  inventoryEnabled        Boolean          @default(true)
+  imagesEnabled           Boolean          @default(true)
+  ordersEnabled           Boolean          @default(false)
+  direction               SyncDirection
+  conflictStrategy        ConflictStrategy
+  safetyStock             Int              @default(0)
+  preventNegativeStock    Boolean          @default(true)
+  preserveBlockedFields   Boolean          @default(true)
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
+  organization            Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connection              BlingConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([connectionId])
+}
+
+model SyncJob {
+  id             String          @id @default(cuid())
+  organizationId String
+  connectionId   String?
+  type           String
+  status         JobStatus       @default(PENDING)
+  attempts       Int             @default(0)
+  correlationId  String?
+  lastError      String?
+  createdAt      DateTime        @default(now())
+  processedAt    DateTime?
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  connection     BlingConnection? @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  events         SyncJobEvent[]
+
+  @@index([organizationId])
+  @@index([connectionId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model SyncJobEvent {
+  id             String   @id @default(cuid())
+  organizationId String
+  syncJobId      String
+  level          String
+  message        String
+  safePayload    Json?
+  createdAt      DateTime @default(now())
+  syncJob        SyncJob  @relation(fields: [syncJobId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([syncJobId])
+  @@index([createdAt])
+}
+
+model Product {
+  id             String                   @id @default(cuid())
+  organizationId String
+  sku            String
+  ean            String?
+  name           String
+  description    String?
+  category       String?
+  brand          String?
+  ncm            String?
+  cest           String?
+  status         String                   @default("DRAFT")
+  blockedFields  Json?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+  organization   Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  images         ProductImage[]
+  mappings       ProductExternalMapping[]
+  prices         ProductPrice[]
+  priceHistory   ProductPriceHistory[]
+  inventory      InventoryBalance[]
+  movements      InventoryMovement[]
+  orderItems     OrderItem[]
+
+  @@unique([organizationId, sku])
+  @@index([organizationId])
+  @@index([sku])
+  @@index([ean])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model ProductImage {
+  id             String   @id @default(cuid())
+  organizationId String
+  productId      String
+  url            String
+  position       Int      @default(0)
+  createdAt      DateTime @default(now())
+  product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([productId])
+}
+
+model ProductExternalMapping {
+  id                String          @id @default(cuid())
+  organizationId    String
+  productId         String
+  connectionId      String
+  externalProductId String
+  lastExternalSyncAt DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  product           Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  connection        BlingConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, externalProductId])
+  @@index([organizationId])
+  @@index([connectionId])
+  @@index([externalProductId])
+}
+
+model ProductPrice {
+  id             String   @id @default(cuid())
+  organizationId String
+  productId      String
+  costPrice      Decimal  @db.Decimal(12, 2)
+  salePrice      Decimal  @db.Decimal(12, 2)
+  markup         Decimal? @db.Decimal(8, 4)
+  status         String   @default("ACTIVE")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([productId])
+  @@index([status])
+}
+
+model ProductPriceHistory {
+  id             String   @id @default(cuid())
+  organizationId String
+  productId      String
+  oldPrice       Decimal? @db.Decimal(12, 2)
+  newPrice       Decimal  @db.Decimal(12, 2)
+  reason         String?
+  createdAt      DateTime @default(now())
+  product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([productId])
+  @@index([createdAt])
+}
+
+model InventoryBalance {
+  id             String          @id @default(cuid())
+  organizationId String
+  productId      String
+  connectionId   String
+  warehouse      String
+  physicalQuantity Int           @default(0)
+  reservedQuantity Int           @default(0)
+  safetyQuantity Int             @default(0)
+  minQuantity    Int?
+  maxQuantity    Int?
+  status         String          @default("OK")
+  updatedAt      DateTime        @updatedAt
+  product        Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  connection     BlingConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, connectionId, warehouse])
+  @@index([organizationId])
+  @@index([connectionId])
+  @@index([status])
+}
+
+model InventoryMovement {
+  id             String   @id @default(cuid())
+  organizationId String
+  productId      String
+  type           String
+  quantity       Int
+  reason         String?
+  createdAt      DateTime @default(now())
+  product        Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([productId])
+  @@index([createdAt])
+}
+
+model StockTransferRule {
+  id             String       @id @default(cuid())
+  organizationId String
+  name           String
+  enabled        Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+model StockTransferRun {
+  id             String       @id @default(cuid())
+  organizationId String
+  status         JobStatus
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([status])
+}
+
+model Order {
+  id             String                 @id @default(cuid())
+  organizationId String
+  number         String
+  customerName   String
+  channel        String?
+  status         String
+  total          Decimal                @db.Decimal(12, 2)
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+  organization   Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  items          OrderItem[]
+  mappings       OrderExternalMapping[]
+
+  @@unique([organizationId, number])
+  @@index([organizationId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id             String   @id @default(cuid())
+  organizationId String
+  orderId        String
+  productId      String
+  sku            String
+  quantity       Int
+  unitPrice      Decimal  @db.Decimal(12, 2)
+  order          Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product        Product  @relation(fields: [productId], references: [id])
+
+  @@index([organizationId])
+  @@index([orderId])
+  @@index([sku])
+}
+
+model OrderExternalMapping {
+  id              String          @id @default(cuid())
+  organizationId  String
+  orderId         String
+  connectionId    String
+  externalOrderId String
+  createdAt       DateTime        @default(now())
+  order           Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  connection      BlingConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, externalOrderId])
+  @@index([organizationId])
+  @@index([connectionId])
+  @@index([externalOrderId])
+}
+
+model PublicationQueue {
+  id             String       @id @default(cuid())
+  organizationId String
+  type           String
+  origin         String
+  destination    String
+  status         JobStatus    @default(PENDING)
+  attempts       Int          @default(0)
+  lastError      String?
+  createdAt      DateTime     @default(now())
+  processedAt    DateTime?
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model WebhookEvent {
+  id             String       @id @default(cuid())
+  organizationId String
+  source         String
+  eventType      String
+  safePayload    Json?
+  status         String
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model AuditLog {
+  id             String       @id @default(cuid())
+  organizationId String
+  userId         String?
+  action         String
+  entity         String?
+  entityId       String?
+  metadata       Json?        @map("safePayload")
+  ipAddress      String?
+  userAgent      String?
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model UsageCounter {
+  id             String       @id @default(cuid())
+  organizationId String
+  key            String       @map("metric")
+  value          Int          @default(0) @map("used")
+  periodStart    DateTime
+  periodEnd      DateTime
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @default(now()) @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([key])
+  @@index([periodStart])
+  @@unique([organizationId, key, periodStart, periodEnd])
+}
+
+model Notification {
+  id             String       @id @default(cuid())
+  organizationId String
+  title          String
+  message        String
+  status         String       @default("UNREAD")
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([status])
+  @@index([createdAt])
+}
