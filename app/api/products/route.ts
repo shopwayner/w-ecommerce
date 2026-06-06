@@ -14,7 +14,8 @@ function getTestMetadata(blockedFields: unknown) {
     unit: typeof fields.unit === "string" ? fields.unit : null,
     origin: typeof fields.origin === "string" ? fields.origin : null,
     displayValue: typeof fields.displayValue === "string" ? fields.displayValue : null,
-    salePriceDisplay: typeof fields.salePriceDisplay === "string" ? fields.salePriceDisplay : null
+    salePriceDisplay: typeof fields.salePriceDisplay === "string" ? fields.salePriceDisplay : null,
+    stockOverride: typeof fields.stockOverride === "number" ? fields.stockOverride : null
   };
 }
 
@@ -43,6 +44,7 @@ export async function GET() {
         name: product.name,
         sku: product.sku,
         ean: product.ean,
+        description: product.description,
         category: product.category,
         origin: metadata.origin ?? product.brand,
         unit: metadata.unit,
@@ -52,7 +54,9 @@ export async function GET() {
         displayValue: metadata.displayValue,
         salePriceDisplay: metadata.salePriceDisplay,
         price: product.prices[0]?.salePrice.toString() ?? "0",
-        stock: product.inventory.reduce((total, item) => total + item.physicalQuantity - item.reservedQuantity, 0),
+        stock: product.inventory.length
+          ? product.inventory.reduce((total, item) => total + item.physicalQuantity - item.reservedQuantity, 0)
+          : metadata.stockOverride ?? 0,
         updatedAt: product.updatedAt
       };
     })

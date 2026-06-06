@@ -14,6 +14,21 @@ export const productCreateSchema = z.object({
   minStock: z.coerce.number().int().nonnegative().optional()
 });
 
+export const productUpdateSchema = z.object({
+  name: z.string().trim().min(2),
+  sku: z.string().trim().min(1),
+  ean: z.string().nullable().optional(),
+  unit: z.string().trim().nullable().optional(),
+  category: z.string().trim().nullable().optional(),
+  origin: z.string().trim().nullable().optional(),
+  status: z.enum(["DRAFT", "READY_FOR_TEST"]).optional(),
+  displayValue: z.string().trim().nullable().optional(),
+  salePriceDisplay: z.string().trim().nullable().optional(),
+  stock: z.coerce.number().int().nonnegative().optional(),
+  imageUrl: z.string().trim().url().nullable().or(z.literal("")).optional(),
+  description: z.string().trim().nullable().optional()
+});
+
 export const orderCreateSchema = z.object({
   customerName: z.string().min(2),
   connectionId: z.string().min(1),
