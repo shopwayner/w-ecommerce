@@ -119,8 +119,14 @@ export function LoginPage() {
   return (
     <main className="login-premium-shell min-h-[100dvh] bg-matrix-bg text-matrix-fg lg:overflow-hidden">
       <div className="login-gold-lines" aria-hidden="true" />
-      <div className="relative mx-auto flex min-h-[100dvh] w-full max-w-[1560px] flex-col px-4 py-4 sm:px-6 lg:px-8">
-        <div className="grid min-h-0 flex-1 items-center gap-8 py-4 xl:grid-cols-[minmax(420px,auto)_minmax(0,1fr)] xl:gap-12">
+      <div className="relative mx-auto flex min-h-[100dvh] w-full max-w-[1760px] flex-col px-4 py-4 sm:px-6 lg:px-8">
+        <div
+          className={`grid min-h-0 flex-1 items-center gap-8 py-4 ${
+            plansOpen
+              ? "xl:grid-cols-[minmax(0,840px)] xl:justify-center min-[1600px]:grid-cols-[minmax(0,840px)_minmax(620px,1fr)] min-[1600px]:justify-stretch min-[1600px]:gap-10 2xl:gap-12"
+              : "xl:grid-cols-[minmax(420px,auto)_minmax(0,1fr)] xl:gap-12"
+          }`}
+        >
           <div className="relative mx-auto flex w-full max-w-[880px] items-center justify-center gap-0 lg:justify-start">
             <section className="login-card-motion relative z-20 w-full max-w-[500px] rounded-[1.25rem] border border-matrix-gold/45 bg-white/84 p-6 shadow-[0_24px_80px_rgb(70_50_18/0.15)] backdrop-blur-2xl dark:bg-black/58 sm:p-8 xl:p-9">
               <button
@@ -253,13 +259,23 @@ export function LoginPage() {
             />
           </div>
 
-          <section className="relative hidden h-[640px] min-h-0 overflow-hidden rounded-[1.5rem] border border-matrix-gold/20 bg-white/44 p-8 shadow-[0_24px_90px_rgb(70_50_18/0.12)] backdrop-blur-xl dark:bg-white/[0.045] 2xl:p-10 xl:block">
+          <section
+            className={`relative h-[640px] min-h-0 overflow-hidden rounded-[1.5rem] border border-matrix-gold/20 bg-white/44 p-8 shadow-[0_24px_90px_rgb(70_50_18/0.12)] backdrop-blur-xl dark:bg-white/[0.045] 2xl:p-10 ${
+              plansOpen ? "hidden min-[1600px]:block" : "hidden xl:block"
+            }`}
+          >
             <div className="login-hero-wave" aria-hidden="true" />
-            <div className="relative z-10 flex h-full min-h-0 flex-col justify-between gap-6">
-              <div className="grid min-h-0 gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(360px,0.85fr)] xl:items-start 2xl:gap-8">
-                <div className="max-w-[520px] pt-4 xl:pt-8 2xl:pt-12">
+            <div className={`relative z-10 flex h-full min-h-0 flex-col gap-6 ${plansOpen ? "justify-start min-[1800px]:justify-between" : "justify-between"}`}>
+              <div
+                className={`grid min-h-0 gap-5 ${
+                  plansOpen
+                    ? "min-[1800px]:grid-cols-[minmax(0,0.95fr)_minmax(360px,0.85fr)] min-[1800px]:items-start 2xl:gap-8"
+                    : "xl:grid-cols-[minmax(0,0.95fr)_minmax(360px,0.85fr)] xl:items-start 2xl:gap-8"
+                }`}
+              >
+                <div className={plansOpen ? "max-w-[560px] pt-2 min-[1800px]:pt-8" : "max-w-[520px] pt-4 xl:pt-8 2xl:pt-12"}>
                   <Sparkles className="mb-5 h-10 w-10 text-matrix-gold" />
-                  <h2 className="text-4xl font-bold leading-tight tracking-normal text-matrix-fg xl:text-[2.85rem] 2xl:text-5xl">
+                  <h2 className={`font-bold leading-tight tracking-normal text-matrix-fg ${plansOpen ? "text-4xl min-[1800px]:text-[2.85rem] min-[1900px]:text-5xl" : "text-4xl xl:text-[2.85rem] 2xl:text-5xl"}`}>
                     Automacao que conecta.
                     <br />
                     Dados que <span className="text-matrix-goldDark dark:text-matrix-gold">transformam</span>.
@@ -294,7 +310,11 @@ export function LoginPage() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3 rounded-2xl border border-matrix-gold/20 bg-white/82 p-3 shadow-[0_14px_50px_rgb(70_50_18/0.10)] backdrop-blur-md dark:bg-zinc-950/76 2xl:grid-cols-4 2xl:p-4">
+              <div
+                className={`grid-cols-2 gap-3 rounded-2xl border border-matrix-gold/20 bg-white/82 p-3 shadow-[0_14px_50px_rgb(70_50_18/0.10)] backdrop-blur-md dark:bg-zinc-950/76 2xl:grid-cols-4 2xl:p-4 ${
+                  plansOpen ? "hidden min-[1800px]:grid" : "grid"
+                }`}
+              >
                 {featureCards.map((feature) => {
                   const Icon = feature.icon;
                   return (
