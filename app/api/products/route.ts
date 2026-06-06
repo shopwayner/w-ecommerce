@@ -3,6 +3,21 @@ import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
 import { productCreateSchema } from "@/lib/validation";
 
+function getTestMetadata(blockedFields: unknown) {
+  if (!blockedFields || typeof blockedFields !== "object" || Array.isArray(blockedFields)) {
+    return {};
+  }
+
+  const fields = blockedFields as Record<string, unknown>;
+
+  return {
+    unit: typeof fields.unit === "string" ? fields.unit : null,
+    origin: typeof fields.origin === "string" ? fields.origin : null,
+    displayValue: typeof fields.displayValue === "string" ? fields.displayValue : null,
+    salePriceDisplay: typeof fields.salePriceDisplay === "string" ? fields.salePriceDisplay : null
+  };
+}
+
 export async function GET() {
   const auth = await requireApiAuth("products:read");
   if (!auth.ok) return auth.response;
@@ -15,17 +30,25 @@ export async function GET() {
   });
 
   return NextResponse.json({
-    data: products.map((product) => ({
-      id: product.id,
-      name: product.name,
-      sku: product.sku,
-      ean: product.ean,
-      category: product.category,
-      status: product.status,
-      price: product.prices[0]?.salePrice.toString() ?? "0",
-      stock: product.inventory.reduce((total, item) => total + item.physicalQuantity - item.reservedQuantity, 0),
-      updatedAt: product.updatedAt
-    }))
+    data: products.map((product) => {
+      const metadata = getTestMetadata(product.blockedFields);
+
+      return {
+        id: product.id,
+        name: product.name,
+        sku: product.sku,
+        ean: product.ean,
+        category: product.category,
+        origin: metadata.origin ?? product.brand,
+        unit: metadata.unit,
+        status: product.status,
+        displayValue: metadata.displayValue,
+        salePriceDisplay: metadata.salePriceDisplay,
+        price: product.prices[0]?.salePrice.toString() ?? "0",
+        stock: product.inventory.reduce((total, item) => total + item.physicalQuantity - item.reservedQuantity, 0),
+        updatedAt: product.updatedAt
+      };
+    })
   });
 }
 
