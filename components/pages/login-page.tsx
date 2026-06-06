@@ -25,10 +25,10 @@ import {
 import { Button } from "@/components/ui";
 
 const heroCards = [
-  { label: "Pedidos importados hoje", value: "86", hint: "3 canais", icon: ShoppingCart, className: "right-6 top-8 w-64 2xl:right-10 2xl:w-72" },
-  { label: "Faturamento acumulado", value: "R$ 624.101,00", hint: "+18,6% vs ontem", icon: TrendingUp, className: "right-20 top-[12.75rem] w-72 2xl:right-28 2xl:w-80" },
-  { label: "Produtos sincronizados", value: "1.248", hint: "+38 hoje", icon: PackageCheck, className: "left-[42%] top-[20.5rem] w-64 2xl:w-72" },
-  { label: "Automacoes ativas", value: "432", hint: "Ultimas 24h", icon: Workflow, className: "right-8 bottom-24 w-64 2xl:right-12 2xl:w-72" }
+  { label: "Pedidos importados hoje", value: "86", hint: "3 canais", icon: ShoppingCart },
+  { label: "Faturamento acumulado", value: "R$ 624.101,00", hint: "+18,6% vs ontem", icon: TrendingUp },
+  { label: "Produtos sincronizados", value: "1.248", hint: "+38 hoje", icon: PackageCheck },
+  { label: "Automacoes ativas", value: "432", hint: "Ultimas 24h", icon: Workflow }
 ];
 
 const featureCards = [
@@ -120,7 +120,7 @@ export function LoginPage() {
     <main className="login-premium-shell min-h-[100dvh] bg-matrix-bg text-matrix-fg lg:overflow-hidden">
       <div className="login-gold-lines" aria-hidden="true" />
       <div className="relative mx-auto flex min-h-[100dvh] w-full max-w-[1560px] flex-col px-4 py-4 sm:px-6 lg:px-8">
-        <div className="grid min-h-0 flex-1 items-center gap-8 py-4 lg:grid-cols-[minmax(420px,auto)_minmax(0,1fr)] xl:gap-12">
+        <div className="grid min-h-0 flex-1 items-center gap-8 py-4 xl:grid-cols-[minmax(420px,auto)_minmax(0,1fr)] xl:gap-12">
           <div className="relative mx-auto flex w-full max-w-[880px] items-center justify-center gap-0 lg:justify-start">
             <section className="login-card-motion relative z-20 w-full max-w-[500px] rounded-[1.25rem] border border-matrix-gold/45 bg-white/84 p-6 shadow-[0_24px_80px_rgb(70_50_18/0.15)] backdrop-blur-2xl dark:bg-black/58 sm:p-8 xl:p-9">
               <button
@@ -253,53 +253,59 @@ export function LoginPage() {
             />
           </div>
 
-          <section className="relative hidden h-[600px] min-h-0 overflow-hidden rounded-[1.5rem] border border-matrix-gold/20 bg-white/44 p-8 shadow-[0_24px_90px_rgb(70_50_18/0.12)] backdrop-blur-xl dark:bg-white/[0.045] xl:h-[640px] xl:p-10 lg:block">
+          <section className="relative hidden h-[640px] min-h-0 overflow-hidden rounded-[1.5rem] border border-matrix-gold/20 bg-white/44 p-8 shadow-[0_24px_90px_rgb(70_50_18/0.12)] backdrop-blur-xl dark:bg-white/[0.045] 2xl:p-10 xl:block">
             <div className="login-hero-wave" aria-hidden="true" />
-            <div className="relative z-10 max-w-[520px] pt-20 xl:pt-24">
-              <Sparkles className="mb-6 h-10 w-10 text-matrix-gold" />
-              <h2 className="text-4xl font-bold leading-tight tracking-normal text-matrix-fg xl:text-5xl">
-                Automacao que conecta.
-                <br />
-                Dados que <span className="text-matrix-goldDark dark:text-matrix-gold">transformam</span>.
-              </h2>
-              <p className="mt-5 max-w-md text-base leading-7 text-matrix-muted xl:text-lg xl:leading-8">
-                Gestao inteligente de produtos, pedidos, integracoes e performance em um so lugar.
-              </p>
-            </div>
-
-            {heroCards.map((card, index) => {
-              const Icon = card.icon;
-              return (
-                <div
-                  key={card.label}
-                  className={`login-float-card absolute z-20 rounded-xl border border-matrix-gold/25 bg-white/88 p-4 shadow-[0_16px_55px_rgb(70_50_18/0.12)] backdrop-blur-md dark:bg-zinc-950/82 ${card.className}`}
-                  style={{ animationDelay: `${180 + index * 120}ms` }}
-                >
-                  <div className="flex items-start gap-4">
-                    <div className="grid h-10 w-10 place-items-center rounded-lg bg-matrix-goldSoft/70 text-matrix-goldDark">
-                      <Icon className="h-5 w-5" />
-                    </div>
-                    <div>
-                      <p className="text-sm font-semibold text-matrix-fg">{card.label}</p>
-                      <p className="mt-1.5 text-2xl font-bold text-matrix-fg">{card.value}</p>
-                      <p className="mt-1.5 text-sm text-matrix-muted">{card.hint}</p>
-                    </div>
-                  </div>
+            <div className="relative z-10 flex h-full min-h-0 flex-col justify-between gap-6">
+              <div className="grid min-h-0 gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(360px,0.85fr)] xl:items-start 2xl:gap-8">
+                <div className="max-w-[520px] pt-4 xl:pt-8 2xl:pt-12">
+                  <Sparkles className="mb-5 h-10 w-10 text-matrix-gold" />
+                  <h2 className="text-4xl font-bold leading-tight tracking-normal text-matrix-fg xl:text-[2.85rem] 2xl:text-5xl">
+                    Automacao que conecta.
+                    <br />
+                    Dados que <span className="text-matrix-goldDark dark:text-matrix-gold">transformam</span>.
+                  </h2>
+                  <p className="mt-5 max-w-md text-base leading-7 text-matrix-muted xl:text-lg xl:leading-8">
+                    Gestao inteligente de produtos, pedidos, integracoes e performance em um so lugar.
+                  </p>
                 </div>
-              );
-            })}
 
-            <div className="absolute bottom-6 left-6 right-6 z-20 grid grid-cols-4 rounded-2xl border border-matrix-gold/20 bg-white/82 p-3 shadow-[0_14px_50px_rgb(70_50_18/0.10)] backdrop-blur-md dark:bg-zinc-950/76 xl:bottom-8 xl:left-8 xl:right-8 xl:p-4">
-              {featureCards.map((feature) => {
-                const Icon = feature.icon;
-                return (
-                  <div key={feature.title} className="border-r border-matrix-border px-3 last:border-r-0 xl:px-4">
-                    <Icon className="h-6 w-6 text-matrix-goldDark dark:text-matrix-gold" />
-                    <p className="mt-2 text-xs font-semibold text-matrix-fg xl:text-sm">{feature.title}</p>
-                    <p className="mt-1 text-[11px] leading-4 text-matrix-muted xl:text-xs xl:leading-5">{feature.detail}</p>
-                  </div>
-                );
-              })}
+                <div className="grid min-w-0 grid-cols-2 gap-3 xl:pt-2 2xl:gap-4">
+                  {heroCards.map((card, index) => {
+                    const Icon = card.icon;
+                    return (
+                      <div
+                        key={card.label}
+                        className="login-float-card min-w-0 rounded-xl border border-matrix-gold/25 bg-white/88 p-3 shadow-[0_16px_55px_rgb(70_50_18/0.12)] backdrop-blur-md dark:bg-zinc-950/82 2xl:p-4"
+                        style={{ animationDelay: `${180 + index * 120}ms` }}
+                      >
+                        <div className="flex min-w-0 items-start gap-3 2xl:gap-4">
+                          <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-matrix-goldSoft/70 text-matrix-goldDark">
+                            <Icon className="h-5 w-5" />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="text-xs font-semibold leading-5 text-matrix-fg 2xl:text-sm">{card.label}</p>
+                            <p className="mt-1 text-xl font-bold leading-tight text-matrix-fg 2xl:text-2xl">{card.value}</p>
+                            <p className="mt-1 text-xs leading-5 text-matrix-muted 2xl:text-sm">{card.hint}</p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 rounded-2xl border border-matrix-gold/20 bg-white/82 p-3 shadow-[0_14px_50px_rgb(70_50_18/0.10)] backdrop-blur-md dark:bg-zinc-950/76 2xl:grid-cols-4 2xl:p-4">
+                {featureCards.map((feature) => {
+                  const Icon = feature.icon;
+                  return (
+                    <div key={feature.title} className="min-w-0 rounded-xl border border-matrix-border/70 bg-white/44 p-3 dark:bg-white/[0.03] 2xl:border-0 2xl:bg-transparent 2xl:px-4">
+                      <Icon className="h-5 w-5 text-matrix-goldDark dark:text-matrix-gold 2xl:h-6 2xl:w-6" />
+                      <p className="mt-2 text-xs font-semibold leading-5 text-matrix-fg 2xl:text-sm">{feature.title}</p>
+                      <p className="mt-1 text-[11px] leading-4 text-matrix-muted 2xl:text-xs 2xl:leading-5">{feature.detail}</p>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </section>
         </div>
