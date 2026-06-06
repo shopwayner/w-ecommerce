@@ -77,9 +77,9 @@ function buildCompatibility(productName: string) {
   return inferred.length ? inferred : ["Compatibilidade nao confirmada"];
 }
 
-export async function generateProductEnrichmentDraft(product: ProductForEnrichment) {
+export async function generateProductEnrichmentDraft(product: ProductForEnrichment, options: { organizationId?: string } = {}) {
   const metadata = readMetadata(product);
-  const mercadoLivre = await searchMercadoLivreProduct({ ean: product.ean, name: product.name });
+  const mercadoLivre = await searchMercadoLivreProduct({ ean: product.ean, name: product.name, organizationId: options.organizationId });
   const mercadoLivreTitle = limitMarketplaceTitle(mercadoLivre.bestResult?.title);
   const generatedTitle = mercadoLivreTitle ?? buildSuggestedTitle(product);
   const searchMode = product.ean ? "EAN/GTIN" : "nome do produto";

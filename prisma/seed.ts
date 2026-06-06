@@ -105,6 +105,7 @@ async function deleteBusinessData(organizationId: string) {
   await prisma.inventoryBalance.deleteMany({ where: { organizationId } });
   await prisma.inventoryMovement.deleteMany({ where: { organizationId } });
   await prisma.blingToken.deleteMany({ where: { organizationId } });
+  await prisma.mercadoLivreConnection.deleteMany({ where: { organizationId } });
   await prisma.oAuthState.deleteMany({ where: { organizationId } });
   await prisma.syncRule.deleteMany({ where: { organizationId } });
   await prisma.syncJob.deleteMany({ where: { organizationId } });

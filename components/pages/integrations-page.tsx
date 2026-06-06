@@ -17,6 +17,19 @@ type Connection = {
 };
 
 type Limit = { allowed: boolean; current: number; limit: number };
+type MercadoLivreConnection = {
+  id: string;
+  siteId: string;
+  status: "ACTIVE" | "EXPIRED" | "ERROR" | "DISCONNECTED" | "PENDING";
+  statusLabel: string;
+  externalUserId: string | null;
+  connectedAt: string;
+  updatedAt: string;
+  expiresAt: string;
+  lastRefreshAt: string | null;
+  lastError: string | null;
+};
+type MercadoLivreStatus = { configured: boolean; data: MercadoLivreConnection | null };
 
 const roleLabels = { MATRIX: "Matriz", BRANCH: "Filial", OTHER: "Outra" };
 const statusLabels = { ACTIVE: "Ativa", EXPIRED: "Expirada", ERROR: "Erro", DISCONNECTED: "Desconectada", PENDING: "Pendente" };
@@ -24,17 +37,26 @@ const statusLabels = { ACTIVE: "Ativa", EXPIRED: "Expirada", ERROR: "Erro", DISC
 export function IntegrationsPage() {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [limit, setLimit] = useState<Limit>({ allowed: false, current: 0, limit: 0 });
+  const [mercadoLivre, setMercadoLivre] = useState<MercadoLivreStatus>({ configured: false, data: null });
   const [modalOpen, setModalOpen] = useState(false);
   const [name, setName] = useState("Bling");
   const [role, setRole] = useState<Connection["role"]>("MATRIX");
   const [message, setMessage] = useState("");
 
   async function load() {
-    const response = await fetch("/api/integrations");
-    if (!response.ok) return;
-    const payload = await response.json();
-    setConnections(payload.data ?? []);
-    setLimit(payload.limit ?? { allowed: false, current: 0, limit: 0 });
+    const [response, mercadoLivreResponse] = await Promise.all([
+      fetch("/api/integrations"),
+      fetch("/api/integrations/mercadolivre")
+    ]);
+    if (response.ok) {
+      const payload = await response.json();
+      setConnections(payload.data ?? []);
+      setLimit(payload.limit ?? { allowed: false, current: 0, limit: 0 });
+    }
+    if (mercadoLivreResponse.ok) {
+      const payload = (await mercadoLivreResponse.json()) as MercadoLivreStatus;
+      setMercadoLivre(payload);
+    }
   }
 
   useEffect(() => {
@@ -68,6 +90,25 @@ export function IntegrationsPage() {
     setMessage("");
     const response = await fetch(`/api/integrations/${id}`, { method: "DELETE" });
     setMessage(response.ok ? "Conexao desconectada localmente." : "Nao foi possivel desconectar.");
+    await load();
+  }
+
+  async function connectMercadoLivre() {
+    setMessage("");
+    const response = await fetch("/api/integrations/mercadolivre/auth-url");
+    const payload = await response.json();
+    if (!response.ok) {
+      setMessage(payload.error ?? "Nao foi possivel iniciar OAuth Mercado Livre.");
+      return;
+    }
+
+    window.location.assign(payload.authorizationUrl);
+  }
+
+  async function disconnectMercadoLivre() {
+    setMessage("");
+    const response = await fetch("/api/integrations/mercadolivre", { method: "DELETE" });
+    setMessage(response.ok ? "Mercado Livre desconectado localmente." : "Nao foi possivel desconectar Mercado Livre.");
     await load();
   }
 
@@ -122,6 +163,45 @@ export function IntegrationsPage() {
           )}
         </Card>
         <div className="space-y-6">
+          <Card>
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="flex items-center gap-2 font-semibold text-white"><PlugZap className="h-4 w-4 text-yellow-300" /> Mercado Livre</h3>
+                <p className="mt-1 text-sm text-slate-400">OAuth por organizacao para o Cadastro Inteligente.</p>
+              </div>
+              <Badge tone={mercadoLivre.data?.status === "ACTIVE" ? "success" : mercadoLivre.data?.status === "ERROR" ? "danger" : "muted"}>
+                {mercadoLivre.data?.statusLabel ?? "Nao conectado"}
+              </Badge>
+            </div>
+            {!mercadoLivre.configured ? (
+              <div className="mb-4 rounded-md border border-orange-500/20 bg-orange-500/10 px-3 py-2 text-sm text-orange-200">
+                Configure MERCADOLIVRE_CLIENT_ID, MERCADOLIVRE_CLIENT_SECRET e MERCADOLIVRE_REDIRECT_URI no servidor.
+              </div>
+            ) : null}
+            {mercadoLivre.data ? (
+              <div className="grid gap-2 text-sm text-slate-400">
+                <span>Site ID: <strong className="text-slate-200">{mercadoLivre.data.siteId}</strong></span>
+                <span>Conectado em: {new Date(mercadoLivre.data.connectedAt).toLocaleString("pt-BR")}</span>
+                <span>Ultima atualizacao: {new Date(mercadoLivre.data.updatedAt).toLocaleString("pt-BR")}</span>
+                {mercadoLivre.data.lastRefreshAt ? <span>Ultimo refresh: {new Date(mercadoLivre.data.lastRefreshAt).toLocaleString("pt-BR")}</span> : null}
+                {mercadoLivre.data.lastError ? <span className="text-red-200">Erro: {mercadoLivre.data.lastError}</span> : null}
+              </div>
+            ) : (
+              <p className="text-sm text-slate-400">Nenhuma conta Mercado Livre conectada para esta organizacao.</p>
+            )}
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button onClick={connectMercadoLivre} disabled={!mercadoLivre.configured}>
+                <PlugZap className="h-4 w-4" />
+                Conectar Mercado Livre
+              </Button>
+              {mercadoLivre.data ? (
+                <Button variant="secondary" onClick={disconnectMercadoLivre}>
+                  <Trash2 className="h-4 w-4" />
+                  Desconectar
+                </Button>
+              ) : null}
+            </div>
+          </Card>
           <Card>
             <h3 className="mb-4 flex items-center gap-2 font-semibold text-white"><KeyRound className="h-4 w-4 text-cyan-300" /> OAuth Bling</h3>
             <div className="space-y-3 text-sm text-slate-400">

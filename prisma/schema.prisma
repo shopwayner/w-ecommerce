@@ -60,6 +60,7 @@ enum BlingEnvironment {
 
 enum OAuthProvider {
   BLING
+  MERCADOLIVRE
 }
 
 enum SyncDirection {
@@ -111,6 +112,7 @@ model Organization {
   users               OrganizationUser[]
   subscription        Subscription?
   blingConnections    BlingConnection[]
+  mercadoLivreConnections MercadoLivreConnection[]
   oauthStates         OAuthState[]
   syncRules           SyncRule[]
   syncJobs            SyncJob[]
@@ -226,6 +228,34 @@ model BlingToken {
   @@index([organizationId])
   @@index([blingConnectionId])
   @@index([organizationId, blingConnectionId])
+}
+
+model MercadoLivreConnection {
+  id                    String           @id @default(cuid())
+  organizationId        String
+  userId                String?
+  name                  String           @default("Mercado Livre")
+  siteId                String           @default("MLB")
+  status                ConnectionStatus @default(PENDING)
+  externalUserId        String?
+  tokenType             String           @default("Bearer")
+  accessTokenEncrypted  String
+  refreshTokenEncrypted String
+  scope                 String?
+  expiresAt             DateTime
+  lastRefreshAt         DateTime?
+  lastError             String?
+  connectedAt           DateTime         @default(now())
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+  organization          Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([userId])
+  @@index([siteId])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([updatedAt])
 }
 
 model OAuthState {

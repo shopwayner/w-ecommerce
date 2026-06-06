@@ -56,7 +56,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     return NextResponse.json({ error: "Produto nao encontrado" }, { status: 404 });
   }
 
-  const generated = await generateProductEnrichmentDraft(product);
+  const generated = await generateProductEnrichmentDraft(product, { organizationId: auth.context.organizationId });
   const generatedTitle = typeof body.generatedTitle === "string" ? body.generatedTitle : generated.generatedTitle;
 
   if (generatedTitle.length > 60) {

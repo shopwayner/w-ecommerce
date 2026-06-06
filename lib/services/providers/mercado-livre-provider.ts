@@ -82,7 +82,12 @@ async function refreshAccessToken() {
   return payload.access_token ?? null;
 }
 
-async function getTokenForSearch() {
+async function getTokenForSearch(organizationId?: string) {
+  if (organizationId) {
+    const connectionToken = await mercadoLivreOAuthService.getAccessTokenForOrganization(organizationId).catch(() => null);
+    if (connectionToken) return connectionToken;
+  }
+
   return getAccessToken() ?? (await refreshAccessToken());
 }
 
@@ -155,21 +160,25 @@ function scoreResult(item: MercadoLivreItem, query: string) {
 
 export async function searchMercadoLivreProduct({
   ean,
-  name
+  name,
+  organizationId
 }: {
   ean: string | null;
   name: string;
+  organizationId?: string;
 }): Promise<MercadoLivreProviderResult> {
-  const configured = isConfigured();
   const query = ean || name;
   const searchMode = ean ? "EAN/GTIN" : "nome do produto";
-
-  if (!configured) {
-    return { configured, status: "Nao configurado", searchMode, query, bestResult: null, alternatives: [] };
-  }
+  let configured = isConfigured();
 
   try {
-    const token = await getTokenForSearch();
+    const token = await getTokenForSearch(organizationId);
+    configured = Boolean(token) || configured;
+
+    if (!configured) {
+      return { configured, status: "Nao configurado", searchMode, query, bestResult: null, alternatives: [] };
+    }
+
     if (!token) {
       return { configured, status: "Erro na busca", searchMode, query, bestResult: null, alternatives: [], error: "Token do Mercado Livre indisponivel." };
     }
@@ -211,3 +220,4 @@ export async function searchMercadoLivreProduct({
     };
   }
 }
+import { mercadoLivreOAuthService } from "@/lib/services/mercado-livre-oauth-service";
