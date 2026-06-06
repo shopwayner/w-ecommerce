@@ -38,7 +38,21 @@ type ProductEnrichmentDraft = {
   packageContent: string[];
   installationTutorial: string;
   careInstructions: string;
-  sources: Array<{ provider: string; status: string; query: string | null; url: string | null; summary: string }>;
+  sources: Array<{
+    provider: string;
+    status: string;
+    query: string | null;
+    url: string | null;
+    summary: string;
+    title?: string | null;
+    price?: number | null;
+    image?: string | null;
+    category?: string | null;
+    brand?: string | null;
+    searchMode?: string;
+    configured?: boolean;
+    alternatives?: Array<{ title: string | null; price: number | null; url: string | null }>;
+  }>;
   status: string;
   updatedAt: string;
 };
@@ -900,9 +914,34 @@ function SmartRegistrationModal({
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 {(draft?.sources ?? []).map((source) => (
                   <div key={source.provider} className="rounded-md border border-matrix-border bg-matrix-panel/70 p-3">
-                    <p className="font-semibold text-matrix-fg">{source.provider}</p>
-                    <p className="mt-1 text-xs text-matrix-muted">{source.status}</p>
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="font-semibold text-matrix-fg">{source.provider}</p>
+                      {typeof source.configured === "boolean" ? (
+                        <Badge tone={source.configured ? "success" : "muted"}>{source.configured ? "Configurado" : "Nao configurado"}</Badge>
+                      ) : null}
+                    </div>
+                    <p className="mt-1 text-xs text-matrix-muted">
+                      {source.status}
+                      {source.searchMode ? ` por ${source.searchMode}` : ""}
+                    </p>
+                    {source.title ? <p className="mt-2 text-sm font-semibold text-matrix-fg">{source.title}</p> : null}
+                    {source.price !== null && source.price !== undefined ? (
+                      <p className="mt-1 text-xs text-matrix-muted">Preco ref.: {source.price.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}</p>
+                    ) : null}
+                    {source.category || source.brand ? (
+                      <p className="mt-1 text-xs text-matrix-muted">
+                        {[source.brand, source.category].filter(Boolean).join(" - ")}
+                      </p>
+                    ) : null}
+                    {source.url ? (
+                      <a className="mt-2 block break-all text-xs font-semibold text-matrix-goldDark hover:underline" href={source.url} rel="noreferrer" target="_blank">
+                        Fonte Mercado Livre
+                      </a>
+                    ) : null}
                     <p className="mt-2 text-xs text-matrix-muted">{source.summary}</p>
+                    {source.alternatives?.length ? (
+                      <p className="mt-2 text-xs text-matrix-muted">{source.alternatives.length} alternativa(s) encontrada(s) para revisao.</p>
+                    ) : null}
                   </div>
                 ))}
               </div>

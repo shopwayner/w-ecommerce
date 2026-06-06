@@ -22,7 +22,7 @@ export async function POST(request: Request) {
   const drafts = [];
 
   for (const product of products) {
-    const generated = generateProductEnrichmentDraft(product);
+    const generated = await generateProductEnrichmentDraft(product);
     const draft = await prisma.productEnrichmentDraft.upsert({
       where: {
         organizationId_productId: {

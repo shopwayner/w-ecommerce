@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import { searchMercadoLivreProduct } from "@/lib/services/providers/mercado-livre-provider";
 
 type ProductForEnrichment = {
   id: string;
@@ -53,6 +54,12 @@ function buildSuggestedTitle(product: ProductForEnrichment) {
   return base.length <= 60 ? base : base.slice(0, 57).trimEnd() + "...";
 }
 
+function limitMarketplaceTitle(value: string | null | undefined) {
+  if (!value) return null;
+  const normalized = normalizeTitle(value);
+  return normalized.length <= 60 ? normalized : normalized.slice(0, 57).trimEnd() + "...";
+}
+
 function stockTotal(product: ProductForEnrichment) {
   return product.inventory.reduce((total, item) => total + item.physicalQuantity - item.reservedQuantity, 0);
 }
@@ -70,9 +77,11 @@ function buildCompatibility(productName: string) {
   return inferred.length ? inferred : ["Compatibilidade nao confirmada"];
 }
 
-export function generateProductEnrichmentDraft(product: ProductForEnrichment) {
+export async function generateProductEnrichmentDraft(product: ProductForEnrichment) {
   const metadata = readMetadata(product);
-  const generatedTitle = buildSuggestedTitle(product);
+  const mercadoLivre = await searchMercadoLivreProduct({ ean: product.ean, name: product.name });
+  const mercadoLivreTitle = limitMarketplaceTitle(mercadoLivre.bestResult?.title);
+  const generatedTitle = mercadoLivreTitle ?? buildSuggestedTitle(product);
   const searchMode = product.ean ? "EAN/GTIN" : "nome do produto";
   const sources = [
     {
@@ -84,10 +93,34 @@ export function generateProductEnrichmentDraft(product: ProductForEnrichment) {
     },
     {
       provider: "Mercado Livre",
-      status: "Nao configurado",
-      query: product.ean ?? product.name,
-      url: null,
-      summary: "API do Mercado Livre nao configurada neste ambiente."
+      status: mercadoLivre.status,
+      query: mercadoLivre.query,
+      url: mercadoLivre.bestResult?.url ?? null,
+      title: mercadoLivre.bestResult?.title ?? null,
+      price: mercadoLivre.bestResult?.price ?? null,
+      image: mercadoLivre.bestResult?.image ?? null,
+      category: mercadoLivre.bestResult?.category ?? null,
+      brand: mercadoLivre.bestResult?.brand ?? null,
+      attributes: mercadoLivre.bestResult?.attributes ?? {},
+      compatibility: mercadoLivre.bestResult?.compatibility ?? [],
+      alternatives: mercadoLivre.alternatives.map((alternative) => ({
+        title: alternative.title,
+        price: alternative.price,
+        url: alternative.url,
+        image: alternative.image,
+        category: alternative.category,
+        brand: alternative.brand
+      })),
+      searchMode: mercadoLivre.searchMode,
+      configured: mercadoLivre.configured,
+      summary:
+        mercadoLivre.status === "Encontrado" && mercadoLivre.bestResult?.title
+          ? `Titulo encontrado: ${mercadoLivre.bestResult.title}`
+          : mercadoLivre.status === "Nao configurado"
+            ? "API do Mercado Livre nao configurada neste ambiente."
+            : mercadoLivre.status === "Erro na busca"
+              ? "Erro na busca do Mercado Livre. Rascunho local preservado."
+              : "Nenhum resultado encontrado no Mercado Livre."
     },
     {
       provider: "Google",
@@ -103,13 +136,13 @@ export function generateProductEnrichmentDraft(product: ProductForEnrichment) {
     SKU: product.sku,
     "EAN/GTIN": product.ean ?? "Nao informado",
     Unidade: metadata.unit,
-    Categoria: product.category ?? "Nao informado",
-    Aplicacao: buildCompatibility(product.name).join("; "),
+    Categoria: mercadoLivre.bestResult?.category ?? product.category ?? "Nao informado",
+    Aplicacao: (mercadoLivre.bestResult?.compatibility.length ? mercadoLivre.bestResult.compatibility : buildCompatibility(product.name)).join("; "),
     Material: product.name.toUpperCase().includes("INOX") ? "Inox (inferido pelo nome original)" : "Nao informado",
     Medidas: "Nao informado",
-    Marca: "Nao informado",
+    Marca: mercadoLivre.bestResult?.brand ?? "Nao informado",
     Origem: metadata.origin,
-    Observacoes: "Rascunho gerado para revisao. Informacoes externas nao configuradas."
+    Observacoes: mercadoLivre.bestResult ? "Rascunho usa resultado do Mercado Livre e precisa de revisao." : "Rascunho gerado para revisao. Informacoes externas nao configuradas."
   };
 
   return {
@@ -123,7 +156,7 @@ export function generateProductEnrichmentDraft(product: ProductForEnrichment) {
       Comprimento: "Nao informado",
       Peso: "Nao informado"
     },
-    compatibility: buildCompatibility(product.name),
+    compatibility: mercadoLivre.bestResult?.compatibility.length ? mercadoLivre.bestResult.compatibility : buildCompatibility(product.name),
     advantages: ["Cadastro estruturado para e-commerce", "Informacoes organizadas para revisao", "Base pronta para complementar com fontes oficiais"],
     packageContent: [`1x ${generatedTitle}`],
     installationTutorial:
@@ -133,9 +166,14 @@ export function generateProductEnrichmentDraft(product: ProductForEnrichment) {
     sources,
     status: "NEEDS_REVIEW",
     search: {
-      mode: searchMode,
+      mode: mercadoLivre.searchMode ?? searchMode,
       status: "Precisa de revisao",
-      rawResult: "Pesquisa externa nao configurada. Rascunho basico criado a partir do cadastro local."
+      rawResult:
+        mercadoLivre.status === "Encontrado"
+          ? `Mercado Livre consultado por ${mercadoLivre.searchMode}. Resultado principal: ${mercadoLivre.bestResult?.title ?? "sem titulo"}.`
+          : mercadoLivre.status === "Nao configurado"
+            ? "Pesquisa externa nao configurada. Rascunho basico criado a partir do cadastro local."
+            : `${mercadoLivre.status}. Rascunho basico criado a partir do cadastro local.`
     },
     baseData: {
       name: product.name,
@@ -152,7 +190,7 @@ export function generateProductEnrichmentDraft(product: ProductForEnrichment) {
   };
 }
 
-export function formatDraftContent(draft: ReturnType<typeof generateProductEnrichmentDraft>) {
+export function formatDraftContent(draft: Awaited<ReturnType<typeof generateProductEnrichmentDraft>>) {
   const specEntries = Object.entries(draft.technicalSpecs)
     .map(([key, value]) => `* ${key}: ${value}`)
     .join("\n");
