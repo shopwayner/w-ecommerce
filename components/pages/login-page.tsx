@@ -119,11 +119,15 @@ export function LoginPage() {
   return (
     <main className="login-premium-shell min-h-[100dvh] bg-matrix-bg text-matrix-fg lg:overflow-hidden">
       <div className="login-gold-lines" aria-hidden="true" />
-      <div className="relative mx-auto flex min-h-[100dvh] w-full max-w-[1760px] flex-col px-4 py-4 sm:px-6 lg:px-8">
+      <div
+        className={`relative mx-auto flex min-h-[100dvh] w-full flex-col px-4 py-4 sm:px-6 ${
+          plansOpen ? "max-w-[1920px] lg:px-4 2xl:px-6" : "max-w-[1760px] lg:px-8"
+        }`}
+      >
         <div
           className={`grid min-h-0 flex-1 items-center gap-8 py-4 ${
             plansOpen
-              ? "xl:grid-cols-[minmax(0,840px)] xl:justify-center min-[1600px]:grid-cols-[minmax(0,840px)_minmax(620px,1fr)] min-[1600px]:justify-stretch min-[1600px]:gap-10 2xl:gap-12"
+              ? "xl:grid-cols-[minmax(0,840px)] xl:justify-center min-[1600px]:grid-cols-[minmax(0,840px)_minmax(680px,1fr)] min-[1600px]:justify-stretch min-[1600px]:gap-4 min-[1728px]:grid-cols-[minmax(0,840px)_minmax(760px,1fr)] min-[1728px]:gap-6 min-[1900px]:grid-cols-[minmax(0,840px)_minmax(900px,1fr)]"
               : "xl:grid-cols-[minmax(420px,auto)_minmax(0,1fr)] xl:gap-12"
           }`}
         >
