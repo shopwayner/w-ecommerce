@@ -17,6 +17,8 @@ ALTER TYPE "ConnectionRole" ADD VALUE 'OTHER';
 
 ALTER TYPE "ConnectionStatus" ADD VALUE 'DISCONNECTED';
 ALTER TYPE "ConnectionStatus" ADD VALUE 'PENDING';
+COMMIT;
+BEGIN;
 
 -- AlterTable
 ALTER TABLE "BlingConnection" ADD COLUMN     "environment" "BlingEnvironment" NOT NULL DEFAULT 'PRODUCTION',
