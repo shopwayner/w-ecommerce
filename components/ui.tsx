@@ -91,14 +91,14 @@ export function EmptyState({ title, description, action }: { title: string; desc
   );
 }
 
-export function DataTable({ columns, rows, emptyMessage = "Nenhum registro encontrado." }: { columns: string[]; rows: ReactNode[][]; emptyMessage?: string }) {
+export function DataTable({ columns, rows, emptyMessage = "Nenhum registro encontrado." }: { columns: ReactNode[]; rows: ReactNode[][]; emptyMessage?: string }) {
   return (
     <div className="matrix-scroll overflow-x-auto rounded-md border border-matrix-border bg-matrix-panel">
       <table className="min-w-full divide-y divide-matrix-border text-left text-sm">
         <thead className="bg-matrix-panel2 text-xs uppercase text-matrix-muted">
           <tr>
-            {columns.map((column) => (
-              <th key={column} className="whitespace-nowrap px-3 py-2.5 font-semibold">
+            {columns.map((column, columnIndex) => (
+              <th key={columnIndex} className="whitespace-nowrap px-3 py-2.5 font-semibold">
                 {column}
               </th>
             ))}
