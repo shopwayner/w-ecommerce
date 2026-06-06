@@ -16,9 +16,35 @@ type ProductListItem = {
   status: string;
   displayValue: string | null;
   salePriceDisplay: string | null;
+  imageUrl: string | null;
+  hasEnrichmentDraft: boolean;
   price: string;
   stock: number;
   updatedAt: string;
+};
+
+type ProductEnrichmentDraft = {
+  id: string;
+  productId: string;
+  originalName: string;
+  generatedTitle: string;
+  generatedDescription: string;
+  technicalSpecs: Record<string, string>;
+  dimensions: Record<string, string>;
+  compatibility: string[];
+  advantages: string[];
+  packageContent: string[];
+  installationTutorial: string;
+  careInstructions: string;
+  sources: Array<{ provider: string; status: string; query: string | null; url: string | null; summary: string }>;
+  status: string;
+  updatedAt: string;
+};
+
+type EnrichmentResponse = {
+  data: ProductEnrichmentDraft;
+  search?: { mode: string; status: string; rawResult: string };
+  baseData?: Record<string, string | number>;
 };
 
 const statusLabel: Record<string, string> = {
@@ -70,6 +96,8 @@ function ProductCheckbox({
 export function ProductsPage() {
   const [open, setOpen] = useState(false);
   const [viewingProduct, setViewingProduct] = useState<ProductListItem | null>(null);
+  const [enrichmentProducts, setEnrichmentProducts] = useState<ProductListItem[] | null>(null);
+  const [activeEnrichmentProductId, setActiveEnrichmentProductId] = useState<string | null>(null);
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(new Set());
   const [products, setProducts] = useState<ProductListItem[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
@@ -131,9 +159,14 @@ export function ProductsPage() {
   }, [filters, products]);
 
   const visibleProductIds = useMemo(() => filteredProducts.map((product) => product.id), [filteredProducts]);
+  const selectedProducts = useMemo(() => products.filter((product) => selectedProductIds.has(product.id)), [products, selectedProductIds]);
   const selectedVisibleCount = visibleProductIds.filter((id) => selectedProductIds.has(id)).length;
   const allVisibleSelected = visibleProductIds.length > 0 && selectedVisibleCount === visibleProductIds.length;
   const someVisibleSelected = selectedVisibleCount > 0 && selectedVisibleCount < visibleProductIds.length;
+  const selectedProductsLabel =
+    selectedProductIds.size === 1 ? "1 produto selecionado" : `${selectedProductIds.size} produtos selecionados`;
+  const visibleProductsLabel =
+    filteredProducts.length === 1 ? "1 produto visivel" : `${filteredProducts.length} produtos visiveis`;
 
   function toggleProductSelection(productId: string, checked: boolean) {
     setSelectedProductIds((current) => {
@@ -159,6 +192,11 @@ export function ProductsPage() {
       }
       return next;
     });
+  }
+
+  function openEnrichment(productsToRegister: ProductListItem[]) {
+    setEnrichmentProducts(productsToRegister);
+    setActiveEnrichmentProductId(productsToRegister[0]?.id ?? null);
   }
 
   return (
@@ -193,9 +231,19 @@ export function ProductsPage() {
           ))}
         </div>
         <div className="mb-3 flex min-h-6 items-center justify-between gap-3 text-xs text-matrix-muted">
-          <span>{selectedProductIds.size ? `${selectedProductIds.size} produtos selecionados` : "Nenhum produto selecionado"}</span>
-          <span>{filteredProducts.length} produtos visiveis</span>
+          <span>{selectedProductIds.size ? selectedProductsLabel : "Nenhum produto selecionado"}</span>
+          <span>{visibleProductsLabel}</span>
         </div>
+        {selectedProducts.length ? (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-matrix-gold/25 bg-matrix-goldSoft/28 px-3 py-2">
+            <p className="text-sm font-semibold text-matrix-goldDark">
+              {selectedProducts.length === 1
+                ? "1 produto selecionado para cadastro"
+                : `${selectedProducts.length} produtos selecionados para cadastro`}
+            </p>
+            <Button onClick={() => openEnrichment(selectedProducts)}>Cadastrar selecionados</Button>
+          </div>
+        ) : null}
         <DataTable
           columns={[
             <ProductCheckbox
@@ -237,14 +285,33 @@ export function ProductsPage() {
             product.salePriceDisplay ?? "0,00",
             product.stock,
             "Sem Bling",
-            formatDate(product.updatedAt),
+            <div key={`${product.id}-updated`} className="flex items-center gap-2">
+              {formatDate(product.updatedAt)}
+              {product.hasEnrichmentDraft ? <Badge tone="info">Rascunho</Badge> : null}
+            </div>,
             <Button key={`${product.id}-actions`} variant="ghost" onClick={() => setViewingProduct(product)}>Ver</Button>
           ])}
           emptyMessage={loadingProducts ? "Carregando produtos..." : "Nenhum produto cadastrado ainda."}
         />
       </Card>
       {viewingProduct ? (
-        <ProductDetailsModal product={viewingProduct} onClose={() => setViewingProduct(null)} />
+        <ProductDetailsModal
+          product={viewingProduct}
+          onClose={() => setViewingProduct(null)}
+          onRegister={() => {
+            openEnrichment([viewingProduct]);
+            setViewingProduct(null);
+          }}
+        />
+      ) : null}
+      {enrichmentProducts ? (
+        <SmartRegistrationModal
+          activeProductId={activeEnrichmentProductId}
+          onActiveProductChange={setActiveEnrichmentProductId}
+          onClose={() => setEnrichmentProducts(null)}
+          onSaved={() => void loadProducts()}
+          products={enrichmentProducts}
+        />
       ) : null}
       {open ? (
         <div className="fixed inset-0 z-50 bg-black/50">
@@ -273,7 +340,7 @@ export function ProductsPage() {
   );
 }
 
-function ProductDetailsModal({ product, onClose }: { product: ProductListItem; onClose: () => void }) {
+function ProductDetailsModal({ product, onClose, onRegister }: { product: ProductListItem; onClose: () => void; onRegister: () => void }) {
   const details = [
     ["Nome do produto", product.name],
     ["SKU", product.sku],
@@ -340,7 +407,331 @@ function ProductDetailsModal({ product, onClose }: { product: ProductListItem; o
             Produto de teste/local
           </div>
         ) : null}
+
+        <div className="mt-5 flex justify-end">
+          <Button onClick={onRegister}>Cadastrar produto</Button>
+        </div>
       </section>
+    </div>
+  );
+}
+
+function formatGeneratedContent(draft: ProductEnrichmentDraft) {
+  const specs = Object.entries(draft.technicalSpecs).map(([key, value]) => `* ${key}: ${value}`).join("\n");
+  const dimensions = Object.entries(draft.dimensions).map(([key, value]) => `* ${key}: ${value}`).join("\n");
+
+  return `Titulo do Produto:
+${draft.generatedTitle}
+
+Descricao do Produto:
+${draft.generatedDescription}
+
+Ficha Tecnica:
+${specs}
+
+Dimensoes do Produto:
+${dimensions}
+
+Compatibilidade do Produto:
+${draft.compatibility.join("\n")}
+
+Vantagens:
+${draft.advantages.map((item) => `* ${item}`).join("\n")}
+
+Conteudo da Embalagem:
+${draft.packageContent.map((item) => `* ${item}`).join("\n")}
+
+Tutorial de Instalacao:
+${draft.installationTutorial}
+
+Cuidados e Manutencao:
+${draft.careInstructions}`;
+}
+
+function SmartRegistrationModal({
+  activeProductId,
+  onActiveProductChange,
+  onClose,
+  onSaved,
+  products
+}: {
+  activeProductId: string | null;
+  onActiveProductChange: (productId: string) => void;
+  onClose: () => void;
+  onSaved: () => void;
+  products: ProductListItem[];
+}) {
+  const activeProduct = products.find((product) => product.id === activeProductId) ?? products[0];
+  const [draft, setDraft] = useState<ProductEnrichmentDraft | null>(null);
+  const [search, setSearch] = useState<EnrichmentResponse["search"] | null>(null);
+  const [baseData, setBaseData] = useState<EnrichmentResponse["baseData"] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function generateDraft(product: ProductListItem) {
+    setLoading(true);
+    setMessage("");
+    try {
+      const response = await fetch(`/api/products/${product.id}/enrichment`, { method: "POST" });
+      const payload = (await response.json()) as EnrichmentResponse;
+
+      if (!response.ok) {
+        setMessage("Nao foi possivel gerar o rascunho.");
+        return;
+      }
+
+      setDraft(payload.data);
+      setSearch(payload.search ?? null);
+      setBaseData(payload.baseData ?? null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveDraft() {
+    if (!draft || !activeProduct || draft.generatedTitle.length > 60) return;
+
+    setSaving(true);
+    setMessage("");
+    try {
+      const response = await fetch(`/api/products/${activeProduct.id}/enrichment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(draft)
+      });
+      const payload = (await response.json()) as EnrichmentResponse;
+
+      if (!response.ok) {
+        setMessage("Nao foi possivel salvar. Confira o limite do titulo.");
+        return;
+      }
+
+      setDraft(payload.data);
+      setMessage("Rascunho salvo com sucesso.");
+      onSaved();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function processAll() {
+    setLoading(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/products/enrichment/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ productIds: products.map((product) => product.id) })
+      });
+
+      if (!response.ok) {
+        setMessage("Nao foi possivel processar o lote.");
+        return;
+      }
+
+      setMessage(`${products.length} rascunhos gerados para revisao.`);
+      onSaved();
+      if (activeProduct) await generateDraft(activeProduct);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (activeProduct) void generateDraft(activeProduct);
+    // generateDraft is intentionally recreated with local UI state setters only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProduct?.id]);
+
+  useEffect(() => {
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+
+  if (!activeProduct) return null;
+
+  const titleLength = draft?.generatedTitle.length ?? 0;
+  const titleTooLong = titleLength > 60;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 p-4 backdrop-blur-sm" onClick={onClose}>
+      <aside
+        aria-modal="true"
+        className="matrix-scroll ml-auto flex h-full w-full max-w-6xl flex-col overflow-y-auto rounded-xl border border-matrix-gold/30 bg-matrix-panel p-5 shadow-[0_24px_90px_rgb(0_0_0/0.35)]"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-matrix-goldDark">Marketplace</p>
+            <h3 className="mt-1 text-2xl font-bold text-matrix-fg">Cadastro inteligente do produto</h3>
+            <p className="mt-1 text-sm text-matrix-muted">Rascunho local para revisao. Nada sera publicado automaticamente.</p>
+          </div>
+          <button
+            aria-label="Fechar cadastro inteligente"
+            className="grid h-10 w-10 place-items-center rounded-md border border-matrix-border text-matrix-muted hover:border-matrix-gold/45 hover:text-matrix-goldDark"
+            onClick={onClose}
+            type="button"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="mt-5 grid gap-4 xl:grid-cols-[300px_1fr]">
+          <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <h4 className="font-semibold text-matrix-fg">Produtos selecionados</h4>
+              {products.length > 1 ? <Button onClick={processAll} variant="secondary">Processar todos</Button> : null}
+            </div>
+            <div className="mt-3 space-y-2">
+              {products.map((product) => (
+                <button
+                  key={product.id}
+                  className={`w-full rounded-md border px-3 py-2 text-left text-sm transition ${
+                    product.id === activeProduct.id ? "border-matrix-gold/60 bg-matrix-goldSoft/35 text-matrix-goldDark" : "border-matrix-border text-matrix-fg hover:border-matrix-gold/35"
+                  }`}
+                  onClick={() => onActiveProductChange(product.id)}
+                  type="button"
+                >
+                  <span className="block font-semibold">{product.name}</span>
+                  <span className="text-xs text-matrix-muted">{product.sku}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <div className="space-y-4">
+            <section className="grid gap-3 rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3 md:grid-cols-4">
+              {["Produto base", "Pesquisa e correcao", "Conteudo gerado", "Revisao final"].map((step, index) => (
+                <div key={step} className="rounded-md border border-matrix-border bg-matrix-panel/70 p-3">
+                  <p className="text-xs font-semibold text-matrix-goldDark">Etapa {index + 1}</p>
+                  <p className="mt-1 text-sm font-semibold text-matrix-fg">{step}</p>
+                </div>
+              ))}
+            </section>
+
+            <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
+              <div className="grid gap-3 md:grid-cols-4">
+                {[
+                  ["Nome atual", activeProduct.name],
+                  ["SKU", activeProduct.sku],
+                  ["EAN/GTIN", activeProduct.ean ?? "Nao informado"],
+                  ["Unidade", activeProduct.unit ?? "Nao informado"],
+                  ["Categoria", activeProduct.category ?? "Nao informado"],
+                  ["Origem", activeProduct.origin ?? "Nao informado"],
+                  ["Valor", activeProduct.displayValue ?? "Nao informado"],
+                  ["Preco venda", activeProduct.salePriceDisplay ?? "0,00"],
+                  ["Estoque", String(activeProduct.stock)],
+                  ["Status Bling", "Sem Bling"]
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-md border border-matrix-border bg-matrix-panel/70 p-3">
+                    <p className="text-xs text-matrix-muted">{label}</p>
+                    <p className="mt-1 text-sm font-semibold text-matrix-fg">{value}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h4 className="font-semibold text-matrix-fg">Pesquisa</h4>
+                  <p className="text-sm text-matrix-muted">
+                    Busca por {search?.mode ?? (activeProduct.ean ? "EAN/GTIN" : "nome do produto")} - {search?.status ?? "Aguardando"}
+                  </p>
+                </div>
+                <Button onClick={() => generateDraft(activeProduct)} variant="secondary" disabled={loading}>
+                  {loading ? "Pesquisando..." : "Recriar titulo"}
+                </Button>
+              </div>
+              <div className="mt-3 grid gap-3 md:grid-cols-3">
+                {(draft?.sources ?? []).map((source) => (
+                  <div key={source.provider} className="rounded-md border border-matrix-border bg-matrix-panel/70 p-3">
+                    <p className="font-semibold text-matrix-fg">{source.provider}</p>
+                    <p className="mt-1 text-xs text-matrix-muted">{source.status}</p>
+                    <p className="mt-2 text-xs text-matrix-muted">{source.summary}</p>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-3 rounded-md border border-matrix-border bg-matrix-panel/70 p-3 text-sm text-matrix-muted">
+                {search?.rawResult ?? "Aguardando geracao do rascunho."}
+              </p>
+              {baseData ? (
+                <div className="mt-3 grid gap-2 text-xs text-matrix-muted md:grid-cols-4">
+                  <span>Base: {baseData.name}</span>
+                  <span>SKU: {baseData.sku}</span>
+                  <span>Estoque: {baseData.stock}</span>
+                  <span>Bling: {baseData.blingStatus}</span>
+                </div>
+              ) : null}
+            </section>
+
+            <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
+              <label className="grid gap-2 text-sm font-semibold text-matrix-fg">
+                Titulo corrigido
+                <input
+                  className={`rounded-md border bg-matrix-panel px-3 py-2 outline-none ${titleTooLong ? "border-red-500 text-red-300" : "border-matrix-border"}`}
+                  maxLength={80}
+                  value={draft?.generatedTitle ?? ""}
+                  onChange={(event) => draft && setDraft({ ...draft, generatedTitle: event.target.value })}
+                />
+              </label>
+              <p className={`mt-2 text-xs ${titleTooLong ? "text-red-300" : "text-matrix-muted"}`}>{titleLength}/60 caracteres</p>
+            </section>
+
+            <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
+              <h4 className="font-semibold text-matrix-fg">Conteudo gerado</h4>
+              <textarea
+                className="matrix-scroll mt-3 min-h-[360px] w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm leading-6 text-matrix-fg outline-none"
+                value={draft ? formatGeneratedContent(draft) : "Gerando conteudo..."}
+                readOnly
+              />
+              <div className="mt-3 grid gap-3 md:grid-cols-3">
+                <label className="grid gap-2 text-sm text-matrix-muted md:col-span-3">
+                  Descricao editavel
+                  <textarea
+                    className="min-h-24 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none"
+                    value={draft?.generatedDescription ?? ""}
+                    onChange={(event) => draft && setDraft({ ...draft, generatedDescription: event.target.value })}
+                  />
+                </label>
+                <label className="grid gap-2 text-sm text-matrix-muted">
+                  Tutorial de instalacao
+                  <textarea
+                    className="min-h-28 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none"
+                    value={draft?.installationTutorial ?? ""}
+                    onChange={(event) => draft && setDraft({ ...draft, installationTutorial: event.target.value })}
+                  />
+                </label>
+                <label className="grid gap-2 text-sm text-matrix-muted">
+                  Cuidados e manutencao
+                  <textarea
+                    className="min-h-28 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none"
+                    value={draft?.careInstructions ?? ""}
+                    onChange={(event) => draft && setDraft({ ...draft, careInstructions: event.target.value })}
+                  />
+                </label>
+                <div className="rounded-md border border-matrix-border bg-matrix-panel p-3 text-sm text-matrix-muted">
+                  <p className="font-semibold text-matrix-fg">Dados nao encontrados</p>
+                  <p className="mt-2">Medidas, peso, marca e fontes externas ficam como Nao informado quando nao houver API configurada.</p>
+                </div>
+              </div>
+            </section>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3">
+              <p className="text-sm text-matrix-muted">{message || "Revise os campos antes de salvar como rascunho local."}</p>
+              <Button disabled={!draft || titleTooLong || saving} onClick={saveDraft}>
+                {saving ? "Salvando..." : "Salvar rascunho"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </aside>
     </div>
   );
 }

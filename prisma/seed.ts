@@ -98,6 +98,7 @@ async function deleteBusinessData(organizationId: string) {
   await prisma.orderExternalMapping.deleteMany({ where: { organizationId } });
   await prisma.orderItem.deleteMany({ where: { organizationId } });
   await prisma.productExternalMapping.deleteMany({ where: { organizationId } });
+  await prisma.productEnrichmentDraft.deleteMany({ where: { organizationId } });
   await prisma.productImage.deleteMany({ where: { organizationId } });
   await prisma.productPriceHistory.deleteMany({ where: { organizationId } });
   await prisma.productPrice.deleteMany({ where: { organizationId } });

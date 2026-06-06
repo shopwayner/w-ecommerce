@@ -24,7 +24,12 @@ export async function GET() {
 
   const products = await prisma.product.findMany({
     where: { organizationId: auth.context.organizationId },
-    include: { prices: { take: 1, orderBy: { createdAt: "desc" } }, inventory: true },
+    include: {
+      prices: { take: 1, orderBy: { createdAt: "desc" } },
+      inventory: true,
+      images: { take: 1, orderBy: { position: "asc" } },
+      enrichmentDrafts: { take: 1, orderBy: { updatedAt: "desc" } }
+    },
     orderBy: { createdAt: "desc" },
     take: 50
   });
@@ -41,6 +46,8 @@ export async function GET() {
         category: product.category,
         origin: metadata.origin ?? product.brand,
         unit: metadata.unit,
+        imageUrl: product.images[0]?.url ?? null,
+        hasEnrichmentDraft: product.enrichmentDrafts.length > 0,
         status: product.status,
         displayValue: metadata.displayValue,
         salePriceDisplay: metadata.salePriceDisplay,
