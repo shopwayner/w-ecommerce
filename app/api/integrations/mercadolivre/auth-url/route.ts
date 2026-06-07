@@ -11,7 +11,7 @@ export async function GET() {
       organizationId: auth.context.organizationId,
       userId: auth.context.user.id
     });
-    const authorizationUrl = mercadoLivreOAuthService.buildAuthorizationUrl(state);
+    const authorizationUrl = await mercadoLivreOAuthService.buildAuthorizationUrl(state);
     return NextResponse.json({ authorizationUrl });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Falha ao iniciar OAuth Mercado Livre.";

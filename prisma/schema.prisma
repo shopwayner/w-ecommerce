@@ -235,22 +235,30 @@ model MercadoLivreConnection {
   organizationId        String
   userId                String?
   name                  String           @default("Mercado Livre")
+  accountAlias          String?
+  clientId              String?
+  clientSecretEncrypted String?
+  redirectUri           String?
   siteId                String           @default("MLB")
+  taxRate               Decimal?         @db.Decimal(5, 2)
+  orderImportStartDate  DateTime?
+  configStatus          String           @default("MISSING")
   status                ConnectionStatus @default(PENDING)
   externalUserId        String?
   tokenType             String           @default("Bearer")
-  accessTokenEncrypted  String
-  refreshTokenEncrypted String
+  accessTokenEncrypted  String?
+  refreshTokenEncrypted String?
   scope                 String?
-  expiresAt             DateTime
+  expiresAt             DateTime?
   lastRefreshAt         DateTime?
   lastError             String?
-  connectedAt           DateTime         @default(now())
+  connectedAt           DateTime?
   createdAt             DateTime         @default(now())
   updatedAt             DateTime         @updatedAt
   organization          Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@index([organizationId])
+  @@index([organizationId, configStatus])
   @@index([userId])
   @@index([siteId])
   @@index([status])

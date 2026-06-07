@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Lightbulb, Plus, X } from "lucide-react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import { AlertTriangle, CheckCircle2, Copy, Eye, EyeOff, Lightbulb, Plus, X } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { Badge, Button, Card } from "@/components/ui";
 
@@ -9,15 +9,38 @@ type MarketplaceKey = "mercadolivre" | "magalu" | "shopee" | "shopeeAds" | "amaz
 
 type MercadoLivreStatus = {
   configured: boolean;
+  envFallbackConfigured?: boolean;
   data: null | {
     id: string;
+    name: string;
+    accountAlias: string | null;
     siteId: string;
-    status: "ACTIVE" | "EXPIRED" | "ERROR" | "DISCONNECTED" | "PENDING";
+    status: "ACTIVE" | "EXPIRED" | "ERROR" | "DISCONNECTED" | "PENDING" | "DISABLED";
     statusLabel: string;
-    connectedAt: string;
+    configStatus: string;
+    clientId: string | null;
+    clientIdMasked: string | null;
+    hasClientSecret: boolean;
+    redirectUri: string | null;
+    taxRate: string | null;
+    orderImportStartDate: string | null;
+    externalUserId: string | null;
+    connectedAt: string | null;
     updatedAt: string;
+    expiresAt: string | null;
+    lastRefreshAt: string | null;
     lastError: string | null;
   };
+};
+
+type MercadoLivreConfigForm = {
+  accountAlias: string;
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  siteId: string;
+  taxRate: string;
+  orderImportStartDate: string;
 };
 
 type Marketplace = {
@@ -36,6 +59,16 @@ const marketplaces: Marketplace[] = [
   { key: "shein", name: "Shein", description: "Hub de canais em preparação.", logo: "shein" },
   { key: "tiktok", name: "TikTok Shop", description: "Catálogo e pedidos.", logo: "tiktok" }
 ];
+
+const emptyMercadoLivreForm: MercadoLivreConfigForm = {
+  accountAlias: "Mercado Livre - Loja Principal",
+  clientId: "",
+  clientSecret: "",
+  redirectUri: "",
+  siteId: "MLB",
+  taxRate: "",
+  orderImportStartDate: ""
+};
 
 function LogoFrame({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return <div className={`grid h-14 w-14 shrink-0 place-items-center shadow-gold ${className}`}>{children}</div>;
@@ -125,15 +158,45 @@ function statusFor(marketplace: Marketplace, mercadoLivre: MercadoLivreStatus) {
   }
 
   if (mercadoLivre.data?.status === "ACTIVE") return { label: "Integrado", tone: "success" as const };
-  if (!mercadoLivre.configured) return { label: "Configuração ausente", tone: "warning" as const };
-  return { label: "Não integrado", tone: "muted" as const };
+  if (mercadoLivre.configured) return { label: "Pronto para conectar", tone: "info" as const };
+  return { label: "Configuração ausente", tone: "warning" as const };
+}
+
+function formatDate(value: string | null | undefined) {
+  return value ? new Date(value).toLocaleString("pt-BR") : "-";
+}
+
+function secretMask(hasSecret: boolean) {
+  return hasSecret ? "••••••••••••••••" : "Não salvo";
+}
+
+function buildRedirectUri() {
+  if (typeof window === "undefined") return "";
+  return `${window.location.origin}/api/integrations/mercadolivre/callback`;
+}
+
+function isLocalhost() {
+  if (typeof window === "undefined") return false;
+  return ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+}
+
+function isPublicHttps() {
+  if (typeof window === "undefined") return false;
+  return window.location.protocol === "https:" && !isLocalhost();
 }
 
 export function MarketplacesPage() {
   const [mercadoLivre, setMercadoLivre] = useState<MercadoLivreStatus>({ configured: false, data: null });
   const [selected, setSelected] = useState<Marketplace | null>(null);
+  const [form, setForm] = useState<MercadoLivreConfigForm>(emptyMercadoLivreForm);
+  const [showSecret, setShowSecret] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
   const [message, setMessage] = useState("");
+  const [copyMessage, setCopyMessage] = useState("");
   const selectedStatus = useMemo(() => (selected ? statusFor(selected, mercadoLivre) : null), [selected, mercadoLivre]);
+  const hasSavedSecret = Boolean(mercadoLivre.data?.hasClientSecret);
+  const canConnectMercadoLivre = mercadoLivre.configured;
+  const canSaveMercadoLivre = Boolean(form.accountAlias.trim() && form.clientId.trim() && form.redirectUri.trim() && (hasSavedSecret || form.clientSecret.trim()));
 
   async function loadMercadoLivre() {
     const response = await fetch("/api/integrations/mercadolivre");
@@ -142,9 +205,53 @@ export function MarketplacesPage() {
     setMercadoLivre(payload);
   }
 
+  function syncMercadoLivreForm(status: MercadoLivreStatus) {
+    const suggestedRedirectUri = buildRedirectUri();
+    setForm({
+      accountAlias: status.data?.accountAlias || status.data?.name || emptyMercadoLivreForm.accountAlias,
+      clientId: status.data?.clientId || "",
+      clientSecret: "",
+      redirectUri: status.data?.redirectUri || suggestedRedirectUri,
+      siteId: status.data?.siteId || "MLB",
+      taxRate: status.data?.taxRate || "",
+      orderImportStartDate: status.data?.orderImportStartDate || ""
+    });
+  }
+
   useEffect(() => {
     void loadMercadoLivre();
   }, []);
+
+  useEffect(() => {
+    if (selected?.key === "mercadolivre") {
+      syncMercadoLivreForm(mercadoLivre);
+    }
+  }, [mercadoLivre, selected]);
+
+  async function saveMercadoLivreConfig(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSavingConfig(true);
+    setMessage("");
+
+    const response = await fetch("/api/integrations/mercadolivre/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...form,
+        clientSecret: form.clientSecret.trim() || undefined
+      })
+    });
+    const payload = await response.json();
+    setSavingConfig(false);
+
+    if (!response.ok) {
+      setMessage(payload.error ?? "Não foi possível salvar a configuração Mercado Livre.");
+      return;
+    }
+
+    setMercadoLivre(payload as MercadoLivreStatus);
+    setMessage("Configuração salva. Mercado Livre pronto para conectar.");
+  }
 
   async function connectMercadoLivre() {
     setMessage("");
@@ -156,6 +263,28 @@ export function MarketplacesPage() {
     }
 
     window.location.assign(payload.authorizationUrl);
+  }
+
+  async function disconnectMercadoLivre() {
+    setMessage("");
+    const response = await fetch("/api/integrations/mercadolivre", { method: "DELETE" });
+    const payload = await response.json();
+    if (!response.ok) {
+      setMessage(payload.error ?? "Não foi possível desconectar Mercado Livre.");
+      return;
+    }
+    await loadMercadoLivre();
+    setMessage("Mercado Livre desconectado. A configuração foi mantida.");
+  }
+
+  async function copyRedirectUri() {
+    await navigator.clipboard.writeText(form.redirectUri);
+    setCopyMessage("Redirect URI copiada.");
+    window.setTimeout(() => setCopyMessage(""), 2200);
+  }
+
+  function updateForm(field: keyof MercadoLivreConfigForm, value: string) {
+    setForm((current) => ({ ...current, [field]: value }));
   }
 
   return (
@@ -210,7 +339,7 @@ export function MarketplacesPage() {
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 px-4 py-6 backdrop-blur-sm" onClick={() => setSelected(null)}>
           <section
             aria-modal="true"
-            className="matrix-scroll max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-[0_24px_90px_rgb(0_0_0/0.35)]"
+            className="matrix-scroll max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-[0_24px_90px_rgb(0_0_0/0.35)]"
             onClick={(event) => event.stopPropagation()}
             role="dialog"
           >
@@ -233,35 +362,104 @@ export function MarketplacesPage() {
             </div>
 
             {selected.key === "mercadolivre" ? (
-              <div className="mt-5 space-y-4">
-                <div className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
+              <form className="mt-5 space-y-4" onSubmit={saveMercadoLivreConfig}>
+                <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <p className="text-sm text-matrix-muted">Status atual</p>
-                      <p className="mt-1 font-semibold text-matrix-fg">{mercadoLivre.data?.statusLabel ?? selectedStatus?.label ?? "Não integrado"}</p>
+                      <p className="text-sm text-matrix-muted">Status da integração</p>
+                      <p className="mt-1 font-semibold text-matrix-fg">{mercadoLivre.data?.statusLabel ?? selectedStatus?.label ?? "Configuração ausente"}</p>
                     </div>
                     {selectedStatus ? <Badge tone={selectedStatus.tone}>{selectedStatus.label}</Badge> : null}
                   </div>
-                  <div className="mt-3 grid gap-2 text-sm text-matrix-muted sm:grid-cols-2">
-                    <span>Site ID: {mercadoLivre.data?.siteId ?? "MLB"}</span>
-                    <span>Última atualização: {mercadoLivre.data ? new Date(mercadoLivre.data.updatedAt).toLocaleString("pt-BR") : "-"}</span>
+                  <div className="mt-3 grid gap-2 text-sm text-matrix-muted sm:grid-cols-2 lg:grid-cols-4">
+                    <span>Site ID: {mercadoLivre.data?.siteId ?? form.siteId}</span>
+                    <span>Client ID: {mercadoLivre.data?.clientIdMasked ?? "Não salvo"}</span>
+                    <span>Conectado em: {formatDate(mercadoLivre.data?.connectedAt)}</span>
+                    <span>Última atualização: {formatDate(mercadoLivre.data?.updatedAt)}</span>
                   </div>
                   {mercadoLivre.data?.lastError ? <p className="mt-3 text-sm text-red-200">{mercadoLivre.data.lastError}</p> : null}
-                </div>
+                </section>
 
-                {!mercadoLivre.configured ? (
-                  <div className="rounded-lg border border-orange-500/25 bg-orange-500/10 px-3 py-2 text-sm text-orange-200">
-                    Configuração ausente. Configure MERCADOLIVRE_CLIENT_ID, MERCADOLIVRE_CLIENT_SECRET e MERCADOLIVRE_REDIRECT_URI no servidor.
+                <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
+                  <div className="mb-4 flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-matrix-goldDark" />
+                    <h4 className="font-semibold text-matrix-fg">Configuração da aplicação</h4>
                   </div>
-                ) : null}
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="grid gap-2 text-sm text-matrix-muted">
+                      Apelido da conta
+                      <input className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" value={form.accountAlias} onChange={(event) => updateForm("accountAlias", event.target.value)} />
+                    </label>
+                    <label className="grid gap-2 text-sm text-matrix-muted">
+                      Client ID
+                      <input className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" value={form.clientId} onChange={(event) => updateForm("clientId", event.target.value)} />
+                    </label>
+                    <label className="grid gap-2 text-sm text-matrix-muted">
+                      Client Secret
+                      <div className="flex rounded-md border border-matrix-border bg-matrix-panel focus-within:border-matrix-gold/60">
+                        <input
+                          className="min-w-0 flex-1 bg-transparent px-3 py-2 text-matrix-fg outline-none"
+                          placeholder={hasSavedSecret ? "Digite um novo secret para substituir" : "Obrigatório"}
+                          type={showSecret ? "text" : "password"}
+                          value={form.clientSecret}
+                          onChange={(event) => updateForm("clientSecret", event.target.value)}
+                        />
+                        <button className="grid w-10 place-items-center text-matrix-muted hover:text-matrix-goldDark" onClick={() => setShowSecret((current) => !current)} type="button">
+                          {showSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                      </div>
+                      <span className="text-xs text-matrix-muted">Salvo: {secretMask(hasSavedSecret)}</span>
+                    </label>
+                    <label className="grid gap-2 text-sm text-matrix-muted">
+                      Site ID
+                      <input className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" value={form.siteId} onChange={(event) => updateForm("siteId", event.target.value.toUpperCase())} />
+                    </label>
+                    <label className="grid gap-2 text-sm text-matrix-muted sm:col-span-2">
+                      Redirect URI
+                      <div className="flex flex-col gap-2 sm:flex-row">
+                        <input className="min-w-0 flex-1 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" value={form.redirectUri} onChange={(event) => updateForm("redirectUri", event.target.value)} />
+                        <Button className="shrink-0" type="button" variant="secondary" onClick={copyRedirectUri}>
+                          <Copy className="h-4 w-4" />
+                          Copiar Redirect URI
+                        </Button>
+                      </div>
+                      {copyMessage ? <span className="text-xs text-green-300">{copyMessage}</span> : null}
+                    </label>
+                  </div>
+                </section>
+
+                <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
+                  <h4 className="font-semibold text-matrix-fg">Configurações comerciais</h4>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <label className="grid gap-2 text-sm text-matrix-muted">
+                      Alíquota de imposto (%)
+                      <input className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" inputMode="decimal" value={form.taxRate} onChange={(event) => updateForm("taxRate", event.target.value)} />
+                    </label>
+                    <label className="grid gap-2 text-sm text-matrix-muted">
+                      Data inicial de importação de pedidos
+                      <input className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" type="date" value={form.orderImportStartDate} onChange={(event) => updateForm("orderImportStartDate", event.target.value)} />
+                    </label>
+                  </div>
+                </section>
+
+                <section className="space-y-2 rounded-lg border border-matrix-gold/25 bg-matrix-goldSoft/20 px-3 py-3 text-sm text-matrix-goldDark">
+                  <p>Para teste local, acesse o sistema pelo domínio público HTTPS do ngrok e use essa mesma URL como Redirect URI no app do Mercado Livre.</p>
+                  {isLocalhost() ? (
+                    <p className="flex gap-2 text-orange-200"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /> localhost não serve como Redirect URI pública. Use ngrok ou domínio HTTPS.</p>
+                  ) : null}
+                  {isPublicHttps() ? <p>Domínio HTTPS público detectado. A Redirect URI sugerida já usa este domínio.</p> : null}
+                  {mercadoLivre.envFallbackConfigured ? <p>Fallback local por .env detectado para ambiente de desenvolvimento.</p> : null}
+                </section>
 
                 {message ? <p className="rounded-lg border border-matrix-border bg-matrix-panel2/60 px-3 py-2 text-sm text-matrix-muted">{message}</p> : null}
 
                 <div className="flex flex-wrap justify-end gap-2">
-                  <Button variant="secondary" onClick={() => setSelected(null)}>Cancelar</Button>
-                  <Button onClick={connectMercadoLivre} disabled={!mercadoLivre.configured}>Conectar Mercado Livre</Button>
+                  <Button variant="secondary" type="button" onClick={() => setSelected(null)}>Cancelar</Button>
+                  {mercadoLivre.data?.status === "ACTIVE" ? <Button variant="danger" type="button" onClick={disconnectMercadoLivre}>Desconectar</Button> : null}
+                  <Button type="submit" disabled={!canSaveMercadoLivre || savingConfig}>{savingConfig ? "Salvando..." : "Salvar configuração"}</Button>
+                  <Button type="button" onClick={connectMercadoLivre} disabled={!canConnectMercadoLivre}>Conectar Mercado Livre</Button>
                 </div>
-              </div>
+              </form>
             ) : (
               <div className="mt-5 space-y-4">
                 <div className="rounded-lg border border-matrix-gold/25 bg-matrix-goldSoft/25 px-3 py-2 text-sm font-semibold text-matrix-goldDark">
