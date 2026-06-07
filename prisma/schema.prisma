@@ -73,6 +73,14 @@ enum MarketplaceProvider {
   TIKTOK_SHOP
 }
 
+enum ERPProvider {
+  BLING
+  OLIST
+  OMIE
+  CONTA_AZUL
+  CUSTOM_API
+}
+
 enum SyncDirection {
   MATRIX_TO_BRANCHES
   BRANCHES_TO_MATRIX
@@ -122,6 +130,7 @@ model Organization {
   users               OrganizationUser[]
   subscription        Subscription?
   blingConnections    BlingConnection[]
+  erpConnections      ERPConnection[]
   mercadoLivreConnections MercadoLivreConnection[]
   marketplaceConnections MarketplaceConnection[]
   oauthStates         OAuthState[]
@@ -308,6 +317,46 @@ model MarketplaceConnection {
   createdAt                DateTime            @default(now())
   updatedAt                DateTime            @updatedAt
   organization             Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, provider])
+  @@index([organizationId])
+  @@index([provider])
+  @@index([status])
+  @@index([configStatus])
+  @@index([updatedAt])
+}
+
+model ERPConnection {
+  id                       String       @id @default(cuid())
+  organizationId           String
+  userId                   String?
+  provider                 ERPProvider
+  accountAlias             String
+  status                   String       @default("NOT_CONFIGURED")
+  configStatus             String       @default("MISSING")
+  credentialsEncrypted     String?
+  accessTokenEncrypted     String?
+  refreshTokenEncrypted    String?
+  tokenType                String?
+  expiresAt                DateTime?
+  scopes                   String?
+  externalAccountId        String?
+  externalCompanyId        String?
+  environment              String?
+  taxRate                  Decimal?     @db.Decimal(5, 2)
+  orderImportStartDate     DateTime?
+  productSyncEnabled       Boolean      @default(false)
+  orderSyncEnabled         Boolean      @default(false)
+  stockSyncEnabled         Boolean      @default(false)
+  invoiceSyncEnabled       Boolean      @default(false)
+  internalNotes            String?
+  connectedAt              DateTime?
+  lastSyncAt               DateTime?
+  lastConnectionTestAt     DateTime?
+  lastError                String?
+  createdAt                DateTime     @default(now())
+  updatedAt                DateTime     @updatedAt
+  organization             Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   @@unique([organizationId, provider])
   @@index([organizationId])
