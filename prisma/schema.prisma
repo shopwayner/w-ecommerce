@@ -63,6 +63,16 @@ enum OAuthProvider {
   MERCADOLIVRE
 }
 
+enum MarketplaceProvider {
+  MERCADOLIVRE
+  MAGALU
+  SHOPEE
+  SHOPEE_ADS
+  AMAZON
+  SHEIN
+  TIKTOK_SHOP
+}
+
 enum SyncDirection {
   MATRIX_TO_BRANCHES
   BRANCHES_TO_MATRIX
@@ -113,6 +123,7 @@ model Organization {
   subscription        Subscription?
   blingConnections    BlingConnection[]
   mercadoLivreConnections MercadoLivreConnection[]
+  marketplaceConnections MarketplaceConnection[]
   oauthStates         OAuthState[]
   syncRules           SyncRule[]
   syncJobs            SyncJob[]
@@ -263,6 +274,46 @@ model MercadoLivreConnection {
   @@index([siteId])
   @@index([status])
   @@index([expiresAt])
+  @@index([updatedAt])
+}
+
+model MarketplaceConnection {
+  id                       String              @id @default(cuid())
+  organizationId           String
+  userId                   String?
+  provider                 MarketplaceProvider
+  accountAlias             String
+  status                   String              @default("NOT_CONFIGURED")
+  configStatus             String              @default("MISSING")
+  credentialsEncrypted     String?
+  accessTokenEncrypted     String?
+  refreshTokenEncrypted    String?
+  tokenType                String?
+  expiresAt                DateTime?
+  scopes                   String?
+  externalAccountId        String?
+  externalShopId           String?
+  sellerId                 String?
+  siteId                   String?
+  region                   String?
+  marketplaceId            String?
+  environment              String?
+  taxRate                  Decimal?            @db.Decimal(5, 2)
+  orderImportStartDate     DateTime?
+  internalNotes            String?
+  connectedAt              DateTime?
+  lastSyncAt               DateTime?
+  lastConnectionTestAt     DateTime?
+  lastError                String?
+  createdAt                DateTime            @default(now())
+  updatedAt                DateTime            @updatedAt
+  organization             Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, provider])
+  @@index([organizationId])
+  @@index([provider])
+  @@index([status])
+  @@index([configStatus])
   @@index([updatedAt])
 }
 
