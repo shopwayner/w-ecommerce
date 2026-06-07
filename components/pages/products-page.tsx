@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
-import { Download, FileUp, ImageIcon, Plus, RefreshCw, X } from "lucide-react";
+import { Download, FileUp, ImageIcon, Plus, RefreshCw, Sparkles, X } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { Badge, Button, Card, DataTable, KpiCard, PageHeader } from "@/components/ui";
 
@@ -532,6 +532,17 @@ function ProductDetailsModal({
   const isLocalTestProduct = product.sku.startsWith("TEST-") || product.origin === "Teste local";
   const inputClass = "rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm text-matrix-fg outline-none focus:border-matrix-gold/60";
   const fieldClass = "rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3";
+  const aiModules = [
+    ["Gerar título com IA", "title-generation"],
+    ["Gerar descrição com IA", "description-generation"],
+    ["Classificar com IA", "classification"],
+    ["Sugerir preço", "price-suggestion"],
+    ["Diagnosticar anúncio", "ad-diagnosis"]
+  ];
+
+  function openAIModule(moduleId: string) {
+    window.location.assign(`/ia?module=${moduleId}&productId=${product.id}`);
+  }
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-4 py-6 backdrop-blur-sm" onClick={requestClose}>
@@ -656,6 +667,22 @@ function ProductDetailsModal({
         {isLocalTestProduct ? (
           <div className="mt-4 rounded-lg border border-matrix-gold/25 bg-matrix-goldSoft/35 px-3 py-2 text-sm font-semibold text-matrix-goldDark">
             Produto de teste/local
+          </div>
+        ) : null}
+
+        {!editing ? (
+          <div className="mt-4 rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-matrix-fg">
+              <Sparkles className="h-4 w-4 text-matrix-goldDark" />
+              Ações rápidas de IA
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {aiModules.map(([label, moduleId]) => (
+                <Button key={moduleId} onClick={() => openAIModule(moduleId)} variant="secondary">
+                  {label}
+                </Button>
+              ))}
+            </div>
           </div>
         ) : null}
 

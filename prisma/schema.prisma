@@ -138,6 +138,8 @@ model Organization {
   syncJobs            SyncJob[]
   products            Product[]
   productEnrichmentDrafts ProductEnrichmentDraft[]
+  aiJobs              AIJob[]
+  productAISuggestions ProductAISuggestion[]
   orders              Order[]
   publicationQueue    PublicationQueue[]
   webhookEvents       WebhookEvent[]
@@ -466,6 +468,8 @@ model Product {
   prices         ProductPrice[]
   priceHistory   ProductPriceHistory[]
   enrichmentDrafts ProductEnrichmentDraft[]
+  aiJobs         AIJob[]
+  aiSuggestions  ProductAISuggestion[]
   inventory      InventoryBalance[]
   movements      InventoryMovement[]
   orderItems     OrderItem[]
@@ -504,6 +508,53 @@ model ProductEnrichmentDraft {
   @@index([productId])
   @@index([status])
   @@index([updatedAt])
+}
+
+model AIJob {
+  id             String       @id @default(cuid())
+  organizationId String
+  productId      String?
+  module         String
+  marketplace    String?
+  inputJson      Json
+  outputJson     Json?
+  status         String       @default("PENDING")
+  errorMessage   String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  product        Product?     @relation(fields: [productId], references: [id], onDelete: SetNull)
+  suggestions    ProductAISuggestion[]
+
+  @@index([organizationId])
+  @@index([productId])
+  @@index([module])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model ProductAISuggestion {
+  id             String       @id @default(cuid())
+  organizationId String
+  productId      String
+  aiJobId        String?
+  type           String
+  title          String
+  contentJson    Json
+  status         String       @default("DRAFT")
+  appliedAt      DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  product        Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  aiJob          AIJob?       @relation(fields: [aiJobId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([productId])
+  @@index([aiJobId])
+  @@index([type])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model ProductImage {
