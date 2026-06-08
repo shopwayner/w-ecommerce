@@ -33,6 +33,80 @@ Configuração sugerida para a aplicação Node.js:
 
 O script `start` do projeto usa `next start`, então a porta da Hostinger deve ser repassada por `$PORT`.
 
+## 2.1. VPS Hostinger com Docker Compose
+
+Use este fluxo quando a VPS Hostinger estiver em Ubuntu 24.04 com Docker e Docker Compose.
+
+Arquivos de deploy versionados:
+
+- `Dockerfile`
+- `docker-compose.prod.yml`
+- `.dockerignore`
+
+Arquivo que deve existir somente na VPS:
+
+- `.env.production`
+
+Passos na VPS:
+
+```bash
+git clone <URL_DO_REPOSITORIO>
+cd <PASTA_DO_PROJETO>
+cp .env.example .env.production
+nano .env.production
+docker compose -f docker-compose.prod.yml build
+docker compose -f docker-compose.prod.yml up -d app
+```
+
+O container da aplicação executa automaticamente:
+
+```bash
+npx prisma migrate deploy
+npm run start -- -p ${PORT:-3000}
+```
+
+Não rode `prisma migrate dev` nem seed em produção.
+
+### Usando banco PostgreSQL externo
+
+Configure `DATABASE_URL` no `.env.production` apontando para o banco externo e suba apenas o app:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d app
+```
+
+### Usando PostgreSQL do próprio Compose
+
+Se quiser usar o PostgreSQL opcional do compose, preencha no `.env.production`:
+
+```bash
+POSTGRES_DB=
+POSTGRES_USER=
+POSTGRES_PASSWORD=
+DATABASE_URL=postgresql://POSTGRES_USER:POSTGRES_PASSWORD@postgres:5432/POSTGRES_DB
+```
+
+Suba o banco e a aplicação com o profile `postgres`:
+
+```bash
+docker compose -f docker-compose.prod.yml --profile postgres up -d postgres
+docker compose -f docker-compose.prod.yml --profile postgres up -d app
+```
+
+Para acompanhar logs:
+
+```bash
+docker compose -f docker-compose.prod.yml logs -f app
+```
+
+Para atualizar depois de um novo push:
+
+```bash
+git pull
+docker compose -f docker-compose.prod.yml build app
+docker compose -f docker-compose.prod.yml up -d app
+```
+
 ## 3. Variáveis de ambiente
 
 Configure as variáveis no painel da Hostinger. Não coloque valores reais no repositório.
@@ -43,6 +117,12 @@ Obrigatórias para produção:
 - `APP_URL`
 - `APP_ENCRYPTION_KEY`
 - `AUTH_SECRET`
+
+Obrigatórias quando usar PostgreSQL do compose:
+
+- `POSTGRES_DB`
+- `POSTGRES_USER`
+- `POSTGRES_PASSWORD`
 
 Redis e filas, quando habilitados:
 
