@@ -5,13 +5,20 @@ const prisma = new PrismaClient();
 
 const masterOrgSlug = "wayner-master";
 const masterAdminEmail = (process.env.MASTER_ADMIN_EMAIL ?? "Crowner@admin.com").toLowerCase();
-const masterAdminPassword = process.env.MASTER_ADMIN_PASSWORD ?? "wayner2525";
 const legacyDemoEmails = ["admin@matrix.local", "viewer@matrix.local"];
 const legacyDemoOrgSlugs = ["matrix-demo-commerce"];
 const legacyDemoOrgNames = ["Matrix Demo Comercio LTDA", "Matrix Demo Commerce"];
+
+function requireSeedEnv(name: string) {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`${name} is required to run prisma seed.`);
+  return value;
+}
+
+const masterAdminPassword = requireSeedEnv("MASTER_ADMIN_PASSWORD");
 const localUsers = [
-  { email: "admin@matrix.local", name: "Admin Matrix Local", password: "Admin123!dev", role: Role.ADMIN },
-  { email: "viewer@matrix.local", name: "Viewer Matrix Local", password: "Viewer123!dev", role: Role.VIEWER }
+  { email: "admin@matrix.local", name: "Admin Matrix Local", password: requireSeedEnv("ADMIN_LOCAL_PASSWORD"), role: Role.ADMIN },
+  { email: "viewer@matrix.local", name: "Viewer Matrix Local", password: requireSeedEnv("VIEWER_LOCAL_PASSWORD"), role: Role.VIEWER }
 ];
 
 function monthPeriod() {
