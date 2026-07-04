@@ -1,0 +1,9 @@
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Amazon</title>
+  <desc id="desc">Placeholder local para o logo da Amazon.</desc>
+  <rect width="128" height="128" rx="28" fill="#111827"/>
+  <text x="64" y="72" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="48" font-weight="700" fill="#F9FAFB">a</text>
+  <path d="M38 84C53 96 77 97 94 84" stroke="#FFB000" stroke-width="7" stroke-linecap="round"/>
+  <path d="M90 83L99 82L95 91" stroke="#FFB000" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="64" y="112" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="700" fill="#F9FAFB">Amazon</text>
+</svg>

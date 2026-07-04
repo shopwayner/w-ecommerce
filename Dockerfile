@@ -50,4 +50,4 @@ COPY --from=builder /app ./
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "npx prisma migrate deploy && npm run start -- -p ${PORT:-3000}"]
+CMD ["sh", "-c", "npm run start -- -p ${PORT:-3000}"]

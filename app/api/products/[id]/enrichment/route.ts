@@ -4,6 +4,10 @@ import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
 import { generateProductEnrichmentDraft } from "@/lib/services/product-enrichment-service";
 
+function externalEnrichmentEnabled() {
+  return process.env.ENABLE_EXTERNAL_ENRICHMENT === "1";
+}
+
 function serializeDraft(draft: NonNullable<Awaited<ReturnType<typeof prisma.productEnrichmentDraft.findUnique>>>) {
   return {
     id: draft.id,
@@ -44,6 +48,13 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireApiAuth("products:write");
   if (!auth.ok) return auth.response;
+
+  if (!externalEnrichmentEnabled()) {
+    return NextResponse.json(
+      { error: "Enriquecimento externo ainda não está habilitado. Use Verificar GTIN interno." },
+      { status: 409 }
+    );
+  }
 
   const { id } = await params;
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;

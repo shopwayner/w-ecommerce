@@ -42,7 +42,7 @@ function productContext(product: Awaited<ReturnType<typeof loadProduct>>): AIPro
   return {
     id: product.id,
     name: product.name,
-    sku: product.sku,
+    sku: product.sku ?? "",
     ean: product.ean,
     description: product.description,
     category: product.category,

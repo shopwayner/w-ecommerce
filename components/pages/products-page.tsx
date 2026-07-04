@@ -1,15 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
-import { Download, FileUp, ImageIcon, Plus, RefreshCw, Sparkles, X } from "lucide-react";
+import Link from "next/link";
+import { ChevronDown, Download, FileUp, ImageIcon, Plus, RefreshCw, Search, Sparkles, X } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import { ProductCopyButton } from "@/components/product-copy-button";
 import { Badge, Button, Card, DataTable, KpiCard, PageHeader } from "@/components/ui";
 
 type ProductListItem = {
   id: string;
   name: string;
-  sku: string;
+  sku: string | null;
   ean: string | null;
   description: string | null;
   category: string | null;
@@ -18,8 +20,20 @@ type ProductListItem = {
   status: string;
   displayValue: string | null;
   salePriceDisplay: string | null;
+  costPriceDisplay?: string | null;
   imageUrl: string | null;
   hasEnrichmentDraft: boolean;
+  externalProductId?: string | null;
+  blingStatus?: string | null;
+  blingAccount: {
+    blingAccountId: string;
+    blingAccountName: string | null;
+    displayName: string | null;
+    blingAccountShortId: string;
+    isActiveDefault: boolean;
+    externalProductId: string;
+    status: string;
+  } | null;
   price: string;
   stock: number;
   updatedAt: string;
@@ -68,6 +82,25 @@ const statusLabel: Record<string, string> = {
   DRAFT: "Rascunho"
 };
 
+type ImageFilter = "all" | "yes" | "no";
+type StockFilter = "all" | "positive" | "negative" | "zero";
+type ProductFilterMenu = "images" | "stock" | null;
+
+const pageSizeOptions = [20, 50, 100];
+
+const imageFilterLabels: Record<ImageFilter, string> = {
+  all: "Todos",
+  yes: "Sim",
+  no: "Nao"
+};
+
+const stockFilterLabels: Record<StockFilter, string> = {
+  all: "Todos",
+  positive: "Maior que zero",
+  negative: "Menor que zero",
+  zero: "Igual a zero"
+};
+
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("pt-BR", {
     day: "2-digit",
@@ -95,6 +128,29 @@ function isValidGtin(value: string) {
     .reverse()
     .reduce((total, digit, index) => total + digit * (index % 2 === 0 ? 3 : 1), 0);
   return checkDigit === (10 - (sum % 10)) % 10;
+}
+
+function formatCurrencyDisplay(value: string | null | undefined) {
+  const rawValue = value?.trim();
+  if (!rawValue) return null;
+  if (/^R\$/i.test(rawValue)) return rawValue;
+
+  const currencyValue = rawValue.replace(/[^\d,.-]/g, "");
+  const normalizedValue = currencyValue.includes(",")
+    ? currencyValue.replace(/\./g, "").replace(",", ".")
+    : currencyValue;
+  const parsedValue = Number(normalizedValue);
+
+  if (!Number.isFinite(parsedValue)) return rawValue;
+
+  return parsedValue.toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL"
+  });
+}
+
+function getBlingDisplayName(product: ProductListItem) {
+  return product.blingAccount?.displayName ?? product.blingAccount?.blingAccountName ?? null;
 }
 
 function ProductCheckbox({
@@ -136,18 +192,18 @@ export function ProductsPage() {
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(new Set());
   const [products, setProducts] = useState<ProductListItem[]>([]);
   const [loadingProducts, setLoadingProducts] = useState(true);
-  const [filters, setFilters] = useState({
-    name: "",
-    sku: "",
-    category: "",
-    origin: "",
-    bling: ""
-  });
+  const [searchQuery, setSearchQuery] = useState("");
+  const [imageFilter, setImageFilter] = useState<ImageFilter>("all");
+  const [stockFilter, setStockFilter] = useState<StockFilter>("all");
+  const [openFilterMenu, setOpenFilterMenu] = useState<ProductFilterMenu>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const filterBarRef = useRef<HTMLDivElement>(null);
 
-  async function loadProducts() {
+  const loadProducts = useCallback(async () => {
     setLoadingProducts(true);
     try {
-      const response = await fetch("/api/products");
+      const response = await fetch("/api/products?limit=all");
       if (!response.ok) {
         setProducts([]);
         return;
@@ -158,39 +214,101 @@ export function ProductsPage() {
     } finally {
       setLoadingProducts(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
     void loadProducts();
-  }, []);
+  }, [loadProducts]);
+
+  useEffect(() => {
+    function reloadForAccountContext() {
+      void loadProducts();
+    }
+
+    window.addEventListener("w-account-context-updated", reloadForAccountContext);
+    window.addEventListener("w-erps-active-account-updated", reloadForAccountContext);
+    return () => {
+      window.removeEventListener("w-account-context-updated", reloadForAccountContext);
+      window.removeEventListener("w-erps-active-account-updated", reloadForAccountContext);
+    };
+  }, [loadProducts]);
 
   useEffect(() => {
     const productIds = new Set(products.map((product) => product.id));
     setSelectedProductIds((current) => new Set([...current].filter((id) => productIds.has(id))));
   }, [products]);
 
-  const filteredProducts = useMemo(() => {
-    return products.filter((product) => {
-      const skuOrEan = `${product.sku} ${product.ean ?? ""}`.toLowerCase();
-      return (
-        product.name.toLowerCase().includes(filters.name.toLowerCase()) &&
-        skuOrEan.includes(filters.sku.toLowerCase()) &&
-        (product.category ?? "").toLowerCase().includes(filters.category.toLowerCase()) &&
-        (product.origin ?? "").toLowerCase().includes(filters.origin.toLowerCase()) &&
-        "sem bling".includes(filters.bling.toLowerCase())
-      );
-    });
-  }, [filters, products]);
+  useEffect(() => {
+    function handlePointerDown(event: MouseEvent) {
+      if (!filterBarRef.current?.contains(event.target as Node)) {
+        setOpenFilterMenu(null);
+      }
+    }
 
-  const visibleProductIds = useMemo(() => filteredProducts.map((product) => product.id), [filteredProducts]);
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpenFilterMenu(null);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [imageFilter, pageSize, searchQuery, stockFilter]);
+
+  const importedFromBlingCount = useMemo(() => products.filter((product) => product.blingAccount).length, [products]);
+
+  const filteredProducts = useMemo(() => {
+    const normalizedSearch = searchQuery.trim().toLowerCase();
+    return products.filter((product) => {
+      const hasImage = Boolean(product.imageUrl?.trim());
+      const matchesImage =
+        imageFilter === "all" ||
+        (imageFilter === "yes" && hasImage) ||
+        (imageFilter === "no" && !hasImage);
+      const matchesStock =
+        stockFilter === "all" ||
+        (stockFilter === "positive" && product.stock > 0) ||
+        (stockFilter === "negative" && product.stock < 0) ||
+        (stockFilter === "zero" && product.stock === 0);
+      const matchesSearch =
+        !normalizedSearch ||
+        [product.name, product.sku, product.ean]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(normalizedSearch);
+      return matchesSearch && matchesImage && matchesStock;
+    });
+  }, [imageFilter, products, searchQuery, stockFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
+
+  useEffect(() => {
+    setCurrentPage((page) => Math.min(Math.max(page, 1), totalPages));
+  }, [totalPages]);
+
+  const paginatedProducts = useMemo(() => {
+    const startIndex = (currentPage - 1) * pageSize;
+    return filteredProducts.slice(startIndex, startIndex + pageSize);
+  }, [currentPage, filteredProducts, pageSize]);
+
+  const visibleProductIds = useMemo(() => paginatedProducts.map((product) => product.id), [paginatedProducts]);
   const selectedProducts = useMemo(() => products.filter((product) => selectedProductIds.has(product.id)), [products, selectedProductIds]);
   const selectedVisibleCount = visibleProductIds.filter((id) => selectedProductIds.has(id)).length;
   const allVisibleSelected = visibleProductIds.length > 0 && selectedVisibleCount === visibleProductIds.length;
   const someVisibleSelected = selectedVisibleCount > 0 && selectedVisibleCount < visibleProductIds.length;
-  const selectedProductsLabel =
-    selectedProductIds.size === 1 ? "1 produto selecionado" : `${selectedProductIds.size} produtos selecionados`;
   const visibleProductsLabel =
     filteredProducts.length === 1 ? "1 produto visivel" : `${filteredProducts.length} produtos visiveis`;
+  const pageStart = filteredProducts.length ? (currentPage - 1) * pageSize + 1 : 0;
+  const pageEnd = Math.min(currentPage * pageSize, filteredProducts.length);
 
   function toggleProductSelection(productId: string, checked: boolean) {
     setSelectedProductIds((current) => {
@@ -233,35 +351,135 @@ export function ProductsPage() {
       <PageHeader
         title="Produtos"
         description="Catalogo central com SKU, EAN, fiscal, imagens, vinculos Bling e status de publicacao."
-        actions={<><Button onClick={() => setOpen(true)}><Plus className="h-4 w-4" /> Novo produto</Button><Button variant="secondary"><FileUp className="h-4 w-4" /> Importar do Bling</Button><Button variant="secondary"><Download className="h-4 w-4" /> Exportar</Button><Button variant="secondary"><RefreshCw className="h-4 w-4" /> Sincronizar</Button></>}
+        actions={
+          <>
+            <Link
+              className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md bg-matrix-gold px-3 py-2 text-sm font-semibold text-black shadow-gold transition hover:bg-matrix-goldDark hover:text-white"
+              href="/products/cadastro-inteligente"
+            >
+              <Sparkles className="h-4 w-4" /> Cadastro Inteligente
+            </Link>
+            <Button onClick={() => setOpen(true)}><Plus className="h-4 w-4" /> Novo produto</Button>
+            <Button variant="secondary"><FileUp className="h-4 w-4" /> Importar do Bling</Button>
+            <Button variant="secondary"><Download className="h-4 w-4" /> Exportar</Button>
+            <Button variant="secondary"><RefreshCw className="h-4 w-4" /> Sincronizar</Button>
+          </>
+        }
       />
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-6">
         <KpiCard label="Produtos cadastrados" value={String(products.length)} hint={products.length ? "Catalogo local carregado" : "Catalogo vazio"} />
         <KpiCard label="Em revisao" value="0" hint="Nenhuma pendencia" tone="warning" />
         <KpiCard label="Prontos para enviar" value={String(products.filter((product) => product.status === "READY_FOR_TEST").length)} hint="Produtos prontos para teste" tone="success" />
-        <KpiCard label="Importados do Bling" value="0" hint="Nenhuma importacao" tone="purple" />
+        <KpiCard
+          label="Importados do Bling"
+          value={String(importedFromBlingCount)}
+          hint={importedFromBlingCount ? "Produtos vinculados a conta Bling" : "Nenhum vinculo Bling"}
+          tone="purple"
+        />
       </div>
       <Card className="mt-4">
-        <div className="mb-4 grid gap-3 md:grid-cols-5">
-          {[
-            { key: "name", label: "Nome" },
-            { key: "sku", label: "SKU/EAN" },
-            { key: "category", label: "Categoria" },
-            { key: "origin", label: "Origem" },
-            { key: "bling", label: "Bling" }
-          ].map((filter) => (
+        <div ref={filterBarRef} className="mb-3 flex flex-col gap-2 xl:flex-row xl:items-center">
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-matrix-muted" />
             <input
-              key={filter.key}
-              placeholder={filter.label}
-              className="rounded-md border border-matrix-border bg-white/[0.03] px-3 py-2 text-sm outline-none placeholder:text-slate-600"
-              value={filters[filter.key as keyof typeof filters]}
-              onChange={(event) => setFilters((current) => ({ ...current, [filter.key]: event.target.value }))}
+              aria-label="Buscar por titulo, SKU ou GTIN"
+              className="h-10 w-full rounded-md border border-matrix-border bg-white/[0.03] py-2 pl-9 pr-3 text-sm outline-none placeholder:text-slate-600 focus:border-matrix-gold/55"
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Buscar por titulo, SKU ou GTIN"
+              value={searchQuery}
             />
-          ))}
-        </div>
-        <div className="mb-3 flex min-h-6 items-center justify-between gap-3 text-xs text-matrix-muted">
-          <span>{selectedProductIds.size ? selectedProductsLabel : "Nenhum produto selecionado"}</span>
-          <span>{visibleProductsLabel}</span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Button
+                aria-expanded={openFilterMenu === "images"}
+                className="min-w-28 justify-between"
+                onClick={() => setOpenFilterMenu((current) => (current === "images" ? null : "images"))}
+                type="button"
+                variant="secondary"
+              >
+                Imagens{imageFilter !== "all" ? `: ${imageFilterLabels[imageFilter]}` : ""}
+                <ChevronDown className="h-4 w-4" />
+              </Button>
+              {openFilterMenu === "images" ? (
+                <div className="absolute right-0 top-[calc(100%+0.35rem)] z-30 w-44 rounded-md border border-matrix-border bg-matrix-panel p-1 shadow-glow">
+                  {(["all", "yes", "no"] as ImageFilter[]).map((option) => (
+                    <button
+                      key={option}
+                      className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition hover:bg-matrix-goldSoft/30 ${
+                        imageFilter === option ? "text-matrix-goldDark" : "text-matrix-fg"
+                      }`}
+                      onClick={() => {
+                        setImageFilter(option);
+                        setOpenFilterMenu(null);
+                      }}
+                      type="button"
+                    >
+                      {imageFilterLabels[option]}
+                      {imageFilter === option ? <span className="text-xs">Ativo</span> : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="relative">
+              <Button
+                aria-expanded={openFilterMenu === "stock"}
+                className="min-w-36 justify-between"
+                onClick={() => setOpenFilterMenu((current) => (current === "stock" ? null : "stock"))}
+                type="button"
+                variant="secondary"
+              >
+                Estoque{stockFilter !== "all" ? `: ${stockFilterLabels[stockFilter]}` : ""}
+                <ChevronDown className="h-4 w-4" />
+              </Button>
+              {openFilterMenu === "stock" ? (
+                <div className="absolute right-0 top-[calc(100%+0.35rem)] z-30 w-56 rounded-md border border-matrix-border bg-matrix-panel p-1 shadow-glow">
+                  {(["all", "positive", "negative", "zero"] as StockFilter[]).map((option) => (
+                    <button
+                      key={option}
+                      className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition hover:bg-matrix-goldSoft/30 ${
+                        stockFilter === option ? "text-matrix-goldDark" : "text-matrix-fg"
+                      }`}
+                      onClick={() => {
+                        setStockFilter(option);
+                        setOpenFilterMenu(null);
+                      }}
+                      type="button"
+                    >
+                      {stockFilterLabels[option]}
+                      {stockFilter === option ? <span className="text-xs">Ativo</span> : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <span className="inline-flex h-10 items-center rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 text-sm font-semibold text-matrix-fg">
+              Pagina {currentPage} de {totalPages}
+            </span>
+            <select
+              aria-label="Produtos por pagina"
+              className="h-10 rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 text-sm font-semibold text-matrix-fg outline-none"
+              onChange={(event) => setPageSize(Number(event.target.value))}
+              value={pageSize}
+            >
+              {pageSizeOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option} produtos por pagina
+                </option>
+              ))}
+            </select>
+            <Button disabled={currentPage <= 1} onClick={() => setCurrentPage((page) => Math.max(1, page - 1))} type="button" variant="secondary">
+              Anterior
+            </Button>
+            <Button disabled={currentPage >= totalPages} onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))} type="button" variant="secondary">
+              Proxima
+            </Button>
+            <span className="text-xs text-matrix-muted">{visibleProductsLabel}</span>
+          </div>
         </div>
         {selectedProducts.length ? (
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-matrix-gold/25 bg-matrix-goldSoft/28 px-3 py-2">
@@ -287,40 +505,66 @@ export function ProductsPage() {
             "EAN",
             "Unidade",
             "Categoria",
-            "Origem",
-            "Status",
-            "Valor",
+            "Custo",
             "Preco venda",
+            "Margem",
             "Estoque",
-            "Bling",
-            "Atualizado",
             "Acoes"
           ]}
-          rows={filteredProducts.map((product) => [
+          rows={paginatedProducts.map((product) => [
             <ProductCheckbox
               key={`${product.id}-select`}
               checked={selectedProductIds.has(product.id)}
               label={`Selecionar ${product.name}`}
               onChange={(checked) => toggleProductSelection(product.id, checked)}
             />,
-            product.name,
-            product.sku,
-            product.ean ?? "-",
+            <div key={`${product.id}-name`} className="flex min-w-[280px] items-center gap-2">
+              <div className="grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-md border border-matrix-border bg-matrix-panel2/80">
+                {product.imageUrl ? (
+                  <Image
+                    alt={product.name}
+                    className="h-full w-full object-cover"
+                    height={44}
+                    src={product.imageUrl}
+                    unoptimized
+                    width={44}
+                  />
+                ) : (
+                  <ImageIcon className="h-4 w-4 text-matrix-muted" />
+                )}
+              </div>
+              <div className="flex min-w-0 items-center gap-1">
+                <span className="min-w-0 truncate">{product.name}</span>
+                <ProductCopyButton label="Copiar titulo" text={product.name} />
+              </div>
+            </div>,
+            <div key={`${product.id}-sku`} className="flex min-w-0 items-center gap-1">
+              <span className="min-w-0 truncate">{product.sku || "-"}</span>
+              <ProductCopyButton label="Copiar SKU" text={product.sku} />
+            </div>,
+            <div key={`${product.id}-ean`} className="flex min-w-0 items-center gap-1">
+              <span className="min-w-0 truncate">{product.ean ?? "-"}</span>
+              <ProductCopyButton label="Copiar EAN" text={product.ean} />
+            </div>,
             product.unit ?? "-",
             product.category ?? "-",
-            product.origin ?? "-",
-            <Badge key={`${product.id}-status`} tone={product.status === "READY_FOR_TEST" ? "success" : "muted"}>{statusLabel[product.status] ?? product.status}</Badge>,
-            product.displayValue ?? "-",
-            product.salePriceDisplay ?? "0,00",
+            formatCurrencyDisplay(product.costPriceDisplay ?? product.displayValue) ?? "-",
+            formatCurrencyDisplay(product.salePriceDisplay) ?? "0,00",
+            <span key={`${product.id}-margin`} className="text-xs text-matrix-muted">Aguardando marketplace</span>,
             product.stock,
-            "Sem Bling",
-            <div key={`${product.id}-updated`} className="flex items-center gap-2">
-              {formatDate(product.updatedAt)}
-              {product.hasEnrichmentDraft ? <Badge tone="info">Rascunho</Badge> : null}
-            </div>,
             <Button key={`${product.id}-actions`} variant="ghost" onClick={() => setViewingProduct(product)}>Ver</Button>
           ])}
           emptyMessage={loadingProducts ? "Carregando produtos..." : "Nenhum produto cadastrado ainda."}
+          footer={
+            <div className="flex flex-col gap-1 border-t border-matrix-border px-3 py-2 text-xs text-matrix-muted sm:flex-row sm:items-center sm:justify-between">
+              <span>
+                Pagina {currentPage} de {totalPages}
+              </span>
+              <span>
+                {pageStart}-{pageEnd} de {filteredProducts.length} produtos filtrados
+              </span>
+            </div>
+          }
         />
       </Card>
       {viewingProduct ? (
@@ -388,7 +632,7 @@ type ProductEditForm = {
 function productToForm(product: ProductListItem): ProductEditForm {
   return {
     name: product.name,
-    sku: product.sku,
+    sku: product.sku ?? "",
     ean: product.ean ?? "",
     unit: product.unit ?? "",
     category: product.category ?? "",
@@ -515,7 +759,7 @@ function ProductDetailsModal({
 
   const details = [
     ["Nome do produto", product.name],
-    ["SKU", product.sku],
+    ["SKU", product.sku ?? "Sem SKU"],
     ["EAN", product.ean ?? "-"],
     ["Unidade", product.unit ?? "-"],
     ["Categoria", product.category ?? "-"],
@@ -524,12 +768,12 @@ function ProductDetailsModal({
     ["Valor", product.displayValue ?? "-"],
     ["Preco de venda", product.salePriceDisplay ?? "0,00"],
     ["Estoque", String(product.stock)],
-    ["Status Bling", "Sem Bling"],
+    ["Status Bling", getBlingDisplayName(product) ?? "Sem Bling"],
     ["Data de atualizacao", formatDate(product.updatedAt)],
     ["Observacoes", product.description ?? "-"]
   ];
 
-  const isLocalTestProduct = product.sku.startsWith("TEST-") || product.origin === "Teste local";
+  const isLocalTestProduct = product.sku?.startsWith("TEST-") || product.origin === "Teste local";
   const inputClass = "rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm text-matrix-fg outline-none focus:border-matrix-gold/60";
   const fieldClass = "rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3";
   const aiModules = [
@@ -888,7 +1132,7 @@ function SmartRegistrationModal({
                   type="button"
                 >
                   <span className="block font-semibold">{product.name}</span>
-                  <span className="text-xs text-matrix-muted">{product.sku}</span>
+                  <span className="text-xs text-matrix-muted">{product.sku ?? "Sem SKU"}</span>
                 </button>
               ))}
             </div>
@@ -908,7 +1152,7 @@ function SmartRegistrationModal({
               <div className="grid gap-3 md:grid-cols-4">
                 {[
                   ["Nome atual", activeProduct.name],
-                  ["SKU", activeProduct.sku],
+                  ["SKU", activeProduct.sku ?? "Sem SKU"],
                   ["EAN/GTIN", activeProduct.ean ?? "Nao informado"],
                   ["Unidade", activeProduct.unit ?? "Nao informado"],
                   ["Categoria", activeProduct.category ?? "Nao informado"],
@@ -916,7 +1160,7 @@ function SmartRegistrationModal({
                   ["Valor", activeProduct.displayValue ?? "Nao informado"],
                   ["Preco venda", activeProduct.salePriceDisplay ?? "0,00"],
                   ["Estoque", String(activeProduct.stock)],
-                  ["Status Bling", "Sem Bling"]
+                  ["Status Bling", getBlingDisplayName(activeProduct) ?? "Sem Bling"]
                 ].map(([label, value]) => (
                   <div key={label} className="rounded-md border border-matrix-border bg-matrix-panel/70 p-3">
                     <p className="text-xs text-matrix-muted">{label}</p>

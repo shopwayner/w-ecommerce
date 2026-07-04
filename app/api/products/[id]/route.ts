@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { requireApiAuth } from "@/lib/auth/api";
+import { parseDecimalPrice } from "@/lib/decimal-price";
 import { prisma } from "@/lib/prisma";
+import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { productUpdateSchema } from "@/lib/validation";
-
-const gtinLengths = new Set([8, 12, 13, 14]);
 
 function normalizeOptionalText(value: string | null | undefined) {
   if (value === undefined) return undefined;
@@ -17,47 +18,45 @@ function getMetadata(blockedFields: unknown) {
     : {};
 }
 
-function normalizeGtin(value: string | null | undefined) {
-  const normalized = normalizeOptionalText(value);
-  if (!normalized) return null;
-  return normalized.replace(/\D/g, "");
+function getAttributes(attributes: unknown) {
+  return attributes && typeof attributes === "object" && !Array.isArray(attributes)
+    ? (attributes as Record<string, unknown>)
+    : {};
 }
 
-function isValidGtin(value: string | null) {
-  if (!value) return true;
-  if (!gtinLengths.has(value.length)) return false;
-
-  const digits = value.split("").map(Number);
-  if (digits.some((digit) => Number.isNaN(digit))) return false;
-
-  const checkDigit = digits.at(-1);
-  const body = digits.slice(0, -1).reverse();
-  const sum = body.reduce((total, digit, index) => total + digit * (index % 2 === 0 ? 3 : 1), 0);
-  const expected = (10 - (sum % 10)) % 10;
-  return checkDigit === expected;
+function getStringAttribute(attributes: Record<string, unknown>, key: string) {
+  const value = attributes[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function parseBrazilianDecimal(value: string | null | undefined, field: string) {
   const normalized = normalizeOptionalText(value);
   if (!normalized) return { numberValue: 0, displayValue: "0,00" };
 
-  const compact = normalized.replace(/\s/g, "");
-  if (!/^\d{1,3}(\.\d{3})*(,\d+)?$|^\d+(,\d+)?$/.test(compact)) {
+  const numberValue = parseDecimalPrice(normalized);
+  if (numberValue === null) {
     return { error: `${field} deve estar em formato numerico valido.` };
   }
-
-  const numberValue = Number(compact.replace(/\./g, "").replace(",", "."));
-  if (!Number.isFinite(numberValue) || numberValue < 0) {
+  if (numberValue < 0) {
     return { error: `${field} nao pode ser negativo.` };
   }
 
-  return { numberValue, displayValue: compact };
+  return { numberValue, displayValue: numberValue.toFixed(2) };
 }
 
 function formatProductResponse(product: Awaited<ReturnType<typeof loadProductForResponse>>) {
   const metadata = getMetadata(product.blockedFields);
+  const attributes = getAttributes(product.attributes);
   const inventoryStock = product.inventory.reduce((total, item) => total + item.physicalQuantity - item.reservedQuantity, 0);
   const stockOverride = typeof metadata.stockOverride === "number" ? metadata.stockOverride : null;
+  const currentPrice = product.prices[0];
+  const blingMapping = product.mappings[0];
+  const blingAccountName =
+    blingMapping?.connection.name ||
+    blingMapping?.connection.externalCompanyName ||
+    blingMapping?.connection.externalCompanyDocument ||
+    blingMapping?.connection.externalAccountId ||
+    null;
 
   return {
     id: product.id,
@@ -65,15 +64,56 @@ function formatProductResponse(product: Awaited<ReturnType<typeof loadProductFor
     sku: product.sku,
     ean: product.ean,
     category: product.category,
+    brand: product.brand,
+    ncm: product.ncm,
     origin: typeof metadata.origin === "string" ? metadata.origin : product.brand,
-    unit: typeof metadata.unit === "string" ? metadata.unit : null,
+    unit: typeof metadata.unit === "string" ? metadata.unit : typeof attributes.unit === "string" ? attributes.unit : null,
     description: product.description,
     imageUrl: product.images[0]?.url ?? null,
     hasEnrichmentDraft: product.enrichmentDrafts.length > 0,
     status: product.status,
+    enrichmentStatus: product.enrichmentStatus,
+    syncStatus: product.syncStatus,
+    source: product.source,
+    externalId: blingMapping?.externalProductId ?? getStringAttribute(attributes, "externalId"),
+    externalProductId: blingMapping?.externalProductId ?? getStringAttribute(attributes, "externalId"),
+    blingAccount: blingMapping
+      ? {
+          blingAccountId: blingMapping.connectionId,
+          blingAccountName,
+          displayName: blingAccountName,
+          blingAccountShortId: blingMapping.connectionId.slice(-8),
+          isActiveDefault: blingMapping.connection.isDefault,
+          externalProductId: blingMapping.externalProductId,
+          status: blingMapping.connection.status
+        }
+      : null,
+    blingStatus: getStringAttribute(attributes, "blingStatus"),
+    marketplaceCategories: product.marketplaceCategoryMappings.map((mapping) => ({
+      provider: mapping.provider,
+      status: mapping.status,
+      marketplaceCategoryId: mapping.marketplaceCategoryId,
+      marketplaceCategoryName: mapping.marketplaceCategoryName,
+      marketplaceCategoryPath: mapping.marketplaceCategoryPath,
+      confidenceScore: mapping.confidenceScore,
+      requiredAttributes: mapping.requiredAttributes,
+      attributeValues: mapping.productAttributeValues.map((value) => ({
+        attributeId: value.attributeId,
+        value: value.value,
+        status: value.status
+      }))
+    })),
+    confidenceScore: product.confidenceScore,
+    weight: product.weight?.toString() ?? null,
+    height: product.height?.toString() ?? null,
+    width: product.width?.toString() ?? null,
+    depth: product.depth?.toString() ?? null,
+    attributes: product.attributes,
     displayValue: typeof metadata.displayValue === "string" ? metadata.displayValue : null,
-    salePriceDisplay: typeof metadata.salePriceDisplay === "string" ? metadata.salePriceDisplay : null,
-    price: product.prices[0]?.salePrice.toString() ?? "0",
+    salePriceDisplay: typeof metadata.salePriceDisplay === "string" ? metadata.salePriceDisplay : currentPrice?.salePrice.toString() ?? null,
+    costPrice: currentPrice?.costPrice.toString() ?? "0",
+    costPriceDisplay: currentPrice?.costPrice.toString() ?? null,
+    price: currentPrice?.salePrice.toString() ?? "0",
     stock: product.inventory.length ? inventoryStock : stockOverride ?? inventoryStock,
     updatedAt: product.updatedAt
   };
@@ -86,9 +126,79 @@ function loadProductForResponse(productId: string, organizationId: string) {
       prices: { take: 1, orderBy: { createdAt: "desc" } },
       inventory: true,
       images: { take: 1, orderBy: { position: "asc" } },
-      enrichmentDrafts: { take: 1, orderBy: { updatedAt: "desc" } }
+      enrichmentDrafts: { take: 1, orderBy: { updatedAt: "desc" } },
+      mappings: {
+        take: 1,
+        orderBy: { updatedAt: "desc" },
+        include: {
+          connection: true
+        }
+      },
+      marketplaceCategoryMappings: {
+        where: { provider: "MERCADO_LIVRE" },
+        take: 1,
+        orderBy: { updatedAt: "desc" },
+        include: {
+          productAttributeValues: {
+            select: {
+              attributeId: true,
+              value: true,
+              status: true
+            }
+          }
+        }
+      }
     }
   });
+}
+
+function toOptionalJson(value: Record<string, unknown> | null | undefined) {
+  if (value === undefined) return undefined;
+  if (value === null) return Prisma.JsonNull;
+  return value as Prisma.InputJsonValue;
+}
+
+export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const auth = await requireApiAuth("products:read");
+  if (!auth.ok) return auth.response;
+
+  const { id } = await params;
+  const product = await prisma.product.findFirst({
+    where: { id, organizationId: auth.context.organizationId },
+    include: {
+      prices: { take: 1, orderBy: { createdAt: "desc" } },
+      inventory: true,
+      images: { take: 1, orderBy: { position: "asc" } },
+      enrichmentDrafts: { take: 1, orderBy: { updatedAt: "desc" } },
+      mappings: {
+        take: 1,
+        orderBy: { updatedAt: "desc" },
+        include: {
+          connection: true
+        }
+      },
+      marketplaceCategoryMappings: {
+        where: { provider: "MERCADO_LIVRE" },
+        take: 1,
+        orderBy: { updatedAt: "desc" },
+        include: {
+          productAttributeValues: {
+            select: {
+              attributeId: true,
+              value: true,
+              status: true
+            }
+          }
+        }
+      }
+    }
+  });
+
+  if (!product) {
+    return NextResponse.json({ error: "Produto nao encontrado." }, { status: 404 });
+  }
+
+  return NextResponse.json({ data: formatProductResponse(product) });
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -140,12 +250,21 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         where: { id: existing.id },
         data: {
           name: parsed.data.name,
-          sku: parsed.data.sku,
+          ...(parsed.data.sku !== undefined ? { sku: normalizeOptionalText(parsed.data.sku) } : {}),
           ean,
           description,
           category: normalizeOptionalText(parsed.data.category),
           brand: normalizeOptionalText(parsed.data.origin),
           status: parsed.data.status ?? existing.status,
+          enrichmentStatus: parsed.data.enrichmentStatus ?? existing.enrichmentStatus,
+          syncStatus: parsed.data.syncStatus ?? existing.syncStatus,
+          source: normalizeOptionalText(parsed.data.source) ?? existing.source,
+          confidenceScore: parsed.data.confidenceScore ?? existing.confidenceScore,
+          weight: parsed.data.weight,
+          height: parsed.data.height,
+          width: parsed.data.width,
+          depth: parsed.data.depth,
+          attributes: toOptionalJson(parsed.data.attributes),
           blockedFields: {
             ...metadata,
             unit: normalizeOptionalText(parsed.data.unit),

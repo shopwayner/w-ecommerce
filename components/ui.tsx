@@ -91,7 +91,17 @@ export function EmptyState({ title, description, action }: { title: string; desc
   );
 }
 
-export function DataTable({ columns, rows, emptyMessage = "Nenhum registro encontrado." }: { columns: ReactNode[]; rows: ReactNode[][]; emptyMessage?: string }) {
+export function DataTable({
+  columns,
+  rows,
+  emptyMessage = "Nenhum registro encontrado.",
+  footer
+}: {
+  columns: ReactNode[];
+  rows: ReactNode[][];
+  emptyMessage?: string;
+  footer?: ReactNode;
+}) {
   return (
     <div className="matrix-scroll overflow-x-auto rounded-md border border-matrix-border bg-matrix-panel">
       <table className="min-w-full divide-y divide-matrix-border text-left text-sm">
@@ -124,10 +134,12 @@ export function DataTable({ columns, rows, emptyMessage = "Nenhum registro encon
           )}
         </tbody>
       </table>
-      <div className="flex items-center justify-between border-t border-matrix-border px-3 py-2 text-xs text-matrix-muted">
-        <span>Pagina 1 de 1</span>
-        <span>{rows.length} itens</span>
-      </div>
+      {footer ?? (
+        <div className="flex items-center justify-between border-t border-matrix-border px-3 py-2 text-xs text-matrix-muted">
+          <span>Pagina 1 de 1</span>
+          <span>{rows.length} itens</span>
+        </div>
+      )}
     </div>
   );
 }

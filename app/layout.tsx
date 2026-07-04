@@ -5,7 +5,10 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Matrix Commerce Hub",
-  description: "Central SaaS multi-Bling e multi-ERP para automacao de commerce."
+  description: "Central SaaS multi-Bling e multi-ERP para automacao de commerce.",
+  icons: {
+    icon: "/favicon.svg"
+  }
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

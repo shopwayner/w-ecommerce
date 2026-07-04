@@ -4,7 +4,7 @@ import { searchMercadoLivreProduct } from "@/lib/services/providers/mercado-livr
 type ProductForEnrichment = {
   id: string;
   name: string;
-  sku: string;
+  sku: string | null;
   ean: string | null;
   category: string | null;
   brand: string | null;
@@ -77,9 +77,26 @@ function buildCompatibility(productName: string) {
   return inferred.length ? inferred : ["Compatibilidade nao confirmada"];
 }
 
+function externalEnrichmentEnabled() {
+  return process.env.EXTERNAL_PRODUCT_ENRICHMENT_ENABLED === "1";
+}
+
+function localOnlyMercadoLivreResult(product: ProductForEnrichment) {
+  return {
+    configured: false,
+    status: "Nao configurado" as const,
+    searchMode: product.ean ? ("EAN/GTIN" as const) : ("nome do produto" as const),
+    query: product.ean ?? product.name,
+    bestResult: null,
+    alternatives: []
+  };
+}
+
 export async function generateProductEnrichmentDraft(product: ProductForEnrichment, options: { organizationId?: string } = {}) {
   const metadata = readMetadata(product);
-  const mercadoLivre = await searchMercadoLivreProduct({ ean: product.ean, name: product.name, organizationId: options.organizationId });
+  const mercadoLivre = externalEnrichmentEnabled()
+    ? await searchMercadoLivreProduct({ ean: product.ean, name: product.name, organizationId: options.organizationId })
+    : localOnlyMercadoLivreResult(product);
   const mercadoLivreTitle = limitMarketplaceTitle(mercadoLivre.bestResult?.title);
   const generatedTitle = mercadoLivreTitle ?? buildSuggestedTitle(product);
   const searchMode = product.ean ? "EAN/GTIN" : "nome do produto";
@@ -133,7 +150,7 @@ export async function generateProductEnrichmentDraft(product: ProductForEnrichme
 
   const technicalSpecs = {
     Produto: generatedTitle,
-    SKU: product.sku,
+    SKU: product.sku ?? "Sem SKU",
     "EAN/GTIN": product.ean ?? "Nao informado",
     Unidade: metadata.unit,
     Categoria: mercadoLivre.bestResult?.category ?? product.category ?? "Nao informado",
@@ -177,7 +194,7 @@ export async function generateProductEnrichmentDraft(product: ProductForEnrichme
     },
     baseData: {
       name: product.name,
-      sku: product.sku,
+      sku: product.sku ?? "Sem SKU",
       ean: product.ean ?? "Nao informado",
       unit: metadata.unit,
       category: product.category ?? "Nao informado",

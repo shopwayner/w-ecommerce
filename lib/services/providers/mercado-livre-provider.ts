@@ -41,45 +41,21 @@ type MercadoLivreCategory = {
   name?: string;
 };
 
-type MercadoLivreTokenResponse = {
-  access_token?: string;
-};
-
 function readEnv(name: string) {
   const value = process.env[name]?.trim();
   return value ? value : null;
 }
 
+function readEnvAlias(...names: string[]) {
+  for (const name of names) {
+    const value = readEnv(name);
+    if (value) return value;
+  }
+  return null;
+}
+
 function getSiteId() {
-  return readEnv("MERCADOLIVRE_SITE_ID") ?? "MLB";
-}
-
-function getAccessToken() {
-  return readEnv("MERCADOLIVRE_ACCESS_TOKEN");
-}
-
-async function refreshAccessToken() {
-  const clientId = readEnv("MERCADOLIVRE_CLIENT_ID");
-  const clientSecret = readEnv("MERCADOLIVRE_CLIENT_SECRET");
-  const refreshToken = readEnv("MERCADOLIVRE_REFRESH_TOKEN");
-
-  if (!clientId || !clientSecret || !refreshToken) return null;
-
-  const response = await fetch("https://api.mercadolibre.com/oauth/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      client_id: clientId,
-      client_secret: clientSecret,
-      refresh_token: refreshToken
-    })
-  });
-
-  if (!response.ok) return null;
-
-  const payload = (await response.json()) as MercadoLivreTokenResponse;
-  return payload.access_token ?? null;
+  return readEnvAlias("MERCADO_LIVRE_SITE_ID", "MERCADOLIVRE_SITE_ID") ?? "MLB";
 }
 
 async function getTokenForSearch(organizationId?: string) {
@@ -88,11 +64,11 @@ async function getTokenForSearch(organizationId?: string) {
     if (connectionToken) return connectionToken;
   }
 
-  return getAccessToken() ?? (await refreshAccessToken());
+  return null;
 }
 
 function isConfigured() {
-  return Boolean(getAccessToken() || (readEnv("MERCADOLIVRE_CLIENT_ID") && readEnv("MERCADOLIVRE_CLIENT_SECRET") && readEnv("MERCADOLIVRE_REFRESH_TOKEN")));
+  return Boolean(readEnvAlias("MERCADO_LIVRE_CLIENT_ID", "MERCADOLIVRE_CLIENT_ID") && readEnvAlias("MERCADO_LIVRE_REDIRECT_URI", "MERCADOLIVRE_REDIRECT_URI"));
 }
 
 function pickAttribute(attributes: MercadoLivreItem["attributes"], ids: string[]) {

@@ -1,6 +1,7 @@
 import {
   BadgeDollarSign,
   BarChart3,
+  Barcode,
   Bot,
   Boxes,
   Brain,
@@ -54,6 +55,7 @@ export const navigationItems: NavigationItem[] = [
     ]
   },
   { label: "Produtos", href: "/products", icon: Package },
+  { label: "GTIN", href: "/gtin", icon: Barcode },
   { label: "Pedidos", href: "/orders", icon: ShoppingCart },
   {
     type: "group",

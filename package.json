@@ -10,6 +10,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "tsx prisma/seed.ts",
+    "seed:production": "tsx scripts/seed-production.ts",
+    "security:audit": "tsx scripts/audit-api-security.ts",
     "seed:test-products": "tsx scripts/seed-test-products.ts"
   },
   "dependencies": {
@@ -17,6 +19,7 @@
     "bcryptjs": "^3.0.3",
     "bullmq": "^5.26.2",
     "clsx": "^2.1.1",
+    "exceljs": "^4.4.0",
     "ioredis": "^5.4.1",
     "jose": "^6.2.3",
     "lucide-react": "^0.468.0",
