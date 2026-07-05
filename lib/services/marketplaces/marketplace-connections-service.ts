@@ -108,52 +108,17 @@ export class MarketplaceConnectionsService {
 
   async listSafeConnections(organizationId: string) {
     const connections = await prisma.marketplaceConnection.findMany({ where: { organizationId } });
-    const items = [];
-    for (const provider of marketplaceProviders) {
+    return marketplaceProviders.map((provider) => {
       const connection = connections.find((item) => item.provider === provider.provider) ?? null;
-      if (!connection && provider.provider === MarketplaceProvider.MERCADOLIVRE) {
-        items.push(await this.toSafeMercadoLivreFallback(organizationId, provider));
-      } else {
-        items.push(this.toSafeConnection(provider, connection));
-      }
-    }
-    return items;
+      return this.toSafeConnection(provider, connection);
+    });
   }
 
   async getSafeConnection(organizationId: string, provider: MarketplaceProviderInfo) {
     const connection = await prisma.marketplaceConnection.findUnique({
       where: { organizationId_provider: { organizationId, provider: provider.provider } }
     });
-    if (!connection && provider.provider === MarketplaceProvider.MERCADOLIVRE) {
-      return this.toSafeMercadoLivreFallback(organizationId, provider);
-    }
     return this.toSafeConnection(provider, connection);
-  }
-
-  async toSafeMercadoLivreFallback(organizationId: string, provider: MarketplaceProviderInfo) {
-    const status = await mercadoLivreOAuthService.getStatus(organizationId);
-    if (!status.data) return this.toSafeConnection(provider, null);
-
-    return {
-      ...this.toSafeConnection(provider, null),
-      accountAlias: status.data.accountAlias ?? status.data.name,
-      status: status.data.status === "ACTIVE" ? "ACTIVE" : "PENDING",
-      statusLabel: status.data.statusLabel,
-      configStatus: status.data.configStatus,
-      credentials: {
-        clientId: status.data.clientId,
-        clientSecret: status.data.hasClientSecret ? "••••••••••••••••" : null,
-        redirectUri: status.data.redirectUri,
-        siteId: status.data.siteId
-      },
-      hasCredentials: status.configured,
-      taxRate: status.data.taxRate ?? "",
-      orderImportStartDate: status.data.orderImportStartDate ?? "",
-      siteId: status.data.siteId,
-      connectedAt: status.data.connectedAt,
-      updatedAt: status.data.updatedAt,
-      lastError: status.data.lastError
-    };
   }
 
   toSafeConnection(provider: MarketplaceProviderInfo, connection: Awaited<ReturnType<typeof prisma.marketplaceConnection.findFirst>> | null) {
