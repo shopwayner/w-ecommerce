@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, Copy, Eye, EyeOff, Lightbulb, Plus, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Copy, ExternalLink, Eye, EyeOff, Lightbulb, Plus, X } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { Badge, Button, Card } from "@/components/ui";
 
@@ -321,7 +321,7 @@ export function MarketplacesPage() {
       <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-7">
         {marketplaces.map((marketplace) => {
           const connection = connections.find((item) => item.slug === marketplace.key);
-          const statusLabel = connection?.statusLabel ?? "Não configurado";
+          const statusLabel = connection?.statusLabel ?? "Configuração ausente";
           return (
             <Card key={marketplace.key} className="group flex min-h-[280px] flex-col bg-matrix-panel/78 p-4 transition hover:border-matrix-gold/55 hover:shadow-gold">
               <div className="flex items-start justify-between gap-3">
@@ -332,10 +332,18 @@ export function MarketplacesPage() {
                 <h3 className="text-lg font-semibold text-matrix-fg">{marketplace.name}</h3>
                 <p className="mt-3 text-sm leading-6 text-matrix-muted">{marketplace.description}</p>
               </div>
-              <Button className="mt-auto w-full border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" variant="secondary" onClick={() => setSelected(marketplace)}>
-                <Plus className="h-4 w-4" />
-                Nova integração {marketplace.name}
-              </Button>
+              <div className="mt-auto grid gap-2">
+                {marketplace.key === "mercadolivre" ? (
+                  <Button className="w-full" variant="secondary" onClick={() => window.location.assign("/marketplaces/mercado-livre")}>
+                    <ExternalLink className="h-4 w-4" />
+                    Abrir gestao
+                  </Button>
+                ) : null}
+                <Button className="w-full border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" variant="secondary" onClick={() => setSelected(marketplace)}>
+                  <Plus className="h-4 w-4" />
+                  Nova integração {marketplace.name}
+                </Button>
+              </div>
             </Card>
           );
         })}

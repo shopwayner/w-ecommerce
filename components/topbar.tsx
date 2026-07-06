@@ -1,6 +1,6 @@
 "use client";
 
-import { Bell, LogOut, Menu, Moon, Plus, Search, Sun, UserRound } from "lucide-react";
+import { Bell, LogOut, Menu, Moon, Plus, Sun, UserRound } from "lucide-react";
 import { usePathname } from "next/navigation";
 import { memo, useEffect, useState } from "react";
 import { useTheme } from "@/components/theme-provider";
@@ -29,6 +29,8 @@ type AccountContextView = {
   options: AccountContextOption[];
 };
 
+const marketplaceOptions = ["Mercado Livre", "Amazon", "Shopee", "TikTok Shop", "Magalu", "Madeira Madeira"];
+
 let cachedSession: SessionView | null = null;
 
 function contextKey(option: Pick<AccountContextOption, "mode" | "provider" | "connectionId">) {
@@ -40,6 +42,7 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed }: { onMenuClick: () =>
   const [accountContext, setAccountContext] = useState<AccountContextView | null>(null);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [changingContextKey, setChangingContextKey] = useState<string | null>(null);
+  const [selectedMarketplace, setSelectedMarketplace] = useState("");
   const { theme, toggleTheme } = useTheme();
   const pathname = usePathname();
   const currentLabel = accountContext?.label ?? "nenhuma";
@@ -129,14 +132,23 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed }: { onMenuClick: () =>
         <button onClick={onMenuClick} className="grid h-10 w-10 place-items-center rounded-md border border-matrix-border bg-matrix-panel2 text-matrix-muted lg:hidden">
           <Menu className="h-5 w-5" />
         </button>
-        <div className="flex min-w-0 flex-1 items-center gap-3 rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 py-2 gold-ring">
-          <Search className="h-4 w-4 text-matrix-gold" />
-          <input
-            className="w-full bg-transparent text-sm text-matrix-fg outline-none placeholder:text-matrix-muted"
-            placeholder="Buscar produto, SKU, pedido ou integracao"
-          />
-          <span className="hidden rounded-md bg-matrix-goldSoft/50 px-2 py-1 text-xs font-semibold text-matrix-goldDark md:inline">Ctrl K</span>
-        </div>
+        <label className="flex min-w-0 flex-1 items-center rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 py-2 gold-ring sm:min-w-[11rem] sm:max-w-sm lg:max-w-md">
+          <span className="sr-only">Marketplace</span>
+          <select
+            className="min-w-0 w-full bg-transparent text-sm font-semibold text-matrix-fg outline-none"
+            onChange={(event) => setSelectedMarketplace(event.target.value)}
+            value={selectedMarketplace}
+          >
+            <option className="bg-matrix-panel text-matrix-fg" value="">
+              Marketplace
+            </option>
+            {marketplaceOptions.map((marketplace) => (
+              <option className="bg-matrix-panel text-matrix-fg" key={marketplace} value={marketplace}>
+                {marketplace}
+              </option>
+            ))}
+          </select>
+        </label>
         <div className="relative hidden sm:block">
           <button
             className="flex max-w-[260px] items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm font-semibold text-matrix-fg hover:border-matrix-gold/50"
