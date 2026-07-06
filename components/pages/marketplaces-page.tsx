@@ -262,6 +262,10 @@ export function MarketplacesPage() {
   async function connectProvider() {
     if (!selected) return;
     setMessage("");
+    if (selected.key === "mercadolivre") {
+      window.location.assign("/api/marketplaces/mercado-livre/client/connect");
+      return;
+    }
     const response = await fetch(`/api/marketplaces/connections/${selected.key}/auth-url`);
     const payload = await response.json();
     if (!response.ok) {
@@ -294,6 +298,10 @@ export function MarketplacesPage() {
 
   const canSave = Boolean(selectedConnection && form.accountAlias.trim());
   const canConnect = Boolean(selectedConnection?.supportsOAuth && selectedConnection.authUrlImplemented && selectedConnection.hasCredentials);
+
+  function connectMercadoLivreClient() {
+    window.location.assign("/api/marketplaces/mercado-livre/client/connect");
+  }
 
   return (
     <AppShell>
@@ -339,7 +347,11 @@ export function MarketplacesPage() {
                     Abrir gestao
                   </Button>
                 ) : null}
-                <Button className="w-full border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" variant="secondary" onClick={() => setSelected(marketplace)}>
+                <Button
+                  className="w-full border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35"
+                  variant="secondary"
+                  onClick={marketplace.key === "mercadolivre" ? connectMercadoLivreClient : () => setSelected(marketplace)}
+                >
                   <Plus className="h-4 w-4" />
                   Nova integração {marketplace.name}
                 </Button>

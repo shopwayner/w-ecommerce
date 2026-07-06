@@ -1,40 +1,40 @@
 # Auditoria estatica de seguranca das APIs
 
-Gerado em: 2026-07-06T00:36:13.266Z
+Gerado em: 2026-07-06T21:45:35.952Z
 
 Este relatorio e uma analise estatica simples dos arquivos `app/api/**/route.ts`. Ele nao executa rotas, nao acessa banco e nao chama APIs externas.
 
 ## Resumo
 
-- APIs/metodos auditados: 100
-- Arquivos `route.ts`: 92
-- Rotas publicas esperadas: 9
-- Rotas protegidas: 91
-- Rotas/metodos write: 56
+- APIs/metodos auditados: 109
+- Arquivos `route.ts`: 101
+- Rotas publicas esperadas: 11
+- Rotas protegidas: 99
+- Rotas/metodos write: 60
 - Rotas perigosas com confirmacao detectada: 6
 - Dangerous routes with confirmation: 6
 - Dangerous routes with audit log: 4
-- Dangerous routes missing audit log: 16
+- Dangerous routes missing audit log: 17
 
 ## Contagem por tipo
 
 | Tipo | Quantidade |
 | --- | ---: |
-| AUTH_REQUIRED_READ | 28 |
-| AUTH_REQUIRED_WRITE | 37 |
+| AUTH_REQUIRED_READ | 29 |
+| AUTH_REQUIRED_WRITE | 40 |
 | DANGEROUS_REQUIRES_CONFIRMATION | 6 |
-| EXTERNAL_READ_ONLY | 13 |
+| EXTERNAL_READ_ONLY | 16 |
 | EXTERNAL_WRITE_BLOCKED | 7 |
-| PUBLIC_SAFE | 9 |
+| PUBLIC_SAFE | 11 |
 
 ## Contagem por risco
 
 | Risco | Quantidade |
 | --- | ---: |
 | CRITICAL | 2 |
-| HIGH | 16 |
-| MEDIUM | 47 |
-| LOW | 35 |
+| HIGH | 17 |
+| MEDIUM | 52 |
+| LOW | 38 |
 
 ## Dangerous routes with confirmation
 
@@ -58,6 +58,7 @@ Este relatorio e uma analise estatica simples dos arquivos `app/api/**/route.ts`
 - POST `/api/gtin/import/preview` - `app/api/gtin/import/preview/route.ts`
 - POST `/api/inventory/import-from-bling` - `app/api/inventory/import-from-bling/route.ts`
 - POST `/api/inventory/sync-to-branches` - `app/api/inventory/sync-to-branches/route.ts`
+- POST `/api/marketplaces/mercado-livre/client/listings/sync` - `app/api/marketplaces/mercado-livre/client/listings/sync/route.ts`
 - POST `/api/marketplaces/mercado-livre/import-by-item` - `app/api/marketplaces/mercado-livre/import-by-item/route.ts`
 - POST `/api/marketplaces/mercado-livre/listings-sync/start` - `app/api/marketplaces/mercado-livre/listings-sync/start/route.ts`
 - POST `/api/matrix/sync-now` - `app/api/matrix/sync-now/route.ts`
@@ -124,13 +125,20 @@ Este relatorio e uma analise estatica simples dos arquivos `app/api/**/route.ts`
 | POST | `/api/inventory/transfer` | `app/api/inventory/transfer/route.ts` | AUTH_REQUIRED_WRITE | sim | nao | nao | nao | nao | MEDIUM | Garantir organizationId da sessao, validacao de entrada e audit log quando houver impacto. |
 | GET | `/api/marketplaces/connections` | `app/api/marketplaces/connections/route.ts` | EXTERNAL_READ_ONLY | sim | sim | nao | sim | nao | MEDIUM | Garantir que chamada externa continue read-only e que logs sejam sanitizados. |
 | GET | `/api/marketplaces/connections/[provider]` | `app/api/marketplaces/connections/[provider]/route.ts` | EXTERNAL_READ_ONLY | sim | sim | nao | sim | nao | MEDIUM | Garantir que chamada externa continue read-only e que logs sejam sanitizados. |
-| GET | `/api/marketplaces/connections/[provider]/auth-url` | `app/api/marketplaces/connections/[provider]/auth-url/route.ts` | EXTERNAL_READ_ONLY | sim | sim | sim | sim | nao | MEDIUM | Garantir que chamada externa continue read-only e que logs sejam sanitizados. |
+| GET | `/api/marketplaces/connections/[provider]/auth-url` | `app/api/marketplaces/connections/[provider]/auth-url/route.ts` | EXTERNAL_READ_ONLY | sim | nao | nao | sim | nao | MEDIUM | Garantir que chamada externa continue read-only e que logs sejam sanitizados. |
 | GET | `/api/marketplaces/connections/[provider]/callback` | `app/api/marketplaces/connections/[provider]/callback/route.ts` | PUBLIC_SAFE | nao | nao | nao | sim | nao | LOW | Manter callback protegido por state e sem retorno de segredo. |
 | POST | `/api/marketplaces/connections/[provider]/config` | `app/api/marketplaces/connections/[provider]/config/route.ts` | AUTH_REQUIRED_WRITE | sim | sim | nao | sim | nao | MEDIUM | Garantir organizationId da sessao, validacao de entrada e audit log quando houver impacto. |
 | POST | `/api/marketplaces/connections/[provider]/disconnect` | `app/api/marketplaces/connections/[provider]/disconnect/route.ts` | AUTH_REQUIRED_WRITE | sim | sim | sim | sim | nao | MEDIUM | Garantir organizationId da sessao, validacao de entrada e audit log quando houver impacto. |
 | POST | `/api/marketplaces/connections/[provider]/test` | `app/api/marketplaces/connections/[provider]/test/route.ts` | AUTH_REQUIRED_WRITE | sim | sim | nao | sim | nao | MEDIUM | Garantir organizationId da sessao, validacao de entrada e audit log quando houver impacto. |
 | GET | `/api/marketplaces/mercado-livre/accounts` | `app/api/marketplaces/mercado-livre/accounts/route.ts` | EXTERNAL_READ_ONLY | sim | sim | nao | sim | nao | MEDIUM | Garantir que chamada externa continue read-only e que logs sejam sanitizados. |
 | GET | `/api/marketplaces/mercado-livre/callback` | `app/api/marketplaces/mercado-livre/callback/route.ts` | PUBLIC_SAFE | nao | sim | sim | sim | nao | LOW | Manter callback protegido por state e sem retorno de segredo. |
+| GET | `/api/marketplaces/mercado-livre/client/accounts` | `app/api/marketplaces/mercado-livre/client/accounts/route.ts` | EXTERNAL_READ_ONLY | sim | sim | nao | sim | nao | MEDIUM | Garantir que chamada externa continue read-only e que logs sejam sanitizados. |
+| GET | `/api/marketplaces/mercado-livre/client/callback` | `app/api/marketplaces/mercado-livre/client/callback/route.ts` | PUBLIC_SAFE | sim | sim | nao | sim | nao | LOW | Manter callback protegido por state e sem retorno de segredo. |
+| GET | `/api/marketplaces/mercado-livre/client/connect` | `app/api/marketplaces/mercado-livre/client/connect/route.ts` | EXTERNAL_READ_ONLY | sim | sim | sim | sim | nao | MEDIUM | Garantir que chamada externa continue read-only e que logs sejam sanitizados. |
+| POST | `/api/marketplaces/mercado-livre/client/disconnect` | `app/api/marketplaces/mercado-livre/client/disconnect/route.ts` | AUTH_REQUIRED_WRITE | sim | sim | sim | sim | nao | MEDIUM | Garantir organizationId da sessao, validacao de entrada e audit log quando houver impacto. |
+| GET | `/api/marketplaces/mercado-livre/client/listings` | `app/api/marketplaces/mercado-livre/client/listings/route.ts` | EXTERNAL_READ_ONLY | sim | nao | nao | sim | nao | MEDIUM | Garantir que chamada externa continue read-only e que logs sejam sanitizados. |
+| POST | `/api/marketplaces/mercado-livre/client/listings/sync` | `app/api/marketplaces/mercado-livre/client/listings/sync/route.ts` | AUTH_REQUIRED_WRITE | sim | nao | sim | sim | nao | HIGH | Adicionar confirmacao textual exata antes de executar operacao sensivel. |
+| POST | `/api/marketplaces/mercado-livre/client/notifications` | `app/api/marketplaces/mercado-livre/client/notifications/route.ts` | PUBLIC_SAFE | nao | nao | nao | sim | nao | LOW | Rota publica esperada. |
 | GET | `/api/marketplaces/mercado-livre/connect` | `app/api/marketplaces/mercado-livre/connect/route.ts` | EXTERNAL_READ_ONLY | sim | sim | sim | sim | nao | MEDIUM | Garantir que chamada externa continue read-only e que logs sejam sanitizados. |
 | POST | `/api/marketplaces/mercado-livre/disconnect` | `app/api/marketplaces/mercado-livre/disconnect/route.ts` | AUTH_REQUIRED_WRITE | sim | sim | sim | sim | nao | MEDIUM | Garantir organizationId da sessao, validacao de entrada e audit log quando houver impacto. |
 | POST | `/api/marketplaces/mercado-livre/import-by-item` | `app/api/marketplaces/mercado-livre/import-by-item/route.ts` | AUTH_REQUIRED_WRITE | sim | nao | sim | sim | nao | HIGH | Adicionar confirmacao textual exata antes de executar operacao sensivel. |
@@ -142,6 +150,8 @@ Este relatorio e uma analise estatica simples dos arquivos `app/api/**/route.ts`
 | POST | `/api/matrix/rules` | `app/api/matrix/rules/route.ts` | AUTH_REQUIRED_WRITE | sim | nao | nao | nao | nao | MEDIUM | Garantir organizationId da sessao, validacao de entrada e audit log quando houver impacto. |
 | PATCH | `/api/matrix/rules/[id]` | `app/api/matrix/rules/[id]/route.ts` | AUTH_REQUIRED_WRITE | sim | nao | nao | nao | nao | MEDIUM | Garantir organizationId da sessao, validacao de entrada e audit log quando houver impacto. |
 | POST | `/api/matrix/sync-now` | `app/api/matrix/sync-now/route.ts` | AUTH_REQUIRED_WRITE | sim | nao | nao | nao | nao | HIGH | Adicionar confirmacao textual exata antes de executar operacao sensivel. |
+| GET | `/api/notifications` | `app/api/notifications/route.ts` | AUTH_REQUIRED_READ | sim | sim | nao | nao | nao | LOW | Manter leitura filtrada por organizationId e sem segredos no JSON. |
+| POST | `/api/notifications/read-all` | `app/api/notifications/read-all/route.ts` | AUTH_REQUIRED_WRITE | sim | sim | nao | nao | nao | MEDIUM | Garantir organizationId da sessao, validacao de entrada e audit log quando houver impacto. |
 | GET | `/api/orders` | `app/api/orders/route.ts` | AUTH_REQUIRED_READ | sim | sim | nao | nao | nao | LOW | Manter leitura filtrada por organizationId e sem segredos no JSON. |
 | POST | `/api/orders` | `app/api/orders/route.ts` | AUTH_REQUIRED_WRITE | sim | sim | nao | nao | nao | MEDIUM | Garantir organizationId da sessao, validacao de entrada e audit log quando houver impacto. |
 | POST | `/api/orders/[id]/send-to-bling` | `app/api/orders/[id]/send-to-bling/route.ts` | EXTERNAL_WRITE_BLOCKED | sim | nao | nao | nao | nao | HIGH | Manter bloqueado por feature flag, confirmacao textual e auditoria antes de qualquer escrita externa real. |

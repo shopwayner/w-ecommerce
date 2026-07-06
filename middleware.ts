@@ -1,7 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth/token";
 
-const publicApiRoutes = ["/api/auth/login", "/api/auth/logout", "/api/integrations/bling/callback"];
+const publicApiRoutes = [
+  "/api/auth/login",
+  "/api/auth/logout",
+  "/api/integrations/bling/callback",
+  "/api/marketplaces/mercado-livre/client/callback",
+  "/api/marketplaces/mercado-livre/client/notifications"
+];
 const publicPageRoutes = ["/login", "/plans"];
 
 function isPublicAsset(pathname: string) {

@@ -50,6 +50,7 @@ function classify(input: Omit<RouteFinding, "type" | "risk" | "recommendation">)
   const isPublicExpected =
     route === "/api/auth/login" ||
     route === "/api/auth/logout" ||
+    route === "/api/marketplaces/mercado-livre/client/notifications" ||
     route.includes("/callback");
   const dangerous = hasAny(route, [
     /reset/,

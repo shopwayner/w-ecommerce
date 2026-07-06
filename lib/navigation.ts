@@ -14,7 +14,6 @@ import {
   Package,
   Settings,
   ShoppingCart,
-  Store,
   Users,
   Workflow
 } from "lucide-react";
@@ -69,7 +68,6 @@ export const navigationItems: NavigationItem[] = [
       { label: "Cobrancas", href: "/finance/billing" }
     ]
   },
-  { label: "Marketplaces", href: "/marketplaces", icon: Store },
   { label: "ERPS", href: "/erps", icon: Cpu },
   { label: "IA", href: "/ia", icon: Brain },
   { label: "Relatorios", href: "/reports", icon: FileBarChart },
