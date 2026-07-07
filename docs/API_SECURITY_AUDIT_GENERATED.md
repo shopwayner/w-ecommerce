@@ -1,6 +1,6 @@
 # Auditoria estatica de seguranca das APIs
 
-Gerado em: 2026-07-06T21:45:35.952Z
+Gerado em: 2026-07-07T09:37:29.406Z
 
 Este relatorio e uma analise estatica simples dos arquivos `app/api/**/route.ts`. Ele nao executa rotas, nao acessa banco e nao chama APIs externas.
 

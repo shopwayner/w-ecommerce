@@ -1,5 +1,5 @@
 import type { Prisma } from "@prisma/client";
-import { MarketplaceProvider } from "@prisma/client";
+import { MarketplaceCategoryProvider, MarketplaceProvider } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { mercadoLivreClientOAuthService } from "@/lib/services/marketplaces/mercado-livre-client-oauth-service";
@@ -8,7 +8,12 @@ import { sanitizeLogPayload } from "@/lib/utils";
 const apiBaseUrl = "https://api.mercadolibre.com";
 const defaultLimit = 50;
 const maxLimit = 100;
+const globalSearchMaxListings = 500;
 const detailsChunkSize = 20;
+const feeEstimateConcurrency = 6;
+const feeEstimateTimeoutMs = 5000;
+const shippingEstimateConcurrency = 6;
+const shippingEstimateTimeoutMs = 5000;
 const listingStatuses = ["active", "paused", "closed", "under_review"] as const;
 
 type ClientAuthContext = {
@@ -54,7 +59,14 @@ type MercadoLivreShipping = {
   mode?: string | null;
   logistic_type?: string | null;
   free_shipping?: boolean;
+  local_pick_up?: boolean;
   tags?: string[];
+  cost?: number | null;
+  list_cost?: number | null;
+  base_cost?: number | null;
+  shipping_cost?: number | null;
+  amount?: number | null;
+  currency_id?: string | null;
 };
 
 type MercadoLivreVariation = {
@@ -78,13 +90,61 @@ type MercadoLivreItemBody = {
   available_quantity?: number;
   sold_quantity?: number;
   health?: number | null;
+  status_detail?: string | { message?: string | null; description?: string | null } | null;
+  sub_status?: string[];
+  tags?: string[];
+  warnings?: Array<string | { code?: string | null; message?: string | null }>;
   attributes?: MercadoLivreAttribute[];
   pictures?: MercadoLivrePicture[];
   shipping?: MercadoLivreShipping;
   dimensions?: string | null;
+  package_dimensions?: string | null;
+  selling_fee_amount?: number | null;
+  listing_fee_amount?: number | null;
+  sale_fee?: number | null;
+  sale_fee_amount?: number | null;
+  commission?: number | null;
+  fees?: {
+    selling_fee_amount?: number | null;
+    listing_fee_amount?: number | null;
+    sale_fee?: number | null;
+    sale_fee_amount?: number | null;
+    commission?: number | null;
+  } | null;
   variations?: MercadoLivreVariation[];
   last_updated?: string;
   date_created?: string;
+};
+
+type MercadoLivreListingPriceEntry = {
+  listing_type_id?: string | null;
+  currency_id?: string | null;
+  listing_fee_amount?: number | null;
+  sale_fee_amount?: number | null;
+  selling_fee_amount?: number | null;
+  fee_amount?: number | null;
+  sale_fee_details?: {
+    percentage_fee?: number | null;
+    meli_percentage_fee?: number | null;
+    fixed_fee?: number | null;
+    gross_amount?: number | null;
+  } | null;
+  commission?: number | null;
+};
+
+type ListingFeeEstimate = {
+  feeAmount: number | null;
+  feePercentage: number | null;
+  currencyId: string | null;
+  source: "mercado_livre_listing_prices" | null;
+  unavailableReason: string | null;
+};
+
+type ListingShippingCostEstimate = {
+  costAmount: number | null;
+  currencyId: string | null;
+  source: "item_shipping" | "mercado_livre_shipping_options_free" | "buyer_paid_shipping" | null;
+  unavailableReason: string | null;
 };
 
 type MercadoLivreMultiGetEntry = {
@@ -141,17 +201,70 @@ export type MercadoLivreClientListing = {
   soldQuantity: number | null;
   visits: number | null;
   categoryId: string | null;
+  categoryName: string | null;
+  categoryPath: string | null;
   attributes: Array<{
     id: string | null;
     name: string;
     value: string;
   }>;
   dimensions: string | null;
+  dimensionInfo: {
+    raw: string | null;
+    heightCm: string | null;
+    widthCm: string | null;
+    lengthCm: string | null;
+    weightG: string | null;
+    hasDimensions: boolean;
+  };
   shipping: {
     mode: string | null;
     logisticType: string | null;
     freeShipping: boolean | null;
+    localPickUp: boolean | null;
+    tags: string[];
+    costAmount: number | null;
+    currencyId: string | null;
+    costSource: string | null;
+    costUnavailableReason: string | null;
   } | null;
+  fees: {
+    sellingFeeAmount: number | null;
+    listingFeeAmount: number | null;
+    saleFeeAmount: number | null;
+    commissionPercent: number | null;
+    currencyId: string | null;
+    source: string | null;
+    unavailableReason: string | null;
+  };
+  localProduct: {
+    found: boolean;
+    name: string | null;
+    sku: string | null;
+    ean: string | null;
+    costPrice: number | null;
+    salePrice: number | null;
+    availableQuantity: number | null;
+    matchBy: "sku" | "gtin" | null;
+  };
+  estimatedMargin: {
+    status: "not_calculated" | "partial";
+    label: string;
+    price: number | null;
+    costPrice: number | null;
+    feeAmount: number | null;
+    taxStatus: string;
+    estimatedProfit: number | null;
+    estimatedMarginPercent: number | null;
+    missingData: string[];
+  };
+  quality: {
+    health: number | null;
+    statusDetail: string | null;
+    subStatus: string[];
+    tags: string[];
+    warnings: string[];
+  };
   dateCreated: string | null;
   updatedAt: string | null;
   lastSyncAt: string;
@@ -177,6 +290,8 @@ type MercadoLivreClientListingsPaging = {
 };
 
 const memoryCache = new Map<string, CachedListings>();
+const feeEstimateCache = new Map<string, ListingFeeEstimate>();
+const shippingEstimateCache = new Map<string, ListingShippingCostEstimate>();
 
 function cacheKey(organizationId: string, connectionId: string) {
   return `${organizationId}:${connectionId}`;
@@ -277,6 +392,81 @@ function normalizePictures(item: MercadoLivreItemBody) {
   return pictures;
 }
 
+function finiteNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function firstFiniteNumber(...values: unknown[]) {
+  for (const value of values) {
+    const normalized = finiteNumber(value);
+    if (normalized !== null) return normalized;
+  }
+  return null;
+}
+
+function normalizeStringList(values: unknown) {
+  return Array.isArray(values)
+    ? values
+        .map((value) => (typeof value === "string" ? value.trim() : ""))
+        .filter(Boolean)
+        .slice(0, 12)
+    : [];
+}
+
+function normalizeWarnings(values: MercadoLivreItemBody["warnings"]) {
+  if (!Array.isArray(values)) return [];
+  return values
+    .map((warning) => {
+      if (typeof warning === "string") return warning.trim();
+      return warning?.message?.trim() || warning?.code?.trim() || "";
+    })
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+function normalizeStatusDetail(value: MercadoLivreItemBody["status_detail"]) {
+  if (typeof value === "string") return value.trim() || null;
+  return value?.message?.trim() || value?.description?.trim() || null;
+}
+
+function normalizeDimensions(raw: string | null | undefined): MercadoLivreClientListing["dimensionInfo"] {
+  const normalizedRaw = raw?.trim() || null;
+  if (!normalizedRaw) {
+    return { raw: null, heightCm: null, widthCm: null, lengthCm: null, weightG: null, hasDimensions: false };
+  }
+
+  const match = normalizedRaw.match(/^([\d.,]+)x([\d.,]+)x([\d.,]+),([\d.,]+)$/i);
+  if (!match) {
+    return { raw: normalizedRaw, heightCm: null, widthCm: null, lengthCm: null, weightG: null, hasDimensions: true };
+  }
+
+  return {
+    raw: normalizedRaw,
+    heightCm: `${match[1].replace(",", ".")} cm`,
+    widthCm: `${match[2].replace(",", ".")} cm`,
+    lengthCm: `${match[3].replace(",", ".")} cm`,
+    weightG: `${match[4].replace(",", ".")} g`,
+    hasDimensions: true
+  };
+}
+
+function normalizeFees(item: MercadoLivreItemBody, currencyId: string | null): MercadoLivreClientListing["fees"] {
+  const sellingFeeAmount = firstFiniteNumber(item.selling_fee_amount, item.fees?.selling_fee_amount);
+  const listingFeeAmount = firstFiniteNumber(item.listing_fee_amount, item.fees?.listing_fee_amount);
+  const saleFeeAmount = firstFiniteNumber(item.sale_fee_amount, item.sale_fee, item.fees?.sale_fee_amount, item.fees?.sale_fee);
+  const commissionPercent = firstFiniteNumber(item.commission, item.fees?.commission);
+  const source = sellingFeeAmount !== null || listingFeeAmount !== null || saleFeeAmount !== null || commissionPercent !== null ? "/items" : null;
+  return {
+    sellingFeeAmount,
+    listingFeeAmount,
+    saleFeeAmount,
+    commissionPercent,
+    currencyId,
+    source,
+    unavailableReason: null
+  };
+}
+
 function listingTypeLabel(value: string | null) {
   if (value === "gold_pro") return "Premium";
   if (value === "gold_special") return "Classico";
@@ -297,6 +487,13 @@ function normalizeListing(item: MercadoLivreItemBody, syncedAt: Date): MercadoLi
   const normalizedGtin = rawGtin ? normalizeGtin(rawGtin) : null;
   const updatedAt = typeof item.last_updated === "string" ? item.last_updated : typeof item.date_created === "string" ? item.date_created : null;
   const listingTypeId = typeof item.listing_type_id === "string" ? item.listing_type_id : null;
+  const currencyId = typeof item.currency_id === "string" ? item.currency_id : null;
+  const rawDimensions =
+    typeof item.package_dimensions === "string" && item.package_dimensions.trim()
+      ? item.package_dimensions.trim()
+      : typeof item.dimensions === "string" && item.dimensions.trim()
+        ? item.dimensions.trim()
+        : null;
 
   return {
     externalId,
@@ -310,27 +507,582 @@ function normalizeListing(item: MercadoLivreItemBody, syncedAt: Date): MercadoLi
     status: typeof item.status === "string" ? item.status : null,
     listingTypeId,
     listingTypeLabel: listingTypeLabel(listingTypeId),
-    price: typeof item.price === "number" && Number.isFinite(item.price) ? item.price : null,
-    currencyId: typeof item.currency_id === "string" ? item.currency_id : null,
+    price: finiteNumber(item.price),
+    currencyId,
     availableQuantity: typeof item.available_quantity === "number" && Number.isFinite(item.available_quantity) ? item.available_quantity : null,
     health: typeof item.health === "number" && Number.isFinite(item.health) ? item.health : null,
     permalink: typeof item.permalink === "string" ? item.permalink : null,
     soldQuantity: typeof item.sold_quantity === "number" && Number.isFinite(item.sold_quantity) ? item.sold_quantity : null,
     visits: null,
     categoryId: typeof item.category_id === "string" ? item.category_id : null,
+    categoryName: null,
+    categoryPath: null,
     attributes: normalizeItemAttributes(item),
-    dimensions: typeof item.dimensions === "string" && item.dimensions.trim() ? item.dimensions.trim() : null,
+    dimensions: rawDimensions,
+    dimensionInfo: normalizeDimensions(rawDimensions),
     shipping: item.shipping
       ? {
           mode: typeof item.shipping.mode === "string" ? item.shipping.mode : null,
           logisticType: typeof item.shipping.logistic_type === "string" ? item.shipping.logistic_type : null,
-          freeShipping: typeof item.shipping.free_shipping === "boolean" ? item.shipping.free_shipping : null
+          freeShipping: typeof item.shipping.free_shipping === "boolean" ? item.shipping.free_shipping : null,
+          localPickUp: typeof item.shipping.local_pick_up === "boolean" ? item.shipping.local_pick_up : null,
+          tags: normalizeStringList(item.shipping.tags),
+          costAmount: firstFiniteNumber(item.shipping.cost, item.shipping.list_cost, item.shipping.base_cost, item.shipping.shipping_cost, item.shipping.amount),
+          currencyId: typeof item.shipping.currency_id === "string" ? item.shipping.currency_id : currencyId,
+          costSource:
+            firstFiniteNumber(item.shipping.cost, item.shipping.list_cost, item.shipping.base_cost, item.shipping.shipping_cost, item.shipping.amount) !== null
+              ? "item_shipping"
+              : null,
+          costUnavailableReason: null
         }
       : null,
+    fees: normalizeFees(item, currencyId),
+    localProduct: emptyLocalProduct(),
+    estimatedMargin: notCalculatedMargin(finiteNumber(item.price), null, null, ["Custo local", "Tarifa ML", "Regra fiscal"]),
+    quality: {
+      health: typeof item.health === "number" && Number.isFinite(item.health) ? item.health : null,
+      statusDetail: normalizeStatusDetail(item.status_detail),
+      subStatus: normalizeStringList(item.sub_status),
+      tags: normalizeStringList(item.tags),
+      warnings: normalizeWarnings(item.warnings)
+    },
     dateCreated: typeof item.date_created === "string" ? item.date_created : null,
     updatedAt,
     lastSyncAt: syncedAt.toISOString()
   };
+}
+
+function emptyLocalProduct(): MercadoLivreClientListing["localProduct"] {
+  return {
+    found: false,
+    name: null,
+    sku: null,
+    ean: null,
+    costPrice: null,
+    salePrice: null,
+    availableQuantity: null,
+    matchBy: null
+  };
+}
+
+function notCalculatedMargin(price: number | null, costPrice: number | null, feeAmount: number | null, missingData: string[]): MercadoLivreClientListing["estimatedMargin"] {
+  return {
+    status: "not_calculated",
+    label: "Nao calculado",
+    price,
+    costPrice,
+    feeAmount,
+    taxStatus: "Aguardando regra fiscal",
+    estimatedProfit: null,
+    estimatedMarginPercent: null,
+    missingData
+  };
+}
+
+function buildEstimatedMargin(input: {
+  price: number | null;
+  costPrice: number | null;
+  feeAmount: number | null;
+}): MercadoLivreClientListing["estimatedMargin"] {
+  const missingData: string[] = [];
+  if (input.price === null) missingData.push("Preco ML");
+  if (input.costPrice === null) missingData.push("Custo local");
+  if (input.feeAmount === null) missingData.push("Tarifa ML");
+  missingData.push("Regra fiscal");
+
+  if (input.price === null || input.costPrice === null) {
+    return notCalculatedMargin(input.price, input.costPrice, input.feeAmount, missingData);
+  }
+
+  if (input.feeAmount === null) {
+    return {
+      status: "partial",
+      label: "Aguardando tarifa",
+      price: input.price,
+      costPrice: input.costPrice,
+      feeAmount: null,
+      taxStatus: "Aguardando regra fiscal",
+      estimatedProfit: null,
+      estimatedMarginPercent: null,
+      missingData
+    };
+  }
+
+  const estimatedProfit = input.price - input.costPrice - input.feeAmount;
+  const estimatedMarginPercent = input.price > 0 ? (estimatedProfit / input.price) * 100 : null;
+
+  return {
+    status: "partial",
+    label: "Parcial",
+    price: input.price,
+    costPrice: input.costPrice,
+    feeAmount: input.feeAmount,
+    taxStatus: "Aguardando regra fiscal",
+    estimatedProfit,
+    estimatedMarginPercent,
+    missingData
+  };
+}
+
+function feeEstimateUnavailable(reason = "Tarifa nao retornada pela API nesta consulta."): ListingFeeEstimate {
+  return {
+    feeAmount: null,
+    feePercentage: null,
+    currencyId: null,
+    source: null,
+    unavailableReason: reason
+  };
+}
+
+function feeEstimateCacheKey(input: {
+  siteId: string;
+  categoryId: string;
+  listingTypeId: string;
+  price: number;
+  currencyId: string | null;
+}) {
+  return [input.siteId, input.categoryId, input.listingTypeId, input.price.toFixed(2), input.currencyId ?? ""].join(":");
+}
+
+function listingPricesPath(input: {
+  siteId: string;
+  categoryId: string;
+  listingTypeId: string;
+  price: number;
+  currencyId: string | null;
+}) {
+  const params = new URLSearchParams();
+  params.set("price", input.price.toFixed(2));
+  params.set("listing_type_id", input.listingTypeId);
+  params.set("category_id", input.categoryId);
+  if (input.currencyId) params.set("currency_id", input.currencyId);
+  return `/sites/${encodeURIComponent(input.siteId)}/listing_prices?${params.toString()}`;
+}
+
+function normalizeListingPriceEntries(payload: unknown) {
+  if (Array.isArray(payload)) return payload as MercadoLivreListingPriceEntry[];
+  if (payload && typeof payload === "object") {
+    const record = payload as { prices?: unknown };
+    if (Array.isArray(record.prices)) return record.prices as MercadoLivreListingPriceEntry[];
+    return [payload as MercadoLivreListingPriceEntry];
+  }
+  return [];
+}
+
+function normalizeListingFeeEstimate(payload: unknown, input: { listingTypeId: string; price: number }): ListingFeeEstimate {
+  const entries = normalizeListingPriceEntries(payload);
+  const matched = entries.find((entry) => entry.listing_type_id === input.listingTypeId) ?? entries[0] ?? null;
+  if (!matched) return feeEstimateUnavailable();
+
+  const explicitFeeAmount = firstFiniteNumber(
+    matched.sale_fee_amount,
+    matched.selling_fee_amount,
+    matched.fee_amount
+  );
+  const apiPercentage = firstFiniteNumber(matched.sale_fee_details?.percentage_fee, matched.sale_fee_details?.meli_percentage_fee, matched.commission);
+  const feeAmount = explicitFeeAmount ?? (apiPercentage !== null && input.price > 0 ? (input.price * apiPercentage) / 100 : null);
+  const feePercentage = apiPercentage ?? (feeAmount !== null && input.price > 0 ? (feeAmount / input.price) * 100 : null);
+
+  if (feeAmount === null && feePercentage === null) return feeEstimateUnavailable();
+
+  return {
+    feeAmount,
+    feePercentage,
+    currencyId: typeof matched.currency_id === "string" ? matched.currency_id : null,
+    source: "mercado_livre_listing_prices",
+    unavailableReason: null
+  };
+}
+
+async function getListingFeeEstimate(input: {
+  accessToken: string;
+  siteId: string;
+  categoryId: string | null;
+  listingTypeId: string | null;
+  price: number | null;
+  currencyId: string | null;
+}) {
+  if (!input.categoryId || !input.listingTypeId || input.price === null || input.price <= 0) {
+    return feeEstimateUnavailable("Dados insuficientes para consultar tarifa.");
+  }
+
+  const cacheKey = feeEstimateCacheKey({
+    siteId: input.siteId,
+    categoryId: input.categoryId,
+    listingTypeId: input.listingTypeId,
+    price: input.price,
+    currencyId: input.currencyId
+  });
+  const cached = feeEstimateCache.get(cacheKey);
+  if (cached) return cached;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), feeEstimateTimeoutMs);
+
+  try {
+    const path = listingPricesPath({
+      siteId: input.siteId,
+      categoryId: input.categoryId,
+      listingTypeId: input.listingTypeId,
+      price: input.price,
+      currencyId: input.currencyId
+    });
+    const response = await fetch(`${apiBaseUrl}${path}`, {
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
+        Accept: "application/json"
+      },
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      const unavailable = feeEstimateUnavailable();
+      feeEstimateCache.set(cacheKey, unavailable);
+      return unavailable;
+    }
+
+    const estimate = normalizeListingFeeEstimate(await response.json(), {
+      listingTypeId: input.listingTypeId,
+      price: input.price
+    });
+    feeEstimateCache.set(cacheKey, estimate);
+    return estimate;
+  } catch {
+    const unavailable = feeEstimateUnavailable();
+    feeEstimateCache.set(cacheKey, unavailable);
+    return unavailable;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function shippingCostEstimateUnavailable(reason = "Frete nao retornado pela API nesta consulta."): ListingShippingCostEstimate {
+  return {
+    costAmount: null,
+    currencyId: null,
+    source: null,
+    unavailableReason: reason
+  };
+}
+
+function shippingEstimateCacheKey(input: { sellerId: string; itemId: string; currencyId: string | null }) {
+  return [input.sellerId, input.itemId, input.currencyId ?? ""].join(":");
+}
+
+function shippingOptionsFreePath(input: { sellerId: string; itemId: string; currencyId: string | null }) {
+  const params = new URLSearchParams();
+  params.set("item_id", input.itemId);
+  if (input.currencyId) params.set("currency_id", input.currencyId);
+  return `/users/${encodeURIComponent(input.sellerId)}/shipping_options/free?${params.toString()}`;
+}
+
+function shippingEstimateFromRecord(record: Record<string, unknown>, fallbackCurrencyId: string | null): ListingShippingCostEstimate | null {
+  const amount = firstFiniteNumber(record.list_cost, record.cost, record.shipping_cost, record.base_cost, record.amount);
+  if (amount === null) return null;
+
+  return {
+    costAmount: amount,
+    currencyId: typeof record.currency_id === "string" ? record.currency_id : fallbackCurrencyId,
+    source: "mercado_livre_shipping_options_free",
+    unavailableReason: null
+  };
+}
+
+function findShippingEstimatePayload(payload: unknown, fallbackCurrencyId: string | null): ListingShippingCostEstimate | null {
+  if (!payload || typeof payload !== "object") return null;
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const estimate = findShippingEstimatePayload(item, fallbackCurrencyId);
+      if (estimate) return estimate;
+    }
+    return null;
+  }
+
+  const record = payload as Record<string, unknown>;
+  const directEstimate = shippingEstimateFromRecord(record, fallbackCurrencyId);
+  if (directEstimate) return directEstimate;
+
+  const coverage = record.coverage;
+  if (coverage && typeof coverage === "object") {
+    const coverageRecord = coverage as Record<string, unknown>;
+    const allCountry = coverageRecord.all_country;
+    const allCountryEstimate = findShippingEstimatePayload(allCountry, fallbackCurrencyId);
+    if (allCountryEstimate) return allCountryEstimate;
+
+    for (const value of Object.values(coverageRecord)) {
+      const estimate = findShippingEstimatePayload(value, fallbackCurrencyId);
+      if (estimate) return estimate;
+    }
+  }
+
+  for (const key of ["options", "results", "prices"]) {
+    const value = record[key];
+    const estimate = findShippingEstimatePayload(value, fallbackCurrencyId);
+    if (estimate) return estimate;
+  }
+
+  return null;
+}
+
+function normalizeShippingCostEstimate(payload: unknown, fallbackCurrencyId: string | null): ListingShippingCostEstimate {
+  return findShippingEstimatePayload(payload, fallbackCurrencyId) ?? shippingCostEstimateUnavailable();
+}
+
+async function getListingShippingCostEstimate(input: {
+  accessToken: string;
+  sellerId: string;
+  itemId: string;
+  currencyId: string | null;
+}) {
+  const cacheKey = shippingEstimateCacheKey({
+    sellerId: input.sellerId,
+    itemId: input.itemId,
+    currencyId: input.currencyId
+  });
+  const cached = shippingEstimateCache.get(cacheKey);
+  if (cached) return cached;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), shippingEstimateTimeoutMs);
+
+  try {
+    const path = shippingOptionsFreePath({
+      sellerId: input.sellerId,
+      itemId: input.itemId,
+      currencyId: input.currencyId
+    });
+    const response = await fetch(`${apiBaseUrl}${path}`, {
+      headers: {
+        Authorization: `Bearer ${input.accessToken}`,
+        Accept: "application/json"
+      },
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      const unavailable = shippingCostEstimateUnavailable();
+      shippingEstimateCache.set(cacheKey, unavailable);
+      return unavailable;
+    }
+
+    const estimate = normalizeShippingCostEstimate(await response.json(), input.currencyId);
+    shippingEstimateCache.set(cacheKey, estimate);
+    return estimate;
+  } catch {
+    const unavailable = shippingCostEstimateUnavailable();
+    shippingEstimateCache.set(cacheKey, unavailable);
+    return unavailable;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>) {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+async function enrichListingFeesReadOnly(input: {
+  accessToken: string;
+  siteId: string;
+  listings: MercadoLivreClientListing[];
+}) {
+  if (!input.listings.length) return input.listings;
+
+  return mapWithConcurrency(input.listings, feeEstimateConcurrency, async (listing) => {
+    const existingFeeAmount = listing.fees.sellingFeeAmount ?? listing.fees.saleFeeAmount ?? listing.fees.listingFeeAmount;
+    if (existingFeeAmount !== null || listing.fees.commissionPercent !== null) return listing;
+
+    const estimate = await getListingFeeEstimate({
+      accessToken: input.accessToken,
+      siteId: input.siteId,
+      categoryId: listing.categoryId,
+      listingTypeId: listing.listingTypeId,
+      price: listing.price,
+      currencyId: listing.currencyId
+    });
+
+    return {
+      ...listing,
+      fees: {
+        ...listing.fees,
+        sellingFeeAmount: estimate.feeAmount ?? listing.fees.sellingFeeAmount,
+        saleFeeAmount: estimate.feeAmount ?? listing.fees.saleFeeAmount,
+        commissionPercent: estimate.feePercentage ?? listing.fees.commissionPercent,
+        currencyId: estimate.currencyId ?? listing.fees.currencyId ?? listing.currencyId,
+        source: estimate.source ?? listing.fees.source,
+        unavailableReason: estimate.unavailableReason
+      }
+    };
+  });
+}
+
+async function enrichListingShippingCostsReadOnly(input: {
+  accessToken: string;
+  sellerId: string;
+  listings: MercadoLivreClientListing[];
+}) {
+  if (!input.listings.length) return input.listings;
+
+  return mapWithConcurrency(input.listings, shippingEstimateConcurrency, async (listing) => {
+    if (!listing.shipping) return listing;
+    if (typeof listing.shipping.costAmount === "number") return listing;
+
+    if (listing.shipping.freeShipping === false) {
+      return {
+        ...listing,
+        shipping: {
+          ...listing.shipping,
+          costAmount: 0,
+          currencyId: listing.shipping.currencyId ?? listing.currencyId,
+          costSource: "buyer_paid_shipping",
+          costUnavailableReason: null
+        }
+      };
+    }
+
+    const estimate = await getListingShippingCostEstimate({
+      accessToken: input.accessToken,
+      sellerId: input.sellerId,
+      itemId: listing.itemId,
+      currencyId: listing.shipping.currencyId ?? listing.currencyId
+    });
+
+    return {
+      ...listing,
+      shipping: {
+        ...listing.shipping,
+        costAmount: estimate.costAmount,
+        currencyId: estimate.currencyId ?? listing.shipping.currencyId ?? listing.currencyId,
+        costSource: estimate.source,
+        costUnavailableReason: estimate.unavailableReason
+      }
+    };
+  });
+}
+
+
+function decimalToNumber(value: Prisma.Decimal | number | null | undefined) {
+  if (value === null || value === undefined) return null;
+  return Number(value);
+}
+
+function localAvailableQuantity(
+  balances: Array<{
+    physicalQuantity: number;
+    reservedQuantity: number;
+    safetyQuantity: number;
+  }>
+) {
+  if (!balances.length) return null;
+  return balances.reduce((total, balance) => total + balance.physicalQuantity - balance.reservedQuantity - balance.safetyQuantity, 0);
+}
+
+async function enrichListingsReadOnly(organizationId: string, listings: MercadoLivreClientListing[]) {
+  if (!listings.length) return listings;
+
+  const categoryIds = Array.from(new Set(listings.map((listing) => listing.categoryId).filter((value): value is string => Boolean(value))));
+  const categoryRows = categoryIds.length
+    ? await prisma.marketplaceCategoryCatalog.findMany({
+        where: {
+          provider: MarketplaceCategoryProvider.MERCADO_LIVRE,
+          marketplaceCategoryId: { in: categoryIds }
+        },
+        select: {
+          marketplaceCategoryId: true,
+          name: true,
+          path: true
+        }
+      })
+    : [];
+  const categoryById = new Map(categoryRows.map((category) => [category.marketplaceCategoryId, category]));
+
+  const skus = Array.from(new Set(listings.map((listing) => listing.sku?.trim()).filter((value): value is string => Boolean(value))));
+  const gtins = Array.from(new Set(listings.map((listing) => listing.gtin?.trim()).filter((value): value is string => Boolean(value))));
+  const productRows =
+    skus.length || gtins.length
+      ? await prisma.product.findMany({
+          where: {
+            organizationId,
+            OR: [
+              ...(skus.length ? [{ sku: { in: skus } }] : []),
+              ...(gtins.length ? [{ ean: { in: gtins } }] : [])
+            ]
+          },
+          select: {
+            name: true,
+            sku: true,
+            ean: true,
+            prices: {
+              where: { status: "ACTIVE" },
+              orderBy: { updatedAt: "desc" },
+              take: 1,
+              select: {
+                costPrice: true,
+                salePrice: true
+              }
+            },
+            inventory: {
+              select: {
+                physicalQuantity: true,
+                reservedQuantity: true,
+                safetyQuantity: true
+              }
+            }
+          }
+        })
+      : [];
+
+  const productBySku = new Map(productRows.filter((product) => product.sku).map((product) => [product.sku as string, product]));
+  const productByGtin = new Map(
+    productRows.filter((product) => product.ean).map((product) => {
+      const ean = product.ean as string;
+      return [normalizeGtin(ean) ?? ean, product] as const;
+    })
+  );
+
+  return listings.map((listing) => {
+    const category = listing.categoryId ? categoryById.get(listing.categoryId) : null;
+    const productByListingSku = listing.sku ? productBySku.get(listing.sku) : null;
+    const productByListingGtin = listing.gtin ? productByGtin.get(listing.gtin) : null;
+    const product = productByListingSku ?? productByListingGtin ?? null;
+    const activePrice = product?.prices[0] ?? null;
+    const localProduct: MercadoLivreClientListing["localProduct"] = product
+      ? {
+          found: true,
+          name: product.name,
+          sku: product.sku,
+          ean: product.ean,
+          costPrice: decimalToNumber(activePrice?.costPrice),
+          salePrice: decimalToNumber(activePrice?.salePrice),
+          availableQuantity: localAvailableQuantity(product.inventory),
+          matchBy: productByListingSku ? "sku" : "gtin"
+        }
+      : emptyLocalProduct();
+    const feeAmount = listing.fees.sellingFeeAmount ?? listing.fees.saleFeeAmount ?? listing.fees.listingFeeAmount;
+
+    return {
+      ...listing,
+      categoryName: category?.name ?? null,
+      categoryPath: category?.path ?? null,
+      localProduct,
+      estimatedMargin: buildEstimatedMargin({
+        price: listing.price,
+        costPrice: localProduct.costPrice,
+        feeAmount
+      })
+    };
+  });
 }
 
 async function audit(input: { organizationId: string; userId: string | null; action: string; metadata: Record<string, unknown> }) {
@@ -406,6 +1158,74 @@ function chunk<T>(items: T[], size: number) {
   return chunks;
 }
 
+function normalizeListingSearchTerm(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function listingMatchesSearchTerm(listing: MercadoLivreClientListing, searchTerm: string) {
+  if (!searchTerm) return true;
+  const fields = [listing.externalId, listing.itemId, listing.sku, listing.gtin, listing.sellerSku, listing.title];
+  return fields.some((field) => field?.toLowerCase().includes(searchTerm));
+}
+
+function uniqueListingsByMercadoLivreId(listings: MercadoLivreClientListing[]) {
+  const byId = new Map<string, MercadoLivreClientListing>();
+  for (const listing of listings) {
+    if (!byId.has(listing.externalId)) {
+      byId.set(listing.externalId, listing);
+    }
+  }
+  return Array.from(byId.values());
+}
+
+async function fetchListingDetailsReadOnly(input: {
+  organizationId: string;
+  connectionId: string;
+  accessToken: string;
+  itemIds: string[];
+  syncedAt: Date;
+  warnings: string[];
+  endpointDiagnostics: Array<Record<string, unknown>>;
+}) {
+  let accessToken = input.accessToken;
+  const listings: MercadoLivreClientListing[] = [];
+
+  for (const ids of chunk(input.itemIds, detailsChunkSize)) {
+    const response = await fetchMercadoLivreJson<MercadoLivreMultiGetEntry[]>({
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      accessToken,
+      path: `/items?ids=${ids.map(encodeURIComponent).join(",")}`
+    });
+    accessToken = response.accessToken;
+    input.endpointDiagnostics.push({
+      endpoint: response.endpoint,
+      status: response.status,
+      requestId: response.requestId,
+      correlationId: response.correlationId,
+      returnedItems: response.ok ? response.data.length : 0,
+      errorCode: response.ok ? null : response.error.error,
+      errorMessage: response.ok ? null : response.error.message
+    });
+
+    if (!response.ok) {
+      input.warnings.push(`Mercado Livre retornou HTTP ${response.status} ao buscar detalhes dos anuncios.`);
+      continue;
+    }
+
+    for (const entry of response.data) {
+      if (entry.code && entry.code !== 200) {
+        input.warnings.push(`Um anuncio Mercado Livre retornou codigo ${entry.code} no detalhe.`);
+        continue;
+      }
+      const normalized = entry.body ? normalizeListing(entry.body, input.syncedAt) : null;
+      if (normalized) listings.push(normalized);
+    }
+  }
+
+  return { accessToken, listings };
+}
+
 function buildKpis(listings: MercadoLivreClientListing[]) {
   return {
     active: listings.filter((listing) => listing.status === "active").length,
@@ -468,6 +1288,123 @@ export class MercadoLivreClientListingsService {
       totalAvailable: cached?.totalAvailable ?? null,
       paging: cached?.paging ?? buildPaging({ limit: defaultLimit, offset: 0, totalAvailable: cached?.totalAvailable ?? null }),
       cache: cached ? "memory" : "empty",
+      readOnly: true,
+      externalWrite: false
+    };
+  }
+
+  async searchListings(input: { authContext: ClientAuthContext; query: string; maxListings?: number }) {
+    const searchTerm = normalizeListingSearchTerm(input.query);
+    if (!searchTerm) return this.getListings(input.authContext);
+
+    const requestedMaxListings = Math.max(1, Math.min(input.maxListings ?? globalSearchMaxListings, globalSearchMaxListings));
+    const { connection, accessToken: initialAccessToken } = await mercadoLivreClientOAuthService.getAccessTokenForActiveConnection(input.authContext.organizationId);
+    const sellerId = connection.sellerId ?? connection.externalAccountId;
+    if (!sellerId) throw new Error("Conta Mercado Livre conectada sem seller identificado. Reconecte a conta.");
+
+    let accessToken = initialAccessToken;
+    const warnings: string[] = [];
+    const endpointDiagnostics: Array<Record<string, unknown>> = [];
+    let totalAvailable: number | null = null;
+    let offset = 0;
+    const itemIdsByMercadoLivreId = new Map<string, string>();
+
+    const directItemId = searchTerm.match(/^ml[a-z]\d+$/i)?.[0]?.toUpperCase() ?? null;
+    if (directItemId) {
+      itemIdsByMercadoLivreId.set(directItemId, directItemId);
+    }
+
+    while (offset < requestedMaxListings) {
+      const limit = Math.min(maxLimit, requestedMaxListings - offset);
+      const response = await fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
+        organizationId: input.authContext.organizationId,
+        connectionId: connection.id,
+        accessToken,
+        path: sellerItemsPath({ sellerId, offset, limit })
+      });
+      accessToken = response.accessToken;
+      endpointDiagnostics.push({
+        endpoint: response.endpoint,
+        status: response.status,
+        requestId: response.requestId,
+        correlationId: response.correlationId,
+        returnedIds: response.ok ? response.data.results?.length ?? 0 : 0,
+        total: response.ok ? response.data.paging?.total ?? null : null,
+        offset,
+        limit,
+        searchMode: "global_identifier",
+        errorCode: response.ok ? null : response.error.error,
+        errorMessage: response.ok ? null : response.error.message
+      });
+
+      if (!response.ok) {
+        warnings.push(`Mercado Livre retornou HTTP ${response.status} ao buscar anuncios para pesquisa global.`);
+        break;
+      }
+
+      if (typeof response.data.paging?.total === "number") {
+        totalAvailable = response.data.paging.total;
+      }
+
+      const pageIds = (response.data.results ?? [])
+        .map((id) => normalizeMercadoLivreId(id))
+        .filter((id): id is string => Boolean(id));
+
+      for (const id of pageIds) {
+        itemIdsByMercadoLivreId.set(id, id);
+      }
+
+      if (pageIds.length < limit) break;
+      offset += limit;
+      if (typeof totalAvailable === "number" && offset >= totalAvailable) break;
+    }
+
+    const syncedAt = new Date();
+    const detailResult = await fetchListingDetailsReadOnly({
+      organizationId: input.authContext.organizationId,
+      connectionId: connection.id,
+      accessToken,
+      itemIds: Array.from(itemIdsByMercadoLivreId.values()),
+      syncedAt,
+      warnings,
+      endpointDiagnostics
+    });
+    accessToken = detailResult.accessToken;
+
+    const matchedListings = uniqueListingsByMercadoLivreId(detailResult.listings).filter((listing) =>
+      listingMatchesSearchTerm(listing, searchTerm)
+    );
+    const feeEnrichedListings = await enrichListingFeesReadOnly({
+      accessToken,
+      siteId: connection.siteId ?? "MLB",
+      listings: matchedListings
+    });
+    const shippingEnrichedListings = await enrichListingShippingCostsReadOnly({
+      accessToken,
+      sellerId,
+      listings: feeEnrichedListings
+    });
+    const enrichedListings = await enrichListingsReadOnly(input.authContext.organizationId, shippingEnrichedListings);
+
+    return {
+      connected: true,
+      account: safeAccount(connection),
+      listings: enrichedListings,
+      kpis: buildKpis(enrichedListings),
+      foundItemIds: itemIdsByMercadoLivreId.size,
+      detailsFetched: enrichedListings.length,
+      totalAvailable,
+      paging: buildPaging({ limit: Math.max(enrichedListings.length, 1), offset: 0, totalAvailable }),
+      lastSyncedAt: connection.lastSyncAt?.toISOString() ?? null,
+      warnings,
+      endpointDiagnostics,
+      search: {
+        mode: "global_identifier",
+        query: input.query,
+        scannedItemIds: itemIdsByMercadoLivreId.size,
+        maxListings: requestedMaxListings,
+        uniqueKey: "externalId"
+      },
       readOnly: true,
       externalWrite: false
     };
@@ -552,40 +1489,29 @@ export class MercadoLivreClientListingsService {
           .slice(0, requestedLimit)
       : [];
     const syncedAt = new Date();
-    const listings: MercadoLivreClientListing[] = [];
+    const detailResult = await fetchListingDetailsReadOnly({
+      organizationId: input.authContext.organizationId,
+      connectionId: connection.id,
+      accessToken,
+      itemIds,
+      syncedAt,
+      warnings,
+      endpointDiagnostics
+    });
+    accessToken = detailResult.accessToken;
+    const listings = uniqueListingsByMercadoLivreId(detailResult.listings);
 
-    for (const ids of chunk(itemIds, detailsChunkSize)) {
-      const response = await fetchMercadoLivreJson<MercadoLivreMultiGetEntry[]>({
-        organizationId: input.authContext.organizationId,
-        connectionId: connection.id,
-        accessToken,
-        path: `/items?ids=${ids.map(encodeURIComponent).join(",")}`
-      });
-      accessToken = response.accessToken;
-      endpointDiagnostics.push({
-        endpoint: response.endpoint,
-        status: response.status,
-        requestId: response.requestId,
-        correlationId: response.correlationId,
-        returnedItems: response.ok ? response.data.length : 0,
-        errorCode: response.ok ? null : response.error.error,
-        errorMessage: response.ok ? null : response.error.message
-      });
-
-      if (!response.ok) {
-        warnings.push(`Mercado Livre retornou HTTP ${response.status} ao buscar detalhes dos anuncios.`);
-        continue;
-      }
-
-      for (const entry of response.data) {
-        if (entry.code && entry.code !== 200) {
-          warnings.push(`Um anuncio Mercado Livre retornou codigo ${entry.code} no detalhe.`);
-          continue;
-        }
-        const normalized = entry.body ? normalizeListing(entry.body, syncedAt) : null;
-        if (normalized) listings.push(normalized);
-      }
-    }
+    const feeEnrichedListings = await enrichListingFeesReadOnly({
+      accessToken,
+      siteId: connection.siteId ?? "MLB",
+      listings
+    });
+    const shippingEnrichedListings = await enrichListingShippingCostsReadOnly({
+      accessToken,
+      sellerId,
+      listings: feeEnrichedListings
+    });
+    const enrichedListings = await enrichListingsReadOnly(input.authContext.organizationId, shippingEnrichedListings);
 
     const updatedConnection = await prisma.marketplaceConnection.update({
       where: { id: connection.id },
@@ -597,7 +1523,7 @@ export class MercadoLivreClientListingsService {
 
     memoryCache.set(cacheKey(input.authContext.organizationId, connection.id), {
       connectionId: connection.id,
-      listings,
+      listings: enrichedListings,
       lastSyncedAt: syncedAt.toISOString(),
       warnings,
       totalAvailable,
@@ -613,7 +1539,7 @@ export class MercadoLivreClientListingsService {
         connectionId: connection.id,
         sellerId,
         foundItemIds: itemIds.length,
-        detailsFetched: listings.length,
+        detailsFetched: enrichedListings.length,
         totalAvailable,
         offset: requestedOffset,
         limit: requestedLimit,
@@ -626,10 +1552,10 @@ export class MercadoLivreClientListingsService {
     return {
       connected: true,
       account: safeAccount(updatedConnection),
-      listings,
-      kpis: buildKpis(listings),
+      listings: enrichedListings,
+      kpis: buildKpis(enrichedListings),
       foundItemIds: itemIds.length,
-      detailsFetched: listings.length,
+      detailsFetched: enrichedListings.length,
       totalAvailable,
       paging: buildPaging({ limit: requestedLimit, offset: requestedOffset, totalAvailable }),
       lastSyncedAt: syncedAt.toISOString(),
