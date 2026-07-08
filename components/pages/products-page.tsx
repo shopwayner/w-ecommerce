@@ -3,7 +3,37 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { ChevronDown, Download, FileUp, ImageIcon, Plus, RefreshCw, Search, Sparkles, X } from "lucide-react";
+import {
+  AlertTriangle,
+  Barcode,
+  Box,
+  CalendarDays,
+  CheckCircle2,
+  ChevronDown,
+  ClipboardList,
+  DollarSign,
+  Download,
+  Edit3,
+  FileText,
+  FileUp,
+  Folder,
+  Globe2,
+  ImageIcon,
+  Lock,
+  Maximize2,
+  Minimize2,
+  Package,
+  Plus,
+  RefreshCw,
+  Ruler,
+  Scale,
+  Search,
+  ShieldCheck,
+  Sparkles,
+  Tag,
+  Wand2,
+  X
+} from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { ProductCopyButton } from "@/components/product-copy-button";
 import { Badge, Button, Card, DataTable, KpiCard, PageHeader } from "@/components/ui";
@@ -15,13 +45,21 @@ type ProductListItem = {
   ean: string | null;
   description: string | null;
   category: string | null;
+  brand?: string | null;
+  ncm?: string | null;
   origin: string | null;
   unit: string | null;
   status: string;
+  source?: string | null;
   displayValue: string | null;
   salePriceDisplay: string | null;
   costPriceDisplay?: string | null;
   imageUrl: string | null;
+  weight?: string | null;
+  height?: string | null;
+  width?: string | null;
+  depth?: string | null;
+  attributes?: unknown;
   hasEnrichmentDraft: boolean;
   externalProductId?: string | null;
   blingStatus?: string | null;
@@ -111,25 +149,6 @@ function formatDate(value: string) {
   }).format(new Date(value));
 }
 
-function normalizeGtinInput(value: string) {
-  return value.replace(/\D/g, "");
-}
-
-function isValidGtin(value: string) {
-  if (!value) return true;
-  if (![8, 12, 13, 14].includes(value.length)) return false;
-
-  const digits = value.split("").map(Number);
-  if (digits.some((digit) => Number.isNaN(digit))) return false;
-
-  const checkDigit = digits.at(-1);
-  const sum = digits
-    .slice(0, -1)
-    .reverse()
-    .reduce((total, digit, index) => total + digit * (index % 2 === 0 ? 3 : 1), 0);
-  return checkDigit === (10 - (sum % 10)) % 10;
-}
-
 function formatCurrencyDisplay(value: string | null | undefined) {
   const rawValue = value?.trim();
   if (!rawValue) return null;
@@ -151,6 +170,147 @@ function formatCurrencyDisplay(value: string | null | undefined) {
 
 function getBlingDisplayName(product: ProductListItem) {
   return product.blingAccount?.displayName ?? product.blingAccount?.blingAccountName ?? null;
+}
+
+function displayText(value: string | number | null | undefined) {
+  if (value === null || value === undefined) return "-";
+  const text = String(value).trim();
+  return text || "-";
+}
+
+function formatDecimalText(value: string | number | null | undefined) {
+  if (value === null || value === undefined) return "-";
+
+  const rawValue = String(value).trim();
+  if (!rawValue) return "-";
+
+  const normalizedValue = rawValue.includes(",")
+    ? rawValue.replace(/\./g, "").replace(",", ".")
+    : rawValue;
+  const parsedValue = Number(normalizedValue);
+
+  if (!Number.isFinite(parsedValue)) return rawValue;
+
+  return parsedValue.toLocaleString("pt-BR", {
+    maximumFractionDigits: 3,
+    minimumFractionDigits: parsedValue % 1 === 0 ? 0 : 2
+  });
+}
+
+function formatMeasurement(value: string | number | null | undefined, unit: string) {
+  const text = formatDecimalText(value);
+  return text === "-" ? "-" : `${text} ${unit}`;
+}
+
+function cleanProductDescription(value: string | null | undefined) {
+  if (!value?.trim()) return "";
+
+  const decodeBasicEntities = (text: string) =>
+    text
+      .replace(/&nbsp;|&#160;|&ensp;|&emsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, "\"")
+      .replace(/&#39;|&apos;/gi, "'");
+
+  const isSectionTitle = (line: string) => {
+    const title = line.endsWith(":") ? line.slice(0, -1).trim() : "";
+    if (!title || title.length > 72) return false;
+    if (title.split(/\s+/).length > 8) return false;
+    if (!/[A-Za-z\u00C0-\u024F]/.test(title)) return false;
+    return !/[.!?;]/.test(title);
+  };
+
+  const sectionHeadingPattern =
+    /(Descricao do Produto|Descri\u00e7\u00e3o do Produto|Ficha Tecnica|Ficha T\u00e9cnica|Compatibilidade do Produto|Compatibilidade|Vantagens|Conteudo da Embalagem|Conte\u00fado da Embalagem|Dimensoes do Produto|Dimens\u00f5es do Produto|Dimensoes|Dimens\u00f5es|Tutorial de Instalacao|Tutorial de Instala\u00e7\u00e3o|Cuidados e Manutencao|Cuidados e Manuten\u00e7\u00e3o):/gi;
+  const inlineFieldPattern =
+    /(Marca|Modelo|C[o\u00f3]digo(?:\s+(?:de\s+Refer[e\u00ea]ncia|similar))?|Refer[e\u00ea]ncia|Tipo|Voltagem|Capacidade|CCA|Material|Sistema|Aplica[c\u00e7][a\u00e3]o|Fun[c\u00e7][a\u00e3]o|Instala[c\u00e7][a\u00e3]o|Altura|Largura|Comprimento|Peso):/gi;
+
+  const sectionHeadings: string[] = [];
+  const protectSectionHeading = (heading: string) => {
+    const token = `__MATRIX_SECTION_HEADING_${sectionHeadings.length}__`;
+    sectionHeadings.push(heading.trim());
+    return `\n${token}\n`;
+  };
+
+  let text = value.replace(/[\u200B-\u200D\uFEFF\u00A0\u202F\u2007]/g, " ");
+  text = decodeBasicEntities(decodeBasicEntities(text));
+  text = text
+    .replace(/<\s*(script|style)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, " ")
+    .replace(/<\s*br\s*\/?>/gi, "\n")
+    .replace(/<\/\s*(p|div|section|article|li|h[1-6]|tr)\s*>/gi, "\n")
+    .replace(/<\s*li[^>]*>/gi, "\n")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\r\n?/g, "\n")
+    .replace(sectionHeadingPattern, (match) => protectSectionHeading(match))
+    .replace(inlineFieldPattern, "\n$1:");
+
+  sectionHeadings.forEach((heading, index) => {
+    text = text.split(`__MATRIX_SECTION_HEADING_${index}__`).join(heading);
+  });
+
+  const lines = text
+    .split("\n")
+    .map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
+    .filter((line) => line && !/^[.\-\u2013\u2014_*\s]+$/.test(line));
+
+  const normalizedLines: string[] = [];
+  const pushBlankLine = () => {
+    if (normalizedLines.length > 0 && normalizedLines[normalizedLines.length - 1] !== "") {
+      normalizedLines.push("");
+    }
+  };
+
+  for (const line of lines) {
+    if (isSectionTitle(line)) {
+      pushBlankLine();
+      normalizedLines.push(line);
+      pushBlankLine();
+    } else {
+      normalizedLines.push(line);
+    }
+  }
+
+  return normalizedLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function normalizeAttributeKey(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/gi, "")
+    .toLowerCase();
+}
+
+function productAttributeValue(attributes: unknown, aliases: string[]) {
+  const normalizedAliases = new Set(aliases.map(normalizeAttributeKey));
+
+  if (Array.isArray(attributes)) {
+    for (const attribute of attributes) {
+      if (!attribute || typeof attribute !== "object") continue;
+      const record = attribute as Record<string, unknown>;
+      const identifier = [record.id, record.code, record.key, record.name, record.attributeId]
+        .find((item): item is string => typeof item === "string");
+
+      if (!identifier || !normalizedAliases.has(normalizeAttributeKey(identifier))) continue;
+
+      const rawValue = [record.value_name, record.valueName, record.value, record.text]
+        .find((item) => item !== null && item !== undefined && String(item).trim());
+
+      return rawValue === undefined ? null : String(rawValue);
+    }
+  }
+
+  if (attributes && typeof attributes === "object") {
+    for (const [key, value] of Object.entries(attributes as Record<string, unknown>)) {
+      if (!normalizedAliases.has(normalizeAttributeKey(key))) continue;
+      if (value === null || value === undefined || typeof value === "object") return null;
+      return String(value);
+    }
+  }
+
+  return null;
 }
 
 function ProductCheckbox({
@@ -341,9 +501,11 @@ export function ProductsPage() {
     setActiveEnrichmentProductId(productsToRegister[0]?.id ?? null);
   }
 
-  function handleProductUpdated(product: ProductListItem) {
-    setProducts((current) => current.map((item) => (item.id === product.id ? product : item)));
-    setViewingProduct(product);
+  function handleProductUpdated(updatedProduct: ProductListItem) {
+    setProducts((currentProducts) =>
+      currentProducts.map((product) => (product.id === updatedProduct.id ? updatedProduct : product))
+    );
+    setViewingProduct(updatedProduct);
   }
 
   return (
@@ -572,10 +734,6 @@ export function ProductsPage() {
           product={viewingProduct}
           onClose={() => setViewingProduct(null)}
           onProductUpdated={handleProductUpdated}
-          onRegister={() => {
-            openEnrichment([viewingProduct]);
-            setViewingProduct(null);
-          }}
         />
       ) : null}
       {enrichmentProducts ? (
@@ -616,335 +774,548 @@ export function ProductsPage() {
 
 type ProductEditForm = {
   name: string;
-  sku: string;
   ean: string;
   unit: string;
   category: string;
-  origin: string;
-  status: string;
-  displayValue: string;
-  salePriceDisplay: string;
-  stock: string;
-  imageUrl: string;
+  costPrice: string;
+  salePrice: string;
+  weight: string;
+  grossWeight: string;
+  height: string;
+  width: string;
+  depth: string;
+  condition: string;
   description: string;
 };
 
-function productToForm(product: ProductListItem): ProductEditForm {
+const productConditionAliases = ["condition", "item_condition", "ITEM_CONDITION", "condicao"];
+const productGrossWeightAliases = ["grossWeight", "gross_weight", "grossWeightKg", "pesoBruto", "peso_bruto"];
+
+function toFormText(value: string | number | null | undefined) {
+  if (value === null || value === undefined) return "";
+  return String(value);
+}
+
+function getProductCondition(product: ProductListItem) {
+  return productAttributeValue(product.attributes, productConditionAliases);
+}
+
+function getProductGrossWeight(product: ProductListItem) {
+  return productAttributeValue(product.attributes, productGrossWeightAliases);
+}
+
+function productFormFromProduct(product: ProductListItem): ProductEditForm {
   return {
     name: product.name,
-    sku: product.sku ?? "",
-    ean: product.ean ?? "",
-    unit: product.unit ?? "",
-    category: product.category ?? "",
-    origin: product.origin ?? "",
-    status: product.status,
-    displayValue: product.displayValue ?? "0,00",
-    salePriceDisplay: product.salePriceDisplay ?? "0,00",
-    stock: String(product.stock),
-    imageUrl: product.imageUrl ?? "",
-    description: product.description ?? ""
+    ean: toFormText(product.ean),
+    unit: toFormText(product.unit),
+    category: toFormText(product.category),
+    costPrice: toFormText(product.costPriceDisplay ?? product.displayValue),
+    salePrice: toFormText(product.salePriceDisplay ?? product.price),
+    weight: toFormText(product.weight),
+    grossWeight: toFormText(getProductGrossWeight(product)),
+    height: toFormText(product.height),
+    width: toFormText(product.width),
+    depth: toFormText(product.depth),
+    condition: toFormText(getProductCondition(product)),
+    description: cleanProductDescription(product.description)
   };
+}
+
+function parseOptionalFormDecimal(value: string, field: string) {
+  const text = value.trim();
+  if (!text) return { value: null };
+
+  const normalized = text.includes(",") ? text.replace(/\./g, "").replace(",", ".") : text;
+  const parsed = Number(normalized);
+
+  if (!Number.isFinite(parsed)) return { error: `${field} deve ser numerico.` };
+  if (parsed < 0) return { error: `${field} nao pode ser negativo.` };
+
+  return { value: parsed };
 }
 
 function ProductDetailsModal({
   product,
   onClose,
-  onProductUpdated,
-  onRegister
+  onProductUpdated
 }: {
   product: ProductListItem;
   onClose: () => void;
   onProductUpdated: (product: ProductListItem) => void;
-  onRegister: () => void;
 }) {
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState<ProductEditForm>(() => productToForm(product));
+  const [form, setForm] = useState<ProductEditForm>(() => productFormFromProduct(product));
+  const [canEditProduct, setCanEditProduct] = useState(false);
+  const [permissionChecked, setPermissionChecked] = useState(false);
+  const [confirmingSave, setConfirmingSave] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const dirty = useMemo(() => JSON.stringify(form) !== JSON.stringify(productToForm(product)), [form, product]);
-
-  useEffect(() => {
-    setForm(productToForm(product));
-    setEditing(false);
-    setMessage("");
-    setError("");
-  }, [product]);
-
-  function requestClose() {
-    if (editing && dirty && !window.confirm("Descartar alteracoes nao salvas?")) return;
-    onClose();
-  }
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") requestClose();
+      if (event.key !== "Escape") return;
+      if (confirmingSave) {
+        setConfirmingSave(false);
+        return;
+      }
+      onClose();
     }
 
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  });
+  }, [confirmingSave, onClose]);
 
-  function updateField(field: keyof ProductEditForm, value: string) {
-    setMessage("");
-    setError("");
-    setForm((current) => ({ ...current, [field]: value }));
-  }
+  useEffect(() => {
+    let active = true;
 
-  function cancelEdit() {
-    setForm(productToForm(product));
-    setEditing(false);
-    setMessage("");
-    setError("");
-  }
-
-  function validateForm() {
-    if (!form.name.trim() || !form.sku.trim()) return "Nome e SKU sao obrigatorios.";
-    if (form.ean && !isValidGtin(form.ean)) return "GTIN/EAN invalido. Informe 8, 12, 13 ou 14 digitos validos.";
-
-    const stock = Number(form.stock.replace(",", "."));
-    if (!Number.isInteger(stock) || stock < 0) return "Estoque deve ser um numero inteiro maior ou igual a zero.";
-    if (form.displayValue.trim().startsWith("-") || form.salePriceDisplay.trim().startsWith("-")) {
-      return "Valor e preco de venda nao podem ser negativos.";
+    async function loadPermission() {
+      try {
+        const response = await fetch("/api/auth/session");
+        if (!response.ok) return;
+        const payload = (await response.json()) as { user?: { role?: string } };
+        if (!active) return;
+        setCanEditProduct(payload.user?.role === "OWNER" || payload.user?.role === "ADMIN");
+      } finally {
+        if (active) setPermissionChecked(true);
+      }
     }
 
-    return "";
+    void loadPermission();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    setForm(productFormFromProduct(product));
+    setDescriptionExpanded(false);
+    setEditing(false);
+    setConfirmingSave(false);
+    setSaving(false);
+    setFeedback(null);
+    setError(null);
+  }, [product]);
+
+  const statusText = statusLabel[product.status] ?? displayText(product.status);
+  const originText = displayText(product.origin ?? product.source ?? (getBlingDisplayName(product) ? "BLING" : null));
+  const description = editing ? form.description : cleanProductDescription(product.description);
+  const descriptionLineCount = description.split(/\r?\n/).filter(Boolean).length;
+  const canToggleDescription = !editing && (description.length > 360 || descriptionLineCount > 4);
+  const descriptionIsCollapsed = canToggleDescription && !descriptionExpanded;
+  const cardClass = "rounded-lg border border-matrix-border bg-matrix-panel2/70 p-3";
+  const inputClass =
+    "mt-2 h-10 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm font-semibold text-matrix-fg outline-none transition placeholder:text-matrix-muted focus:border-matrix-gold/70 focus:ring-2 focus:ring-matrix-gold/20";
+  const textareaClass =
+    "mt-3 min-h-40 w-full resize-y rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm leading-6 text-matrix-fg outline-none transition placeholder:text-matrix-muted focus:border-matrix-gold/70 focus:ring-2 focus:ring-matrix-gold/20";
+  const readOnlyDetails = [
+    { label: "Nome do produto", value: product.name, Icon: Package, className: "sm:col-span-2 xl:col-span-1" },
+    { label: "SKU", value: product.sku, Icon: Tag },
+    { label: "EAN", value: product.ean, Icon: Barcode },
+    { label: "Unidade", value: product.unit, Icon: ClipboardList },
+    { label: "Categoria", value: product.category, Icon: Folder },
+    { label: "Origem", value: originText, Icon: Globe2 },
+    { label: "Custo", value: formatCurrencyDisplay(product.costPriceDisplay ?? product.displayValue), Icon: DollarSign },
+    { label: "Preco de venda", value: formatCurrencyDisplay(product.salePriceDisplay), Icon: Tag },
+    { label: "Estoque", value: product.stock, Icon: Box },
+    { label: "Peso liquido", value: formatMeasurement(product.weight, "kg"), Icon: Scale },
+    { label: "Peso bruto", value: formatMeasurement(getProductGrossWeight(product), "kg"), Icon: Scale },
+    { label: "Condicao", value: getProductCondition(product), Icon: ShieldCheck },
+    { label: "Altura", value: formatMeasurement(product.height, "cm"), Icon: Ruler },
+    { label: "Largura", value: formatMeasurement(product.width, "cm"), Icon: Ruler },
+    { label: "Profundidade", value: formatMeasurement(product.depth, "cm"), Icon: Ruler },
+    { label: "Data de atualizacao", value: formatDate(product.updatedAt), Icon: CalendarDays, className: "sm:col-span-2 xl:col-span-3" }
+  ];
+  const editFields: Array<{
+    key: keyof ProductEditForm;
+    label: string;
+    Icon: typeof Package;
+    className?: string;
+    inputMode?: "decimal" | "text";
+  }> = [
+    { key: "name", label: "Nome do produto", Icon: Package, className: "sm:col-span-2 xl:col-span-1" },
+    { key: "ean", label: "EAN", Icon: Barcode },
+    { key: "unit", label: "Unidade", Icon: ClipboardList },
+    { key: "category", label: "Categoria", Icon: Folder },
+    { key: "costPrice", label: "Custo", Icon: DollarSign, inputMode: "decimal" },
+    { key: "salePrice", label: "Preco de venda", Icon: Tag, inputMode: "decimal" },
+    { key: "weight", label: "Peso liquido (kg)", Icon: Scale, inputMode: "decimal" },
+    { key: "grossWeight", label: "Peso bruto (kg)", Icon: Scale, inputMode: "decimal" },
+    { key: "condition", label: "Condicao", Icon: ShieldCheck },
+    { key: "height", label: "Altura (cm)", Icon: Ruler, inputMode: "decimal" },
+    { key: "width", label: "Largura (cm)", Icon: Ruler, inputMode: "decimal" },
+    { key: "depth", label: "Profundidade (cm)", Icon: Ruler, inputMode: "decimal" }
+  ];
+  const aiActions = [
+    { label: "Melhorar titulo", Icon: Wand2 },
+    { label: "Gerar descricao", Icon: FileText },
+    { label: "Ficha tecnica", Icon: ClipboardList },
+    { label: "Corrigir categoria", Icon: Folder },
+    { label: "Revisar dimensoes", Icon: Ruler },
+    { label: "Sugerir atributos", Icon: Sparkles }
+  ];
+  const blockedExternalActions = [
+    { label: "Enviar para Mercado Livre", Icon: Globe2 },
+    { label: "Atualizar no Bling", Icon: FileUp },
+    { label: "Sincronizar alteracoes", Icon: RefreshCw }
+  ];
+
+  function updateField(key: keyof ProductEditForm, value: string) {
+    setForm((current) => ({ ...current, [key]: value }));
+    setError(null);
+    setFeedback(null);
   }
 
-  async function saveChanges() {
-    const validationError = validateForm();
-    if (validationError) {
-      setError(validationError);
+  function buildPayload() {
+    if (form.name.trim().length < 2) return { error: "Nome do produto deve ter ao menos 2 caracteres." };
+
+    const decimalFields: Array<[keyof ProductEditForm, string]> = [
+      ["costPrice", "Custo"],
+      ["salePrice", "Preco de venda"],
+      ["weight", "Peso liquido"],
+      ["grossWeight", "Peso bruto"],
+      ["height", "Altura"],
+      ["width", "Largura"],
+      ["depth", "Profundidade"]
+    ];
+    const decimals: Partial<Record<keyof ProductEditForm, number | null>> = {};
+
+    for (const [key, label] of decimalFields) {
+      const parsed = parseOptionalFormDecimal(form[key], label);
+      if ("error" in parsed) return { error: parsed.error };
+      decimals[key] = parsed.value;
+    }
+
+    return {
+      payload: {
+        name: form.name.trim(),
+        ean: form.ean.trim() || null,
+        unit: form.unit.trim() || null,
+        category: form.category.trim() || null,
+        displayValue: form.costPrice.trim() || null,
+        salePriceDisplay: form.salePrice.trim() || null,
+        weight: decimals.weight ?? null,
+        height: decimals.height ?? null,
+        width: decimals.width ?? null,
+        depth: decimals.depth ?? null,
+        description: form.description,
+        attributes: {
+          condition: form.condition.trim() || null,
+          grossWeight: decimals.grossWeight === null || decimals.grossWeight === undefined ? null : String(decimals.grossWeight)
+        }
+      }
+    };
+  }
+
+  function requestSave() {
+    const result = buildPayload();
+    if ("error" in result) {
+      setError(result.error ?? "Dados invalidos.");
+      return;
+    }
+    setConfirmingSave(true);
+  }
+
+  async function confirmSave() {
+    const result = buildPayload();
+    if ("error" in result) {
+      setError(result.error ?? "Dados invalidos.");
+      setConfirmingSave(false);
       return;
     }
 
     setSaving(true);
-    setError("");
-    setMessage("");
-
+    setError(null);
     try {
       const response = await fetch(`/api/products/${product.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: form.name,
-          sku: form.sku,
-          ean: form.ean || null,
-          unit: form.unit || null,
-          category: form.category || null,
-          origin: form.origin || null,
-          status: form.status,
-          displayValue: form.displayValue,
-          salePriceDisplay: form.salePriceDisplay,
-          stock: Number(form.stock),
-          imageUrl: form.imageUrl || null,
-          description: form.description || null
-        })
+        body: JSON.stringify(result.payload)
       });
       const payload = (await response.json()) as { data?: ProductListItem; error?: string };
 
       if (!response.ok || !payload.data) {
-        setError(payload.error ?? "Nao foi possivel salvar o produto.");
-        return;
+        throw new Error(payload.error ?? "Nao foi possivel salvar o produto.");
       }
 
       onProductUpdated(payload.data);
-      setForm(productToForm(payload.data));
+      setForm(productFormFromProduct(payload.data));
       setEditing(false);
-      setMessage("Alteracoes salvas com sucesso.");
+      setConfirmingSave(false);
+      setFeedback("Produto atualizado com sucesso.");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Nao foi possivel salvar o produto.");
     } finally {
       setSaving(false);
     }
   }
 
-  const details = [
-    ["Nome do produto", product.name],
-    ["SKU", product.sku ?? "Sem SKU"],
-    ["EAN", product.ean ?? "-"],
-    ["Unidade", product.unit ?? "-"],
-    ["Categoria", product.category ?? "-"],
-    ["Origem", product.origin ?? "-"],
-    ["Status", statusLabel[product.status] ?? product.status],
-    ["Valor", product.displayValue ?? "-"],
-    ["Preco de venda", product.salePriceDisplay ?? "0,00"],
-    ["Estoque", String(product.stock)],
-    ["Status Bling", getBlingDisplayName(product) ?? "Sem Bling"],
-    ["Data de atualizacao", formatDate(product.updatedAt)],
-    ["Observacoes", product.description ?? "-"]
-  ];
-
-  const isLocalTestProduct = product.sku?.startsWith("TEST-") || product.origin === "Teste local";
-  const inputClass = "rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm text-matrix-fg outline-none focus:border-matrix-gold/60";
-  const fieldClass = "rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3";
-  const aiModules = [
-    ["Gerar título com IA", "title-generation"],
-    ["Gerar descrição com IA", "description-generation"],
-    ["Classificar com IA", "classification"],
-    ["Sugerir preço", "price-suggestion"],
-    ["Diagnosticar anúncio", "ad-diagnosis"]
-  ];
-
-  function openAIModule(moduleId: string) {
-    window.location.assign(`/ia?module=${moduleId}&productId=${product.id}`);
+  function cancelEdit() {
+    setForm(productFormFromProduct(product));
+    setEditing(false);
+    setConfirmingSave(false);
+    setError(null);
+    setFeedback(null);
   }
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-4 py-6 backdrop-blur-sm" onClick={requestClose}>
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 px-3 py-5 backdrop-blur-md" onClick={onClose}>
       <section
         aria-modal="true"
-        className="matrix-scroll max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-xl border border-matrix-gold/30 bg-matrix-panel p-5 shadow-[0_24px_90px_rgb(0_0_0/0.35)]"
+        className="matrix-scroll max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-2xl border border-matrix-gold/35 bg-matrix-panel/95 p-5 text-matrix-fg shadow-glow sm:p-7"
         onClick={(event) => event.stopPropagation()}
         role="dialog"
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-matrix-goldDark">Produto</p>
-            <h3 className="mt-1 text-2xl font-bold tracking-normal text-matrix-fg">Detalhes do produto</h3>
+            <p className="text-xs font-semibold uppercase tracking-[0.28em] text-matrix-goldDark">Produto</p>
+            <h3 className="mt-1 text-2xl font-bold tracking-normal text-matrix-fg">
+              {editing ? "Editando produto" : "Detalhes do produto"}
+            </h3>
             <p className="mt-1 text-sm text-matrix-muted">
-              {editing ? "Edite o cadastro base antes de gerar o Cadastro Inteligente." : "Visualizacao do cadastro atual do produto."}
+              {editing ? "Ajuste local do cadastro do Matrix, sem envio automatico para integracoes." : "Visualizacao do cadastro atual do produto."}
             </p>
           </div>
           <button
             aria-label="Fechar detalhes do produto"
-            className="grid h-10 w-10 place-items-center rounded-md border border-matrix-border text-matrix-muted hover:border-matrix-gold/45 hover:text-matrix-goldDark"
-            onClick={requestClose}
+            className="grid h-11 w-11 place-items-center rounded-lg border border-matrix-border bg-matrix-panel2/80 text-matrix-muted transition hover:border-matrix-gold/70 hover:bg-matrix-goldSoft/35 hover:text-matrix-goldDark"
+            onClick={onClose}
             type="button"
           >
             <X className="h-5 w-5" />
           </button>
         </div>
 
-        <div className="mt-5 grid gap-4 lg:grid-cols-[220px_1fr]">
-          <div className="grid min-h-48 place-items-center rounded-lg border border-matrix-border bg-matrix-panel2/70 text-matrix-muted">
+        <div className="mt-6 grid gap-5 rounded-xl border border-matrix-border bg-matrix-panel2/60 p-4 lg:grid-cols-[320px_1fr]">
+          <div className="grid min-h-56 place-items-center overflow-hidden rounded-lg border border-matrix-border bg-white text-matrix-muted">
             {product.imageUrl ? (
               <Image
                 alt={product.name}
-                className="h-full max-h-60 w-full rounded-lg object-cover"
-                height={240}
+                className="h-full max-h-[300px] w-full object-contain"
+                height={300}
                 src={product.imageUrl}
                 unoptimized
-                width={320}
+                width={420}
               />
             ) : (
-              <div className="text-center">
-                <div className="mx-auto grid h-14 w-14 place-items-center rounded-xl bg-matrix-goldSoft/60 text-matrix-goldDark">
+              <div className="px-6 py-10 text-center">
+                <div className="mx-auto grid h-16 w-16 place-items-center rounded-xl bg-matrix-goldSoft/60 text-matrix-goldDark">
                   <ImageIcon className="h-7 w-7" />
                 </div>
-                <p className="mt-3 text-sm font-semibold text-matrix-fg">Sem imagem</p>
-                <p className="mt-1 text-xs text-matrix-muted">Placeholder atual</p>
+                <p className="mt-3 text-sm font-semibold text-matrix-muted">Sem imagem</p>
               </div>
             )}
           </div>
 
-          {editing ? (
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className={`${fieldClass} grid gap-2 text-xs font-medium text-matrix-muted sm:col-span-2`}>
-                Nome do produto
-                <input className={inputClass} value={form.name} onChange={(event) => updateField("name", event.target.value)} />
-              </label>
-              <label className={`${fieldClass} grid gap-2 text-xs font-medium text-matrix-muted`}>
-                SKU
-                <input className={inputClass} value={form.sku} onChange={(event) => updateField("sku", event.target.value)} />
-              </label>
-              <label className={`${fieldClass} grid gap-2 text-xs font-medium text-matrix-muted`}>
-                EAN/GTIN
-                <input
-                  className={inputClass}
-                  inputMode="numeric"
-                  placeholder="8, 12, 13 ou 14 digitos"
-                  value={form.ean}
-                  onChange={(event) => updateField("ean", normalizeGtinInput(event.target.value))}
-                />
-              </label>
-              <label className={`${fieldClass} grid gap-2 text-xs font-medium text-matrix-muted`}>
-                Unidade
-                <input className={inputClass} value={form.unit} onChange={(event) => updateField("unit", event.target.value)} />
-              </label>
-              <label className={`${fieldClass} grid gap-2 text-xs font-medium text-matrix-muted`}>
-                Categoria
-                <input className={inputClass} value={form.category} onChange={(event) => updateField("category", event.target.value)} />
-              </label>
-              <label className={`${fieldClass} grid gap-2 text-xs font-medium text-matrix-muted`}>
-                Origem
-                <input className={inputClass} value={form.origin} onChange={(event) => updateField("origin", event.target.value)} />
-              </label>
-              <label className={`${fieldClass} grid gap-2 text-xs font-medium text-matrix-muted`}>
-                Status
-                <select className={inputClass} value={form.status} onChange={(event) => updateField("status", event.target.value)}>
-                  <option value="READY_FOR_TEST">Pronto para teste</option>
-                  <option value="DRAFT">Rascunho</option>
-                </select>
-              </label>
-              <label className={`${fieldClass} grid gap-2 text-xs font-medium text-matrix-muted`}>
-                Valor
-                <input className={inputClass} inputMode="decimal" value={form.displayValue} onChange={(event) => updateField("displayValue", event.target.value)} />
-              </label>
-              <label className={`${fieldClass} grid gap-2 text-xs font-medium text-matrix-muted`}>
-                Preco de venda
-                <input className={inputClass} inputMode="decimal" value={form.salePriceDisplay} onChange={(event) => updateField("salePriceDisplay", event.target.value)} />
-              </label>
-              <label className={`${fieldClass} grid gap-2 text-xs font-medium text-matrix-muted`}>
-                Estoque
-                <input className={inputClass} inputMode="numeric" value={form.stock} onChange={(event) => updateField("stock", normalizeGtinInput(event.target.value))} />
-              </label>
-              <label className={`${fieldClass} grid gap-2 text-xs font-medium text-matrix-muted`}>
-                URL da imagem
-                <input className={inputClass} value={form.imageUrl} onChange={(event) => updateField("imageUrl", event.target.value)} />
-              </label>
-              <label className={`${fieldClass} grid gap-2 text-xs font-medium text-matrix-muted sm:col-span-2`}>
-                Observacoes
-                <textarea className={`${inputClass} min-h-24`} value={form.description} onChange={(event) => updateField("description", event.target.value)} />
-              </label>
+          <div className="flex min-w-0 flex-col justify-center">
+            <h4 className="text-2xl font-bold leading-tight text-matrix-fg sm:text-3xl">{editing ? form.name || product.name : product.name}</h4>
+            <div className="mt-5 flex flex-wrap gap-2">
+              <span className="inline-flex items-center gap-2 rounded-lg border border-matrix-gold/30 bg-matrix-goldSoft/35 px-3 py-2 text-sm font-semibold text-matrix-goldDark">
+                <span className="h-2 w-2 rounded-full bg-matrix-gold" />
+                {statusText}
+              </span>
+              <span className="inline-flex items-center gap-2 rounded-lg border border-matrix-border bg-matrix-panel/70 px-3 py-2 text-sm font-semibold text-matrix-fg">
+                Origem: <span className="text-matrix-goldDark">{originText}</span>
+              </span>
+              {getBlingDisplayName(product) ? (
+                <span className="inline-flex items-center gap-2 rounded-lg border border-matrix-border bg-matrix-panel/70 px-3 py-2 text-sm text-matrix-muted">
+                  Conta: <span className="font-semibold text-matrix-fg">{getBlingDisplayName(product)}</span>
+                </span>
+              ) : null}
+              {editing ? (
+                <span className="inline-flex items-center gap-2 rounded-lg border border-orange-500/25 bg-orange-500/10 px-3 py-2 text-sm font-semibold text-orange-700">
+                  <AlertTriangle className="h-4 w-4" />
+                  Edicao local
+                </span>
+              ) : null}
             </div>
-          ) : (
-            <div className="grid gap-3 sm:grid-cols-2">
-              {details.map(([label, value]) => (
-                <div key={label} className={fieldClass}>
-                  <p className="text-xs font-medium text-matrix-muted">{label}</p>
-                  <p className="mt-1 text-sm font-semibold text-matrix-fg">{value}</p>
+          </div>
+        </div>
+
+        {feedback ? (
+          <div className="mt-4 flex items-center gap-2 rounded-lg border border-green-500/25 bg-green-500/10 px-3 py-2 text-sm font-semibold text-green-700">
+            <CheckCircle2 className="h-4 w-4" />
+            {feedback}
+          </div>
+        ) : null}
+        {error ? (
+          <div className="mt-4 flex items-center gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-sm font-semibold text-red-700">
+            <AlertTriangle className="h-4 w-4" />
+            {error}
+          </div>
+        ) : null}
+
+        <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {editing
+            ? editFields.map(({ key, label, Icon, className, inputMode }) => (
+                <label key={key} className={`${cardClass} ${className ?? ""}`}>
+                  <span className="flex items-center gap-2 text-xs text-matrix-muted">
+                    <Icon className="h-4 w-4 shrink-0 text-matrix-goldDark" />
+                    {label}
+                  </span>
+                  <input
+                    className={inputClass}
+                    inputMode={inputMode}
+                    onChange={(event) => updateField(key, event.target.value)}
+                    value={form[key]}
+                  />
+                </label>
+              ))
+            : readOnlyDetails.map(({ label, value, Icon, className }) => (
+                <div key={label} className={`${cardClass} ${className ?? ""}`}>
+                  <div className="flex items-start gap-3">
+                    <Icon className="mt-0.5 h-4 w-4 shrink-0 text-matrix-goldDark" />
+                    <div className="min-w-0">
+                      <p className="text-xs text-matrix-muted">{label}</p>
+                      <p className="mt-1 break-words text-sm font-semibold text-matrix-fg">{displayText(value)}</p>
+                    </div>
+                  </div>
                 </div>
               ))}
+        </div>
+
+        <div className="mt-3 rounded-lg border border-matrix-border bg-matrix-panel2/70 p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-matrix-fg">
+              <FileText className="h-4 w-4 text-matrix-goldDark" />
+              Descricao
+            </div>
+            {canToggleDescription ? (
+              <button
+                aria-expanded={descriptionExpanded}
+                className="inline-flex items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-semibold text-matrix-goldDark transition hover:border-matrix-gold/60 hover:bg-matrix-goldSoft/25"
+                onClick={() => setDescriptionExpanded((current) => !current)}
+                title={descriptionExpanded ? "Recolher descricao" : "Expandir descricao"}
+                type="button"
+              >
+                {descriptionExpanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+                {descriptionExpanded ? "Recolher" : "Expandir"}
+              </button>
+            ) : null}
+          </div>
+          {editing ? (
+            <textarea
+              className={textareaClass}
+              onChange={(event) => updateField("description", event.target.value)}
+              value={form.description}
+            />
+          ) : (
+            <div
+              className={`relative mt-3 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 ${
+                descriptionIsCollapsed ? "max-h-28 overflow-hidden" : canToggleDescription ? "max-h-[46vh] overflow-y-auto pr-2" : ""
+              }`}
+            >
+              <p className="whitespace-pre-line text-sm leading-6 text-matrix-fg">
+                {description || "Sem descricao cadastrada."}
+              </p>
+              {descriptionIsCollapsed ? (
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-matrix-panel to-transparent" />
+              ) : null}
             </div>
           )}
         </div>
 
-        {isLocalTestProduct ? (
-          <div className="mt-4 rounded-lg border border-matrix-gold/25 bg-matrix-goldSoft/35 px-3 py-2 text-sm font-semibold text-matrix-goldDark">
-            Produto de teste/local
+        <div className="mt-3 rounded-lg border border-matrix-border bg-matrix-panel2/70 p-4">
+          <div className="flex items-center gap-2 text-sm font-semibold text-matrix-fg">
+            <Sparkles className="h-4 w-4 text-matrix-goldDark" />
+            Acoes rapidas de IA
           </div>
-        ) : null}
-
-        {!editing ? (
-          <div className="mt-4 rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3">
-            <div className="flex items-center gap-2 text-sm font-semibold text-matrix-fg">
-              <Sparkles className="h-4 w-4 text-matrix-goldDark" />
-              Ações rápidas de IA
-            </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {aiModules.map(([label, moduleId]) => (
-                <Button key={moduleId} onClick={() => openAIModule(moduleId)} variant="secondary">
+          <div className="mt-3 flex flex-wrap gap-2">
+            {aiActions.map(({ label, Icon }) => (
+              <Button key={label} disabled title="Em breve" variant="secondary">
+                <Icon className="h-4 w-4" />
+                {label}
+                <span className="rounded-full bg-matrix-muted/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-matrix-muted">
+                  Em breve
+                </span>
+              </Button>
+            ))}
+          </div>
+          <div className="mt-4 border-t border-matrix-border pt-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-matrix-muted">Envios externos bloqueados nesta etapa</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {blockedExternalActions.map(({ label, Icon }) => (
+                <Button key={label} disabled title="Bloqueado ate revisao" variant="secondary">
+                  <Icon className="h-4 w-4" />
                   {label}
+                  <Lock className="h-3.5 w-3.5" />
                 </Button>
               ))}
             </div>
           </div>
-        ) : null}
+        </div>
 
-        {error ? <p className="mt-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">{error}</p> : null}
-        {message ? <p className="mt-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">{message}</p> : null}
-
-        <div className="mt-5 flex flex-wrap justify-end gap-2">
-          {editing ? (
-            <>
-              <Button variant="secondary" onClick={cancelEdit} disabled={saving}>Cancelar</Button>
-              <Button onClick={saveChanges} disabled={saving}>{saving ? "Salvando..." : "Salvar alteracoes"}</Button>
-            </>
-          ) : (
-            <Button variant="secondary" onClick={() => setEditing(true)}>Editar produto</Button>
-          )}
-          <Button onClick={onRegister} disabled={saving}>Cadastrar produto</Button>
+        <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs text-matrix-muted">
+            {canEditProduct
+              ? "Alteracoes salvas aqui ficam apenas no cadastro local ate uma etapa separada de envio."
+              : permissionChecked
+                ? "Seu usuario pode visualizar este cadastro, mas nao editar produtos."
+                : "Verificando permissoes..."}
+          </p>
+          <div className="flex flex-wrap justify-end gap-2">
+            {editing ? (
+              <>
+                <Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">
+                  Cancelar
+                </Button>
+                <Button disabled={saving} onClick={requestSave} type="button">
+                  Salvar alteracoes
+                </Button>
+              </>
+            ) : (
+              <>
+                {canEditProduct ? (
+                  <Button
+                    onClick={() => {
+                      setForm(productFormFromProduct(product));
+                      setEditing(true);
+                      setFeedback(null);
+                      setError(null);
+                    }}
+                    type="button"
+                  >
+                    <Edit3 className="h-4 w-4" />
+                    Editar
+                  </Button>
+                ) : null}
+                <Button variant="secondary" onClick={onClose} type="button">Fechar</Button>
+              </>
+            )}
+          </div>
         </div>
       </section>
+
+      {confirmingSave ? (
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-black/60 px-4 py-6 backdrop-blur-sm" onClick={() => setConfirmingSave(false)}>
+          <div
+            className="w-full max-w-lg rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 text-matrix-fg shadow-glow"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-matrix-goldSoft/50 text-matrix-goldDark">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div>
+                <h4 className="text-lg font-bold">Salvar alteracoes do produto?</h4>
+                <p className="mt-2 text-sm leading-6 text-matrix-muted">
+                  As alteracoes serao salvas no cadastro local do Matrix. O envio para Bling ou Mercado Livre deve ser feito em uma etapa separada com confirmacao.
+                </p>
+              </div>
+            </div>
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <Button disabled={saving} onClick={() => setConfirmingSave(false)} type="button" variant="secondary">
+                Voltar
+              </Button>
+              <Button disabled={saving} onClick={() => void confirmSave()} type="button">
+                {saving ? "Salvando..." : "Confirmar salvamento local"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
