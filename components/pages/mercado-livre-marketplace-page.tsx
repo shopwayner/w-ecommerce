@@ -379,7 +379,7 @@ function feeSourceLabel(listing: MercadoLivreClientListing) {
 
 function feeObservationLabel(listing: MercadoLivreClientListing) {
   if (listing.fees?.unavailableReason) return listing.fees.unavailableReason;
-  if (listing.fees?.source === "mercado_livre_listing_prices") return "Tarifa estimada por consulta read-only.";
+  if (listing.fees?.source === "mercado_livre_listing_prices") return "Tarifa estimada por consulta oficial do Mercado Livre.";
   return "Tarifa nao retornada pela API nesta consulta.";
 }
 
@@ -530,7 +530,7 @@ function ListingInfoChip({
           ? "border-matrix-border bg-matrix-panel2/55 text-matrix-muted"
           : "border-matrix-gold/20 bg-matrix-goldSoft/18 text-matrix-fg"
       }`}
-      title="Indicador visual read-only"
+      title="Indicador visual"
     >
       <Icon className="h-3.5 w-3.5 text-matrix-goldDark" />
       {label}
@@ -794,7 +794,6 @@ export function MercadoLivreMarketplacePage() {
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-3xl font-bold tracking-normal text-matrix-fg sm:text-4xl">Mercado Livre</h1>
             <Badge tone={hasClientConnection ? "success" : "muted"}>{hasClientConnection ? "Conta conectada" : "Configuracao ausente"}</Badge>
-            <Badge tone="muted">Read-only</Badge>
           </div>
           <p className="mt-2 max-w-4xl text-sm leading-6 text-matrix-muted">
             Gestao de anuncios, precos, estoque e pedidos do Mercado Livre.
@@ -819,7 +818,7 @@ export function MercadoLivreMarketplacePage() {
                 <p className="text-sm font-semibold uppercase tracking-[0.18em] text-matrix-goldDark">Conta Mercado Livre ainda nao conectada</p>
                 <h2 className="mt-2 text-2xl font-bold text-matrix-fg">Conecte uma conta do cliente para gerenciar anuncios reais.</h2>
                 <p className="mt-3 max-w-3xl text-sm leading-6 text-matrix-muted">
-                  Esta area gerencia anuncios reais do cliente. O Cadastro Inteligente usa uma busca read-only separada do sistema.
+                  Esta area gerencia anuncios reais do cliente. O Cadastro Inteligente usa uma busca separada do sistema.
                 </p>
                 <div className="mt-5 flex flex-wrap gap-2">
                   <Button type="button" onClick={connectMercadoLivreClient}>
@@ -839,7 +838,7 @@ export function MercadoLivreMarketplacePage() {
               <h3 className="font-semibold text-matrix-fg">Separacao de seguranca</h3>
             </div>
             <div className="mt-4 grid gap-3 text-sm leading-6 text-matrix-muted">
-              <p>Cadastro Inteligente: consulta catalogos e sugestoes com o app read-only do sistema.</p>
+              <p>Cadastro Inteligente: consulta catalogos e sugestoes com o app separado do sistema.</p>
               <p>Marketplace Mercado Livre: usa somente MarketplaceConnection do cliente.</p>
               <p>Nenhum anuncio sera publicado ou alterado sem preview e confirmacao.</p>
             </div>
@@ -850,19 +849,16 @@ export function MercadoLivreMarketplacePage() {
           <Card className="border-matrix-gold/35 bg-matrix-panel/80 p-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-matrix-goldDark">Conta Mercado Livre conectada</p>
-                <h2 className="mt-1 text-xl font-bold text-matrix-fg">{account?.accountName ?? "Mercado Livre"}</h2>
-                <div className="mt-2 grid gap-1 text-sm text-matrix-muted sm:grid-cols-2 xl:grid-cols-4">
-                  <span>Seller ID: {account?.sellerId ?? "-"}</span>
-                  <span>Status: {account?.status ?? "-"}</span>
-                  <span>Site: {account?.siteId ?? "MLB"}</span>
-                  <span>Conectado em: {formatDate(account?.connectedAt ?? null)}</span>
-                  <span>Expira em: {formatDate(account?.expiresAt ?? null)}</span>
-                  <span>Ultima sincronizacao: {formatDate(listingsPayload?.lastSyncedAt ?? account?.lastSyncAt ?? null)}</span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone="success">Conta conectada</Badge>
+                  <Badge tone="success">Integrado</Badge>
                 </div>
+                <h2 className="mt-2 text-xl font-bold text-matrix-fg">{account?.accountName ?? "Mercado Livre"}</h2>
+                <p className="mt-2 max-w-2xl text-sm text-matrix-muted">
+                  Conta pronta para sincronizar e visualizar anuncios do Mercado Livre.
+                </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Badge tone="success">Integrado</Badge>
                 <Button type="button" variant="secondary" onClick={() => void syncListings({ offset: 0, limit: pageSize })} disabled={syncing}>
                   <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
                   {syncing ? "Sincronizando..." : "Sincronizar anuncios"}
@@ -991,7 +987,6 @@ export function MercadoLivreMarketplacePage() {
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs text-matrix-muted">
-                <Badge tone="muted">Read-only</Badge>
                 <span>{globalIdentifierSearchActive ? "Busca global" : `Pagina ${currentPage} de ${totalPages}`}</span>
                 <select
                   className="rounded-md border border-matrix-border bg-matrix-panel px-2 py-1.5 text-matrix-fg outline-none"
@@ -1180,14 +1175,14 @@ export function MercadoLivreMarketplacePage() {
                         ? "A busca por identificador varre os anuncios em leitura e preserva itens diferentes pelo ID ML."
                         : listings.length
                         ? "Ajuste busca, abas ou filtros avancados para visualizar outros anuncios carregados."
-                        : "A sincronizacao usa apenas endpoints oficiais read-only do Mercado Livre."}
+                        : "Clique em Sincronizar anuncios para carregar a conta conectada."}
                     </p>
                   </div>
                 </div>
               )}
             </div>
 
-            <div className="mt-4 flex flex-col gap-2 border-t border-matrix-border pt-3 text-xs text-matrix-muted md:flex-row md:items-center md:justify-between">
+            <div className="hidden">
               <span>Ultima sincronizacao: {formatDate(listingsPayload?.lastSyncedAt ?? account?.lastSyncAt ?? null)}</span>
               {globalIdentifierSearchActive ? (
                 <span>
@@ -1198,15 +1193,6 @@ export function MercadoLivreMarketplacePage() {
                   {filteredListings.length} visiveis nesta pagina · offset {paging?.offset ?? pageOffset} · {pageSize} por pagina
                 </span>
               )}
-            </div>
-          </Card>
-
-          <Card className="border-matrix-gold/30 bg-matrix-goldSoft/18 p-4">
-            <div className="flex gap-3">
-              <BarChart3 className="mt-0.5 h-5 w-5 shrink-0 text-matrix-goldDark" />
-              <p className="text-sm leading-6 text-matrix-muted">
-                Esta fase sincroniza anuncios reais em modo read-only usando somente a MarketplaceConnection do cliente. Edicoes de preco, estoque, imagens, dimensoes e status continuam bloqueadas.
-              </p>
             </div>
           </Card>
         </div>
@@ -1224,7 +1210,7 @@ export function MercadoLivreMarketplacePage() {
           <div className="max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-md border border-matrix-border bg-matrix-panel p-4 shadow-glow">
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-matrix-goldDark">Anuncio Mercado Livre read-only</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-matrix-goldDark">Anuncio Mercado Livre</p>
                 <h3 className="mt-1 text-xl font-bold text-matrix-fg">{selectedListing.title}</h3>
               </div>
               <Button type="button" variant="ghost" onClick={() => setSelectedListing(null)}>
@@ -1350,7 +1336,7 @@ export function MercadoLivreMarketplacePage() {
                       <DetailItem label="Estoque local" value={fieldValue(selectedListing.localProduct.availableQuantity)} />
                     </dl>
                   ) : (
-                    <p className="text-sm text-matrix-muted">Sem vinculo local por SKU/GTIN nesta consulta read-only.</p>
+                    <p className="text-sm text-matrix-muted">Sem vinculo local por SKU/GTIN nesta consulta.</p>
                   )}
                 </DetailSection>
 
@@ -1409,8 +1395,7 @@ export function MercadoLivreMarketplacePage() {
           <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-md border border-matrix-border bg-matrix-panel p-4 shadow-glow">
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-matrix-goldDark">Read-only</p>
-                <h3 className="mt-1 text-xl font-bold text-matrix-fg">Calculadora de Margem de Lucro</h3>
+                <h3 className="text-xl font-bold text-matrix-fg">Calculadora de Margem de Lucro</h3>
                 <p className="mt-1 text-sm text-matrix-muted">Simulacao visual local. Nenhum dado e salvo ou enviado ao Mercado Livre.</p>
               </div>
               <Button type="button" variant="ghost" onClick={() => setCalculatorListing(null)}>
