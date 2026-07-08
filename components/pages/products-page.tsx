@@ -219,18 +219,25 @@ function cleanProductDescription(value: string | null | undefined) {
     if (!title || title.length > 72) return false;
     if (title.split(/\s+/).length > 8) return false;
     if (!/[A-Za-z\u00C0-\u024F]/.test(title)) return false;
+    if (
+      /^(Marca|Modelo|C[o\u00f3]digo(?:\s+(?:de\s+Refer[e\u00ea]ncia|similar))?|Refer[e\u00ea]ncia|Tipo|Voltagem|Capacidade|CCA|Material|Acabamento|Sistema|Aplica[c\u00e7][a\u00e3]o|Fun[c\u00e7][a\u00e3]o|Instala[c\u00e7][a\u00e3]o|Altura|Largura|Comprimento|Profundidade|Peso)$/i.test(
+        title
+      )
+    ) {
+      return false;
+    }
     return !/[.!?;]/.test(title);
   };
 
   const sectionHeadingPattern =
-    /(Descricao do Produto|Descri\u00e7\u00e3o do Produto|Ficha Tecnica|Ficha T\u00e9cnica|Compatibilidade do Produto|Compatibilidade|Vantagens|Conteudo da Embalagem|Conte\u00fado da Embalagem|Dimensoes do Produto|Dimens\u00f5es do Produto|Dimensoes|Dimens\u00f5es|Tutorial de Instalacao|Tutorial de Instala\u00e7\u00e3o|Cuidados e Manutencao|Cuidados e Manuten\u00e7\u00e3o):/gi;
+    /(Descricao do Produto|Descri\u00e7\u00e3o do Produto|Ficha Tecnica|Ficha T\u00e9cnica|Compatibilidade do Produto|Compatibilidade|Vantagens|Conteudo da Embalagem|Conte\u00fado da Embalagem|Dimensoes do Produto|Dimens\u00f5es do Produto|Dimensoes|Dimens\u00f5es|Tutorial de Instalacao|Tutorial de Instala\u00e7\u00e3o|Cuidados e Manutencao|Cuidados e Manuten\u00e7\u00e3o)\s*:/gi;
   const inlineFieldPattern =
-    /(Marca|Modelo|C[o\u00f3]digo(?:\s+(?:de\s+Refer[e\u00ea]ncia|similar))?|Refer[e\u00ea]ncia|Tipo|Voltagem|Capacidade|CCA|Material|Sistema|Aplica[c\u00e7][a\u00e3]o|Fun[c\u00e7][a\u00e3]o|Instala[c\u00e7][a\u00e3]o|Altura|Largura|Comprimento|Profundidade|Peso):/gi;
+    /(Marca|Modelo|C[o\u00f3]digo(?:\s+(?:de\s+Refer[e\u00ea]ncia|similar))?|Refer[e\u00ea]ncia|Tipo|Voltagem|Capacidade|CCA|Material|Acabamento|Sistema|Aplica[c\u00e7][a\u00e3]o|Fun[c\u00e7][a\u00e3]o|Instala[c\u00e7][a\u00e3]o|Altura|Largura|Comprimento|Profundidade|Peso)\s*:/gi;
 
   const sectionHeadings: string[] = [];
   const protectSectionHeading = (heading: string) => {
     const token = `__MATRIX_SECTION_HEADING_${sectionHeadings.length}__`;
-    sectionHeadings.push(heading.trim());
+    sectionHeadings.push(heading.trim().replace(/\s+:/g, ":"));
     return `\n${token}\n`;
   };
 
@@ -239,8 +246,8 @@ function cleanProductDescription(value: string | null | undefined) {
   text = text
     .replace(/<\s*(script|style)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, " ")
     .replace(/<\s*br\b[^>]*>/gi, "\n")
+    .replace(/<\s*(p|div|section|article|li|h[1-6]|tr)\b[^>]*>/gi, "\n")
     .replace(/<\/\s*(p|div|section|article|li|h[1-6]|tr)\s*>/gi, "\n")
-    .replace(/<\s*li[^>]*>/gi, "\n")
     .replace(/<[^>]*>/g, " ")
     .replace(/\r\n?/g, "\n")
     .replace(sectionHeadingPattern, (match) => protectSectionHeading(match))
