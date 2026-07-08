@@ -225,7 +225,7 @@ function cleanProductDescription(value: string | null | undefined) {
   const sectionHeadingPattern =
     /(Descricao do Produto|Descri\u00e7\u00e3o do Produto|Ficha Tecnica|Ficha T\u00e9cnica|Compatibilidade do Produto|Compatibilidade|Vantagens|Conteudo da Embalagem|Conte\u00fado da Embalagem|Dimensoes do Produto|Dimens\u00f5es do Produto|Dimensoes|Dimens\u00f5es|Tutorial de Instalacao|Tutorial de Instala\u00e7\u00e3o|Cuidados e Manutencao|Cuidados e Manuten\u00e7\u00e3o):/gi;
   const inlineFieldPattern =
-    /(Marca|Modelo|C[o\u00f3]digo(?:\s+(?:de\s+Refer[e\u00ea]ncia|similar))?|Refer[e\u00ea]ncia|Tipo|Voltagem|Capacidade|CCA|Material|Sistema|Aplica[c\u00e7][a\u00e3]o|Fun[c\u00e7][a\u00e3]o|Instala[c\u00e7][a\u00e3]o|Altura|Largura|Comprimento|Peso):/gi;
+    /(Marca|Modelo|C[o\u00f3]digo(?:\s+(?:de\s+Refer[e\u00ea]ncia|similar))?|Refer[e\u00ea]ncia|Tipo|Voltagem|Capacidade|CCA|Material|Sistema|Aplica[c\u00e7][a\u00e3]o|Fun[c\u00e7][a\u00e3]o|Instala[c\u00e7][a\u00e3]o|Altura|Largura|Comprimento|Profundidade|Peso):/gi;
 
   const sectionHeadings: string[] = [];
   const protectSectionHeading = (heading: string) => {
@@ -238,7 +238,7 @@ function cleanProductDescription(value: string | null | undefined) {
   text = decodeBasicEntities(decodeBasicEntities(text));
   text = text
     .replace(/<\s*(script|style)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, " ")
-    .replace(/<\s*br\s*\/?>/gi, "\n")
+    .replace(/<\s*br\b[^>]*>/gi, "\n")
     .replace(/<\/\s*(p|div|section|article|li|h[1-6]|tr)\s*>/gi, "\n")
     .replace(/<\s*li[^>]*>/gi, "\n")
     .replace(/<[^>]*>/g, " ")
