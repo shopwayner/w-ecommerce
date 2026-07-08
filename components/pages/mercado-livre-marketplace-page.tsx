@@ -54,6 +54,9 @@ type MercadoLivreClientListing = {
   pictures: Array<{
     id: string | null;
     url: string;
+    size?: string | null;
+    maxSize?: string | null;
+    quality?: string | null;
   }>;
   sellerSku: string | null;
   sku: string | null;
@@ -95,6 +98,8 @@ type MercadoLivreClientListing = {
     currencyId?: string | null;
     costSource?: string | null;
     costUnavailableReason?: string | null;
+    paidBy?: "seller" | "buyer" | "unknown";
+    displayMode?: "free_shipping" | "paid_shipping" | "unknown";
   } | null;
   fees?: {
     sellingFeeAmount: number | null;
@@ -138,6 +143,15 @@ type MercadoLivreClientListing = {
   lastSyncAt: string;
 };
 
+type ListingGalleryPicture = {
+  id: string | null;
+  url: string;
+  size?: string | null;
+  maxSize?: string | null;
+  quality?: string | null;
+  isThumbnailFallback?: boolean;
+};
+
 type MercadoLivreListingsPayload = {
   connected: boolean;
   account: MercadoLivreClientAccount;
@@ -165,14 +179,95 @@ type MercadoLivreListingsPayload = {
   lastSyncedAt: string | null;
   warnings: string[];
   search?: {
-    mode: "global_identifier";
+    mode: "global_identifier" | "filtered_before_pagination";
     query: string;
     scannedItemIds: number;
+    matchedItemIds?: number;
     maxListings: number;
+    sourceTotalAvailable?: number | null;
     uniqueKey: "externalId";
+    filters?: {
+      status: string;
+      listingType: string;
+      stock: string;
+    };
   };
   readOnly: boolean;
   externalWrite: boolean;
+};
+
+type TechnicalSheetAttributeStatus = "filled" | "missing_required" | "optional" | "not_applicable_allowed";
+
+type TechnicalSheetAttribute = {
+  id: string;
+  name: string;
+  section: "Caracteristicas principais" | "Registros de produtos" | "Legal" | "Precos" | "Outros";
+  groupId: string | null;
+  groupName: string | null;
+  valueType: string | null;
+  currentValue: string | null;
+  status: TechnicalSheetAttributeStatus;
+  filled: boolean;
+  required: boolean;
+  allowsNotApplicable: boolean;
+  tags: string[];
+  allowedValues: Array<{
+    id: string | null;
+    name: string;
+  }>;
+};
+
+type TechnicalSheetPayload = {
+  readOnly: true;
+  externalWrite: false;
+  listing: Pick<
+    MercadoLivreClientListing,
+    | "externalId"
+    | "itemId"
+    | "title"
+    | "thumbnail"
+    | "pictures"
+    | "sku"
+    | "gtin"
+    | "price"
+    | "currencyId"
+    | "categoryId"
+    | "categoryName"
+    | "categoryPath"
+    | "attributes"
+    | "dimensions"
+    | "dimensionInfo"
+  >;
+  category: {
+    id: string | null;
+    name: string | null;
+    path: string | null;
+  };
+  attributes: TechnicalSheetAttribute[];
+  filledAttributes: TechnicalSheetAttribute[];
+  missingRequiredAttributes: TechnicalSheetAttribute[];
+  optionalAttributes: TechnicalSheetAttribute[];
+  allowedValues: Array<{
+    attributeId: string;
+    attributeName: string;
+    values: Array<{
+      id: string | null;
+      name: string;
+    }>;
+  }>;
+  sections: Array<{
+    name: TechnicalSheetAttribute["section"];
+    attributes: TechnicalSheetAttribute[];
+  }>;
+  warnings: string[];
+};
+
+type TechnicalSheetSection = TechnicalSheetPayload["sections"][number];
+type TechnicalSheetDisplayAttribute = TechnicalSheetAttribute & {
+  suspectedSkuValue?: boolean;
+};
+type TechnicalSheetDisplaySection = Omit<TechnicalSheetSection, "attributes"> & {
+  attributes: TechnicalSheetDisplayAttribute[];
 };
 
 type QuickFilterValue = "all" | "active" | "paused" | "under_review" | "error" | "without_stock" | "premium" | "classico";
@@ -264,22 +359,6 @@ function isClassic(listing: MercadoLivreClientListing) {
   return listing.listingTypeLabel.toLowerCase().includes("classico");
 }
 
-function isErrorStatus(listing: MercadoLivreClientListing) {
-  return listing.status === "under_review" || listing.status === "inactive";
-}
-
-function matchesQuickFilter(listing: MercadoLivreClientListing, filter: QuickFilterValue) {
-  if (filter === "all") return true;
-  if (filter === "active") return listing.status === "active";
-  if (filter === "paused") return listing.status === "paused";
-  if (filter === "under_review") return listing.status === "under_review";
-  if (filter === "error") return isErrorStatus(listing);
-  if (filter === "without_stock") return (listing.availableQuantity ?? 0) <= 0;
-  if (filter === "premium") return isPremium(listing);
-  if (filter === "classico") return isClassic(listing);
-  return true;
-}
-
 function fieldValue(value: string | number | null | undefined) {
   if (value === null || value === undefined || value === "") return "-";
   return String(value);
@@ -315,28 +394,32 @@ function logisticsLabel(listing: MercadoLivreClientListing) {
   return values.length ? "Frete não informado" : "-";
 }
 
-function technicalLogisticsCode(listing: MercadoLivreClientListing) {
-  if (!listing.shipping) return "-";
-  return [listing.shipping.mode, listing.shipping.logisticType].filter(Boolean).join(" / ") || "-";
+function filteredCounterSubject(input: { status: string; type: string; stock: string; query: string }) {
+  const activeStructuredFilters = [input.status !== "all", input.type !== "all", input.stock !== "all"].filter(Boolean).length;
+  if (activeStructuredFilters > 1) return "anúncios filtrados";
+  if (input.status === "active") return "anúncios ativos";
+  if (input.status === "paused") return "anúncios pausados";
+  if (input.status === "closed") return "anúncios finalizados";
+  if (input.status === "under_review") return "anúncios em revisão";
+  if (input.status === "error") return "anúncios com erro";
+  if (input.stock === "with_stock") return "anúncios com estoque";
+  if (input.stock === "without_stock") return "anúncios sem estoque";
+  if (input.type === "premium") return "anúncios Premium";
+  if (input.type === "classico") return "anúncios Clássico";
+  if (input.type === "other") return "anúncios de outros tipos";
+  if (input.query.trim()) return "anúncios encontrados";
+  return "anúncios";
 }
 
-function listingsCounterLabel(current: number, total: number | null | undefined) {
-  return `${current}/${typeof total === "number" ? total : current} anúncios`;
+function listingsCounterLabel(input: { current: number; total: number | null | undefined; filtered: boolean; subject: string }) {
+  const total = typeof input.total === "number" ? input.total : input.current;
+  if (!input.filtered) return `${input.current}/${total} anúncios`;
+  if (total <= input.current) return `${total} ${input.subject}`;
+  return `${input.current}/${total} ${input.subject}`;
 }
 
 function normalizedSearchQuery(value: string) {
   return value.trim().toLowerCase();
-}
-
-function isIdentifierSearchQuery(value: string) {
-  const query = value.trim();
-  if (!query) return false;
-  if (/^ml[a-z]\d+$/i.test(query)) return true;
-  if (/^\d{8,14}$/.test(query)) return true;
-  if (/^[a-z0-9]+(?:[-_./][a-z0-9]+)+$/i.test(query)) return true;
-  if (/^\d{3,}$/.test(query)) return true;
-  if (/^[a-z0-9]+$/i.test(query) && /\d/.test(query)) return true;
-  return false;
 }
 
 function localPickupLabel(listing: MercadoLivreClientListing) {
@@ -371,18 +454,6 @@ function feePercentLabel(listing: MercadoLivreClientListing) {
   return typeof listing.fees?.commissionPercent === "number" ? `${listing.fees.commissionPercent.toFixed(2)}%` : "-";
 }
 
-function feeSourceLabel(listing: MercadoLivreClientListing) {
-  if (listing.fees?.source === "mercado_livre_listing_prices") return "Mercado Livre listing_prices";
-  if (listing.fees?.source) return listing.fees.source;
-  return "Nao retornada nesta fase";
-}
-
-function feeObservationLabel(listing: MercadoLivreClientListing) {
-  if (listing.fees?.unavailableReason) return listing.fees.unavailableReason;
-  if (listing.fees?.source === "mercado_livre_listing_prices") return "Tarifa estimada por consulta oficial do Mercado Livre.";
-  return "Tarifa nao retornada pela API nesta consulta.";
-}
-
 function shippingCostAmount(listing: MercadoLivreClientListing) {
   return typeof listing.shipping?.costAmount === "number" ? listing.shipping.costAmount : null;
 }
@@ -395,18 +466,14 @@ function shippingCostLabel(listing: MercadoLivreClientListing) {
 
 function shippingCostCardLabel(listing: MercadoLivreClientListing) {
   const amount = shippingCostAmount(listing);
-  if (typeof amount === "number") {
-    const suffix = listing.shipping?.costSource === "buyer_paid_shipping" ? " / nao aplicavel" : "";
-    return `Custo vendedor: ${formatPrice(amount, listing.shipping?.currencyId ?? listing.currencyId)}${suffix}`;
-  }
-  return "Custo nao retornado";
+  if (typeof amount === "number") return `Frete ML: ${formatPrice(amount, listing.shipping?.currencyId ?? listing.currencyId)}`;
+  return "Frete nao retornado";
 }
 
-function shippingCostSourceLabel(listing: MercadoLivreClientListing) {
-  if (listing.shipping?.costSource === "item_shipping") return "Detalhe do anuncio Mercado Livre";
-  if (listing.shipping?.costSource === "mercado_livre_shipping_options_free") return "Mercado Livre shipping_options/free";
-  if (listing.shipping?.costSource === "buyer_paid_shipping") return "Frete pago pelo comprador";
-  return "Nao retornada nesta consulta";
+function shippingPayerLabel(listing: MercadoLivreClientListing) {
+  if (listing.shipping?.paidBy === "seller") return "Vendedor";
+  if (listing.shipping?.paidBy === "buyer") return "Comprador";
+  return "Nao informado";
 }
 
 function profitMarginTaxLabel() {
@@ -505,6 +572,143 @@ function listingPicturesCount(listing: MercadoLivreClientListing) {
   return listing.pictures?.length ?? (listing.thumbnail ? 1 : 0);
 }
 
+function listingGalleryPictures(listing: MercadoLivreClientListing): ListingGalleryPicture[] {
+  const seen = new Set<string>();
+  const pictures: ListingGalleryPicture[] = [];
+
+  for (const picture of listing.pictures ?? []) {
+    const url = picture.url?.trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    pictures.push({
+      id: picture.id ?? null,
+      url,
+      size: picture.size ?? null,
+      maxSize: picture.maxSize ?? null,
+      quality: picture.quality ?? null
+    });
+  }
+
+  const thumbnail = listing.thumbnail?.trim();
+  if (thumbnail && !seen.has(thumbnail)) {
+    pictures.push({
+      id: null,
+      url: thumbnail,
+      isThumbnailFallback: true
+    });
+  }
+
+  return pictures;
+}
+
+function technicalSheetStatusLabel(attribute: TechnicalSheetAttribute) {
+  if (attribute.status === "filled") return "Preenchido";
+  if (attribute.status === "missing_required") return "Faltando";
+  if (attribute.status === "not_applicable_allowed") return "N/A permitido";
+  return "Opcional";
+}
+
+function technicalSheetStatusTone(attribute: TechnicalSheetAttribute): "success" | "info" | "warning" | "danger" | "muted" {
+  if (attribute.status === "filled") return "success";
+  if (attribute.status === "missing_required") return "danger";
+  if (attribute.status === "not_applicable_allowed") return "info";
+  return "muted";
+}
+
+function technicalSheetTabHasMeasures(payload: TechnicalSheetPayload | null) {
+  if (!payload) return false;
+  if (payload.listing.dimensionInfo?.hasDimensions) return true;
+  return payload.attributes.some((attribute) => {
+    const name = attribute.name
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
+    return name.includes("medida") || name.includes("tamanho") || name.includes("altura") || name.includes("largura") || name.includes("comprimento") || name.includes("peso");
+  });
+}
+
+function localTechnicalSheetSection(attribute: MercadoLivreClientListing["attributes"][number]): TechnicalSheetAttribute["section"] {
+  const id = attribute.id?.trim().toUpperCase() ?? "";
+  const name = attribute.name
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+
+  if (["GTIN", "EAN", "UPC", "UNIVERSAL_PRODUCT_CODE", "EMPTY_GTIN_REASON"].includes(id) || name.includes("gtin") || name.includes("ean")) {
+    return "Registros de produtos";
+  }
+  if (id.includes("WARRANTY") || id.includes("INMETRO") || name.includes("garantia") || name.includes("inmetro")) {
+    return "Legal";
+  }
+  if (id.includes("PRICE") || name.includes("preco")) {
+    return "Precos";
+  }
+  return "Caracteristicas principais";
+}
+
+function buildLocalTechnicalSheetPayload(listing: MercadoLivreClientListing): TechnicalSheetPayload {
+  const attributes: TechnicalSheetAttribute[] = listing.attributes.map((attribute, index) => {
+    const currentValue = attribute.value?.trim() || null;
+    return {
+      id: attribute.id?.trim() || `LOCAL_ATTRIBUTE_${index + 1}`,
+      name: attribute.name?.trim() || attribute.id?.trim() || `Atributo ${index + 1}`,
+      section: localTechnicalSheetSection(attribute),
+      groupId: null,
+      groupName: null,
+      valueType: null,
+      currentValue,
+      status: currentValue ? "filled" : "optional",
+      filled: Boolean(currentValue),
+      required: false,
+      allowsNotApplicable: false,
+      tags: [],
+      allowedValues: []
+    };
+  });
+
+  const sectionOrder: TechnicalSheetAttribute["section"][] = ["Caracteristicas principais", "Registros de produtos", "Legal", "Precos", "Outros"];
+  const sections = sectionOrder
+    .map((sectionName) => ({
+      name: sectionName,
+      attributes: attributes.filter((attribute) => attribute.section === sectionName)
+    }))
+    .filter((section) => section.attributes.length > 0);
+
+  return {
+    readOnly: true,
+    externalWrite: false,
+    listing: {
+      externalId: listing.externalId,
+      itemId: listing.itemId,
+      title: listing.title,
+      thumbnail: listing.thumbnail,
+      pictures: listing.pictures,
+      sku: listing.sku,
+      gtin: listing.gtin,
+      price: listing.price,
+      currencyId: listing.currencyId,
+      categoryId: listing.categoryId,
+      categoryName: listing.categoryName,
+      categoryPath: listing.categoryPath,
+      attributes: listing.attributes,
+      dimensions: listing.dimensions,
+      dimensionInfo: listing.dimensionInfo
+    },
+    category: {
+      id: listing.categoryId,
+      name: listing.categoryName ?? null,
+      path: listing.categoryPath ?? listing.categoryName ?? null
+    },
+    attributes,
+    filledAttributes: attributes.filter((attribute) => attribute.filled),
+    missingRequiredAttributes: [],
+    optionalAttributes: attributes.filter((attribute) => !attribute.filled),
+    allowedValues: [],
+    sections,
+    warnings: attributes.length ? [] : ["Ficha tecnica nao disponivel nos dados carregados."]
+  };
+}
+
 function ListingMetaItem({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="min-w-0">
@@ -517,23 +721,40 @@ function ListingMetaItem({ label, value, mono = false }: { label: string; value:
 function ListingInfoChip({
   icon: Icon,
   label,
-  muted = false
+  muted = false,
+  onClick,
+  title
 }: {
   icon: typeof FileText;
   label: string;
   muted?: boolean;
+  onClick?: () => void;
+  title?: string;
 }) {
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-semibold ${
-        muted
-          ? "border-matrix-border bg-matrix-panel2/55 text-matrix-muted"
-          : "border-matrix-gold/20 bg-matrix-goldSoft/18 text-matrix-fg"
-      }`}
-      title="Indicador visual"
-    >
+  const className = `inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-semibold transition ${
+    muted
+      ? "border-matrix-border bg-matrix-panel2/55 text-matrix-muted"
+      : "border-matrix-gold/20 bg-matrix-goldSoft/18 text-matrix-fg"
+  } ${onClick ? "hover:border-matrix-gold/60 hover:bg-matrix-goldSoft/35" : ""}`;
+
+  const content = (
+    <>
       <Icon className="h-3.5 w-3.5 text-matrix-goldDark" />
       {label}
+    </>
+  );
+
+  if (onClick) {
+    return (
+      <button aria-label={title ?? label} className={className} onClick={onClick} title={title ?? label} type="button">
+        {content}
+      </button>
+    );
+  }
+
+  return (
+    <span className={className} title={title ?? "Indicador visual"}>
+      {content}
     </span>
   );
 }
@@ -576,13 +797,332 @@ function DetailSection({ title, children }: { title: string; children: ReactNode
   );
 }
 
+function technicalSheetValue(attribute: TechnicalSheetAttribute) {
+  if (!attribute.currentValue) return "-";
+  const normalizedValue = attribute.currentValue.trim().toLowerCase();
+
+  if (attribute.valueType === "boolean" || normalizedValue === "true" || normalizedValue === "false") {
+    if (["true", "sim", "yes"].includes(normalizedValue)) return "Sim";
+    if (["false", "nao", "não", "no"].includes(normalizedValue)) return "Nao";
+  }
+
+  return attribute.currentValue;
+}
+
+const TECHNICAL_ATTRIBUTE_LABELS: Record<string, string> = {
+  BATTERIES_FEATURES: "Caracteristicas das baterias",
+  BRAND: "Marca",
+  EAN: "EAN",
+  EMPTY_GTIN_REASON: "Motivo de GTIN vazio",
+  EXTENDED_LENGTH: "Comprimento estendido",
+  GTIN: "GTIN",
+  HEIGHT: "Altura",
+  INMETRO_CERTIFICATION_REGISTRATION_NUMBER: "Numero de registro/certificacao INMETRO",
+  ITEM_CONDITION: "Condicao do item",
+  ITEM_MATERIAL: "Material",
+  ITEM_PART_NUMBER: "Numero de peca",
+  LENGTH: "Comprimento",
+  MODEL: "Modelo",
+  MPN: "Numero de peca",
+  OEM: "Codigo OEM",
+  PACKAGE_HEIGHT: "Altura da embalagem",
+  PACKAGE_LENGTH: "Comprimento da embalagem",
+  PACKAGE_WEIGHT: "Peso da embalagem",
+  PACKAGE_WIDTH: "Largura da embalagem",
+  PART_NUMBER: "Numero de peca",
+  PRODUCT_CHEMICAL_FEATURES: "Caracteristicas quimicas do produto",
+  PRODUCT_FEATURES: "Caracteristicas do produto",
+  PRODUCT_ORIGIN: "Origem do produto",
+  SELLER_SKU: "SKU do vendedor",
+  SELLER_PACKAGE_HEIGHT: "Altura da embalagem do vendedor",
+  SELLER_PACKAGE_LENGTH: "Comprimento da embalagem do vendedor",
+  SELLER_PACKAGE_WEIGHT: "Peso da embalagem do vendedor",
+  SELLER_PACKAGE_WIDTH: "Largura da embalagem do vendedor",
+  UNIVERSAL_PRODUCT_CODE: "Codigo universal do produto",
+  UPC: "UPC",
+  WARRANTY_TYPE: "Tipo de garantia",
+  WARRANTY_TIME: "Tempo de garantia",
+  WEIGHT: "Peso",
+  WIDTH: "Largura"
+};
+
+const TECHNICAL_SHEET_MAIN_SECTION: TechnicalSheetAttribute["section"] = "Caracteristicas principais";
+const TECHNICAL_SHEET_HIDDEN_ATTRIBUTE_IDS = new Set(["SELLER_SKU", "SELLER_CUSTOM_FIELD"]);
+const TECHNICAL_SHEET_PART_NUMBER_IDS = new Set(["PART_NUMBER", "ITEM_PART_NUMBER", "OEM", "MPN"]);
+
+const TECHNICAL_SHEET_PRIORITY_IDS = new Map<string, number>([
+  ["BRAND", 10],
+  ["GTIN", 20],
+  ["EAN", 21],
+  ["UPC", 22],
+  ["UNIVERSAL_PRODUCT_CODE", 23],
+  ["PART_NUMBER", 30],
+  ["OEM", 31],
+  ["MPN", 32],
+  ["ITEM_PART_NUMBER", 33],
+  ["MODEL", 40],
+  ["WIDTH", 50],
+  ["HEIGHT", 51],
+  ["LENGTH", 52],
+  ["WEIGHT", 53],
+  ["PACKAGE_WIDTH", 54],
+  ["PACKAGE_HEIGHT", 55],
+  ["PACKAGE_LENGTH", 56],
+  ["PACKAGE_WEIGHT", 57],
+  ["SELLER_PACKAGE_WIDTH", 58],
+  ["SELLER_PACKAGE_HEIGHT", 59],
+  ["SELLER_PACKAGE_LENGTH", 60],
+  ["SELLER_PACKAGE_WEIGHT", 61]
+]);
+
+function looksLikeTechnicalCode(value: string | null | undefined) {
+  if (!value) return false;
+  return /^[A-Z0-9_]+$/.test(value.trim());
+}
+
+function friendlyAttributeName(attribute: TechnicalSheetAttribute) {
+  const name = attribute.name?.trim();
+  if (name && !looksLikeTechnicalCode(name)) return name;
+
+  const code = (attribute.id || name || "").trim();
+  if (code && TECHNICAL_ATTRIBUTE_LABELS[code]) return TECHNICAL_ATTRIBUTE_LABELS[code];
+
+  const fallback = code || name || "Atributo";
+  return fallback
+    .toLowerCase()
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function normalizeIdentifier(value: string | null | undefined) {
+  return (value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/gi, "")
+    .toLowerCase();
+}
+
+function isHiddenTechnicalSheetAttribute(attribute: TechnicalSheetAttribute) {
+  return TECHNICAL_SHEET_HIDDEN_ATTRIBUTE_IDS.has(attribute.id.trim().toUpperCase());
+}
+
+function isPartNumberAttribute(attribute: TechnicalSheetAttribute) {
+  return TECHNICAL_SHEET_PART_NUMBER_IDS.has(attribute.id.trim().toUpperCase());
+}
+
+function identifiersLookRelated(left: string, right: string) {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  if (left.length < 4 || right.length < 4) return false;
+  return left.startsWith(right) || right.startsWith(left);
+}
+
+function isSuspectedSkuPartNumber(attribute: TechnicalSheetAttribute, skuCandidates: string[]) {
+  if (!isPartNumberAttribute(attribute) || !attribute.currentValue) return false;
+  const normalizedValue = normalizeIdentifier(attribute.currentValue);
+  return skuCandidates.some((sku) => identifiersLookRelated(normalizedValue, normalizeIdentifier(sku)));
+}
+
+function shouldPrioritizePartNumberAttribute(attribute: TechnicalSheetAttribute, skuCandidates: string[]) {
+  if (!isPartNumberAttribute(attribute)) return true;
+  if (attribute.required && !attribute.currentValue) return true;
+  if (!attribute.currentValue) return false;
+  return !isSuspectedSkuPartNumber(attribute, skuCandidates);
+}
+
+function technicalSheetPriorityRank(attribute: TechnicalSheetDisplayAttribute, skuCandidates: string[] = []) {
+  if (isHiddenTechnicalSheetAttribute(attribute)) return null;
+  if (!shouldPrioritizePartNumberAttribute(attribute, skuCandidates)) return null;
+  return TECHNICAL_SHEET_PRIORITY_IDS.get(attribute.id.trim().toUpperCase()) ?? null;
+}
+
+function orderTechnicalSheetSections(sections: TechnicalSheetSection[], skuCandidates: string[] = []): TechnicalSheetDisplaySection[] {
+  const visibleSections = sections
+    .map((section) => ({
+      ...section,
+      attributes: section.attributes
+        .filter((attribute) => !isHiddenTechnicalSheetAttribute(attribute))
+        .map((attribute) => ({
+          ...attribute,
+          suspectedSkuValue: isSuspectedSkuPartNumber(attribute, skuCandidates)
+        }))
+    }))
+    .map((section) => {
+      const regularAttributes = section.attributes.filter((attribute) => !attribute.suspectedSkuValue);
+      const suspectedAttributes = section.attributes.filter((attribute) => attribute.suspectedSkuValue);
+      return {
+        ...section,
+        attributes: regularAttributes,
+        suspectedAttributes
+      };
+    });
+
+  const suspectedSkuAttributes = visibleSections.flatMap((section) => section.suspectedAttributes ?? []);
+  const sectionsWithSuspectedInOutros = visibleSections
+    .map((sectionWithSuspected) => {
+      const section = {
+        name: sectionWithSuspected.name,
+        attributes: sectionWithSuspected.attributes
+      };
+      if (section.name !== "Outros" || !suspectedSkuAttributes.length) return section;
+      return {
+        ...section,
+        attributes: [...section.attributes, ...suspectedSkuAttributes]
+      };
+    })
+    .filter((section) => section.attributes.length || section.name === "Outros");
+
+  const sectionsToOrder =
+    suspectedSkuAttributes.length && !sectionsWithSuspectedInOutros.some((section) => section.name === "Outros")
+      ? [...sectionsWithSuspectedInOutros, { name: "Outros" as const, attributes: suspectedSkuAttributes }]
+      : sectionsWithSuspectedInOutros;
+  const mainSectionIndex = sectionsToOrder.findIndex((section) => section.name === TECHNICAL_SHEET_MAIN_SECTION);
+
+  if (mainSectionIndex === -1) {
+    return sectionsToOrder.map((section) => ({
+      ...section,
+      attributes: orderTechnicalSheetAttributes(section.attributes, skuCandidates)
+    }));
+  }
+
+  const priorityItems = sectionsToOrder.flatMap((section, sectionIndex) =>
+    section.attributes
+      .map((attribute, attributeIndex) => ({
+        attribute,
+        attributeIndex,
+        key: `${sectionIndex}:${attribute.id}:${attributeIndex}`,
+        rank: technicalSheetPriorityRank(attribute, skuCandidates),
+        sectionIndex
+      }))
+      .filter((item) => item.rank !== null)
+  );
+
+  if (!priorityItems.length) {
+    return sectionsToOrder.map((section) => ({
+      ...section,
+      attributes: orderTechnicalSheetAttributes(section.attributes, skuCandidates)
+    }));
+  }
+
+  const priorityKeys = new Set(priorityItems.map((item) => item.key));
+  const orderedPriorityAttributes = priorityItems
+    .sort((left, right) => {
+      const rankDiff = (left.rank ?? Number.MAX_SAFE_INTEGER) - (right.rank ?? Number.MAX_SAFE_INTEGER);
+      if (rankDiff !== 0) return rankDiff;
+      if (left.sectionIndex !== right.sectionIndex) return left.sectionIndex - right.sectionIndex;
+      return left.attributeIndex - right.attributeIndex;
+    })
+    .map((item) => item.attribute);
+
+  return sectionsToOrder
+    .map((section, sectionIndex) => {
+      const nonPriorityAttributes = section.attributes.filter((attribute, attributeIndex) => {
+        return !priorityKeys.has(`${sectionIndex}:${attribute.id}:${attributeIndex}`);
+      });
+
+      if (sectionIndex === mainSectionIndex) {
+        return {
+          ...section,
+          attributes: [...orderedPriorityAttributes, ...nonPriorityAttributes]
+        };
+      }
+
+      return {
+        ...section,
+        attributes: nonPriorityAttributes
+      };
+    })
+    .filter((section) => section.name === TECHNICAL_SHEET_MAIN_SECTION || section.attributes.length > 0);
+}
+
+function orderTechnicalSheetAttributes(attributes: TechnicalSheetDisplayAttribute[], skuCandidates: string[] = []) {
+  return attributes
+    .map((attribute, index) => ({
+      attribute,
+      index,
+      rank: technicalSheetPriorityRank(attribute, skuCandidates)
+    }))
+    .sort((left, right) => {
+      const leftRank = left.rank ?? Number.MAX_SAFE_INTEGER;
+      const rightRank = right.rank ?? Number.MAX_SAFE_INTEGER;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+      return left.index - right.index;
+    })
+    .map((item) => item.attribute);
+}
+
+function technicalSheetSkuCandidates(payload: TechnicalSheetPayload | null) {
+  const values = new Set<string>();
+  if (payload?.listing.sku) values.add(payload.listing.sku);
+
+  for (const attribute of payload?.listing.attributes ?? []) {
+    const id = attribute.id?.trim().toUpperCase();
+    if ((id === "SELLER_SKU" || id === "SKU" || id === "SELLER_CUSTOM_FIELD") && attribute.value) {
+      values.add(attribute.value);
+    }
+  }
+
+  return Array.from(values);
+}
+
+function TechnicalAttributeField({ attribute }: { attribute: TechnicalSheetDisplayAttribute }) {
+  const visibleAllowedValues = attribute.allowedValues.slice(0, 4);
+  const hiddenAllowedValues = Math.max(0, attribute.allowedValues.length - visibleAllowedValues.length);
+  const displayName = friendlyAttributeName(attribute);
+
+  return (
+    <article className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel/65 p-2.5">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h5 className="text-sm font-semibold leading-5 text-matrix-fg">
+            {displayName}
+            {attribute.required ? <span className="ml-1 text-matrix-goldDark">*</span> : null}
+          </h5>
+        </div>
+        <Badge tone={technicalSheetStatusTone(attribute)}>{technicalSheetStatusLabel(attribute)}</Badge>
+      </div>
+      <div className="mt-2 rounded-md border border-matrix-border/70 bg-matrix-panel2/55 px-2.5 py-2">
+        <p className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">Valor atual</p>
+        <p className={`mt-1 min-h-5 break-words text-sm font-semibold text-matrix-fg ${attribute.currentValue ? "" : "text-matrix-muted"}`}>
+          {technicalSheetValue(attribute)}
+        </p>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {attribute.required ? <Badge tone="warning">Obrigatorio</Badge> : null}
+        {attribute.allowsNotApplicable ? <Badge tone="info">N/A permitido</Badge> : null}
+        {attribute.suspectedSkuValue ? <Badge tone="warning">Possivel SKU usado como numero de peca</Badge> : null}
+        {attribute.groupName && !looksLikeTechnicalCode(attribute.groupName) ? <Badge tone="muted">{attribute.groupName}</Badge> : null}
+      </div>
+      {visibleAllowedValues.length ? (
+        <div className="mt-2">
+          <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-matrix-muted">Permitidos</p>
+          <div className="flex max-h-14 flex-wrap gap-1.5 overflow-hidden">
+            {visibleAllowedValues.map((value) => (
+              <span key={`${attribute.id}-${value.id ?? value.name}`} className="rounded border border-matrix-border bg-matrix-panel2 px-1.5 py-0.5 text-[11px] text-matrix-muted">
+                {value.name}
+              </span>
+            ))}
+            {hiddenAllowedValues ? (
+              <span className="rounded border border-matrix-gold/30 bg-matrix-goldSoft/20 px-1.5 py-0.5 text-[11px] font-semibold text-matrix-goldDark" title={`${hiddenAllowedValues} valores permitidos adicionais`}>
+                +{hiddenAllowedValues}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 export function MercadoLivreMarketplacePage() {
   const [account, setAccount] = useState<MercadoLivreClientAccount | null>(null);
   const [listingsPayload, setListingsPayload] = useState<MercadoLivreListingsPayload | null>(null);
-  const [globalSearchPayload, setGlobalSearchPayload] = useState<MercadoLivreListingsPayload | null>(null);
-  const [globalSearchLoading, setGlobalSearchLoading] = useState(false);
-  const [globalSearchError, setGlobalSearchError] = useState("");
-  const globalSearchCacheRef = useRef(new Map<string, MercadoLivreListingsPayload>());
+  const [filteredListingsPayload, setFilteredListingsPayload] = useState<MercadoLivreListingsPayload | null>(null);
+  const [filteredListingsLoading, setFilteredListingsLoading] = useState(false);
+  const [filteredListingsError, setFilteredListingsError] = useState("");
+  const filteredListingsCacheRef = useRef(new Map<string, MercadoLivreListingsPayload>());
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -596,6 +1136,13 @@ export function MercadoLivreMarketplacePage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [selectedListing, setSelectedListing] = useState<MercadoLivreClientListing | null>(null);
   const [calculatorListing, setCalculatorListing] = useState<MercadoLivreClientListing | null>(null);
+  const [pictureGalleryListing, setPictureGalleryListing] = useState<MercadoLivreClientListing | null>(null);
+  const [pictureGalleryIndex, setPictureGalleryIndex] = useState(0);
+  const [dimensionsListing, setDimensionsListing] = useState<MercadoLivreClientListing | null>(null);
+  const [technicalSheetListing, setTechnicalSheetListing] = useState<MercadoLivreClientListing | null>(null);
+  const [technicalSheetPayload, setTechnicalSheetPayload] = useState<TechnicalSheetPayload | null>(null);
+  const [technicalSheetError, setTechnicalSheetError] = useState("");
+  const [technicalSheetTab, setTechnicalSheetTab] = useState<"attributes" | "measures">("attributes");
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
 
   useEffect(() => {
@@ -640,92 +1187,95 @@ export function MercadoLivreMarketplacePage() {
     setSelectedImageIndex(0);
   }, [selectedListing?.externalId]);
 
+  useEffect(() => {
+    setPictureGalleryIndex(0);
+  }, [pictureGalleryListing?.externalId]);
+
   const hasClientConnection = Boolean(account?.connected && account.status === "ACTIVE");
   const normalizedQuery = normalizedSearchQuery(query);
-  const globalIdentifierSearchActive = isIdentifierSearchQuery(query);
-  const activeListingsPayload = globalIdentifierSearchActive ? globalSearchPayload : listingsPayload;
+  const hasActiveFilters =
+    query.trim() !== "" ||
+    statusFilter !== "all" ||
+    typeFilter !== "all" ||
+    stockFilter !== "all";
+  const filteredModeActive = hasActiveFilters;
+  const activeListingsPayload = filteredModeActive ? filteredListingsPayload : listingsPayload;
   const listings = useMemo(() => activeListingsPayload?.listings ?? [], [activeListingsPayload?.listings]);
   const kpis = activeListingsPayload?.kpis ?? { active: 0, paused: 0, errors: 0, withoutStock: 0, sales: 0, visits: 0 };
   const paging = activeListingsPayload?.paging;
-  const totalAvailable = activeListingsPayload?.totalAvailable ?? paging?.total ?? listingsPayload?.totalAvailable ?? null;
+  const totalAvailable = filteredModeActive
+    ? (paging?.total ?? activeListingsPayload?.totalAvailable ?? null)
+    : (activeListingsPayload?.totalAvailable ?? paging?.total ?? listingsPayload?.totalAvailable ?? null);
   const currentPage = paging?.page ?? Math.floor(pageOffset / pageSize) + 1;
   const totalPages = typeof totalAvailable === "number" ? Math.max(1, Math.ceil(totalAvailable / pageSize)) : currentPage;
-  const hasPreviousPage = globalIdentifierSearchActive ? false : (paging?.hasPrevious ?? pageOffset > 0);
-  const hasNextPage = globalIdentifierSearchActive ? false : (paging?.hasNext ?? (typeof totalAvailable === "number" ? pageOffset + pageSize < totalAvailable : false));
+  const hasPreviousPage = paging?.hasPrevious ?? pageOffset > 0;
+  const hasNextPage = paging?.hasNext ?? (typeof totalAvailable === "number" ? pageOffset + pageSize < totalAvailable : false);
+  const counterSubject = filteredCounterSubject({ status: statusFilter, type: typeFilter, stock: stockFilter, query });
+  const kpiScopeHint = filteredModeActive ? "No filtro atual" : "Na pagina carregada";
 
   useEffect(() => {
-    if (!globalIdentifierSearchActive || !hasClientConnection || !normalizedQuery) {
-      setGlobalSearchPayload(null);
-      setGlobalSearchLoading(false);
-      setGlobalSearchError("");
+    if (!filteredModeActive || !hasClientConnection) {
+      setFilteredListingsPayload(null);
+      setFilteredListingsLoading(false);
+      setFilteredListingsError("");
       return;
     }
 
-    const cachedPayload = globalSearchCacheRef.current.get(normalizedQuery);
+    const cacheKey = JSON.stringify({
+      query: normalizedQuery,
+      status: statusFilter,
+      listingType: typeFilter,
+      stock: stockFilter,
+      offset: pageOffset,
+      limit: pageSize
+    });
+    const cachedPayload = filteredListingsCacheRef.current.get(cacheKey);
     if (cachedPayload) {
-      setGlobalSearchPayload(cachedPayload);
-      setGlobalSearchLoading(false);
-      setGlobalSearchError("");
+      setFilteredListingsPayload(cachedPayload);
+      setFilteredListingsLoading(false);
+      setFilteredListingsError("");
       return;
     }
 
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
-      setGlobalSearchLoading(true);
-      setGlobalSearchError("");
+      setFilteredListingsLoading(true);
+      setFilteredListingsError("");
       try {
-        const response = await fetch(`/api/marketplaces/mercado-livre/client/listings?query=${encodeURIComponent(normalizedQuery)}&maxListings=500`, {
-          cache: "no-store",
-          signal: controller.signal
-        });
+        const params = new URLSearchParams();
+        if (normalizedQuery) params.set("query", normalizedQuery);
+        if (statusFilter !== "all") params.set("status", statusFilter);
+        if (typeFilter !== "all") params.set("listingType", typeFilter);
+        if (stockFilter !== "all") params.set("stock", stockFilter);
+        params.set("offset", String(pageOffset));
+        params.set("limit", String(pageSize));
+        params.set("maxListings", "500");
+        const response = await fetch(`/api/marketplaces/mercado-livre/client/listings?${params.toString()}`, { cache: "no-store", signal: controller.signal });
         const payload = await response.json();
         if (!response.ok) {
           throw new Error(payload?.error ?? "Nao foi possivel buscar anuncios Mercado Livre.");
         }
         const typedPayload = payload as MercadoLivreListingsPayload;
-        globalSearchCacheRef.current.set(normalizedQuery, typedPayload);
-        setGlobalSearchPayload(typedPayload);
-        setGlobalSearchError("");
+        filteredListingsCacheRef.current.set(cacheKey, typedPayload);
+        setFilteredListingsPayload(typedPayload);
+        setFilteredListingsError("");
+        setSelectedIds(new Set());
       } catch (error) {
         if (controller.signal.aborted) return;
-        setGlobalSearchPayload(null);
-        setGlobalSearchError(error instanceof Error ? error.message : "Nao foi possivel buscar anuncios Mercado Livre.");
+        setFilteredListingsPayload(null);
+        setFilteredListingsError(error instanceof Error ? error.message : "Nao foi possivel buscar anuncios Mercado Livre.");
       } finally {
-        if (!controller.signal.aborted) setGlobalSearchLoading(false);
+        if (!controller.signal.aborted) setFilteredListingsLoading(false);
       }
-    }, 450);
+    }, normalizedQuery ? 450 : 0);
 
     return () => {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [globalIdentifierSearchActive, hasClientConnection, normalizedQuery]);
+  }, [filteredModeActive, hasClientConnection, normalizedQuery, pageOffset, pageSize, statusFilter, stockFilter, typeFilter]);
 
-  const filteredListings = useMemo(() => {
-    return listings.filter((listing) => {
-      const textMatches =
-        !normalizedQuery ||
-        listing.title.toLowerCase().includes(normalizedQuery) ||
-        listing.externalId.toLowerCase().includes(normalizedQuery) ||
-        (listing.sku ?? "").toLowerCase().includes(normalizedQuery) ||
-        (listing.gtin ?? "").toLowerCase().includes(normalizedQuery);
-      const statusMatches =
-        statusFilter === "all" ||
-        listing.status === statusFilter ||
-        (statusFilter === "error" && isErrorStatus(listing));
-      const typeMatches =
-        typeFilter === "all" ||
-        (typeFilter === "premium" && isPremium(listing)) ||
-        (typeFilter === "classico" && isClassic(listing)) ||
-        (typeFilter === "other" && !isPremium(listing) && !isClassic(listing));
-      const stockMatches =
-        stockFilter === "all" ||
-        (stockFilter === "with_stock" && (listing.availableQuantity ?? 0) > 0) ||
-        (stockFilter === "without_stock" && (listing.availableQuantity ?? 0) <= 0);
-
-      return textMatches && statusMatches && typeMatches && stockMatches && matchesQuickFilter(listing, quickFilter);
-    });
-  }, [listings, normalizedQuery, quickFilter, statusFilter, stockFilter, typeFilter]);
+  const filteredListings = listings;
 
   async function syncListings(options?: { offset?: number; limit?: number }) {
     const targetLimit = options?.limit ?? pageSize;
@@ -747,13 +1297,45 @@ export function MercadoLivreMarketplacePage() {
       setAccount(typedPayload.account);
       setPageSize(typedPayload.paging?.pageSize ?? targetLimit);
       setPageOffset(typedPayload.paging?.offset ?? targetOffset);
-      globalSearchCacheRef.current.clear();
+      filteredListingsCacheRef.current.clear();
       setSelectedIds(new Set());
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Nao foi possivel sincronizar anuncios Mercado Livre.");
     } finally {
       setSyncing(false);
     }
+  }
+
+  function openTechnicalSheet(listing: MercadoLivreClientListing) {
+    setTechnicalSheetListing(listing);
+    setTechnicalSheetPayload(buildLocalTechnicalSheetPayload(listing));
+    setTechnicalSheetError("");
+    setTechnicalSheetTab("attributes");
+  }
+
+  function closeTechnicalSheet() {
+    setTechnicalSheetListing(null);
+    setTechnicalSheetPayload(null);
+    setTechnicalSheetError("");
+    setTechnicalSheetTab("attributes");
+  }
+
+  function openPictureGallery(listing: MercadoLivreClientListing) {
+    setPictureGalleryListing(listing);
+    setPictureGalleryIndex(0);
+  }
+
+  function closePictureGallery() {
+    setPictureGalleryListing(null);
+    setPictureGalleryIndex(0);
+  }
+
+  function openDimensionsEditor(listing: MercadoLivreClientListing) {
+    setDimensionsListing(listing);
+  }
+
+  function closeDimensionsEditor() {
+    setDimensionsListing(null);
   }
 
   function toggleSelected(id: string) {
@@ -768,16 +1350,120 @@ export function MercadoLivreMarketplacePage() {
   function changePageSize(nextPageSize: number) {
     setPageSize(nextPageSize);
     setPageOffset(0);
-    void syncListings({ offset: 0, limit: nextPageSize });
+    if (!hasActiveFilters) {
+      void syncListings({ offset: 0, limit: nextPageSize });
+    }
   }
 
+  function changeQuickFilter(nextFilter: QuickFilterValue) {
+    setQuickFilter(nextFilter);
+    setPageOffset(0);
+    if (nextFilter === "all") {
+      setStatusFilter("all");
+      setTypeFilter("all");
+      setStockFilter("all");
+      return;
+    }
+    if (nextFilter === "active" || nextFilter === "paused" || nextFilter === "under_review" || nextFilter === "error") {
+      setStatusFilter(nextFilter);
+      setTypeFilter("all");
+      setStockFilter("all");
+      return;
+    }
+    if (nextFilter === "without_stock") {
+      setStatusFilter("all");
+      setTypeFilter("all");
+      setStockFilter("without_stock");
+      return;
+    }
+    if (nextFilter === "premium" || nextFilter === "classico") {
+      setStatusFilter("all");
+      setTypeFilter(nextFilter);
+      setStockFilter("all");
+    }
+  }
+
+  function changeStatusFilter(nextStatus: string) {
+    setStatusFilter(nextStatus);
+    setPageOffset(0);
+    if (nextStatus === "all") setQuickFilter(typeFilter === "premium" || typeFilter === "classico" ? typeFilter : stockFilter === "without_stock" ? "without_stock" : "all");
+    else if ((nextStatus === "active" || nextStatus === "paused" || nextStatus === "under_review" || nextStatus === "error") && typeFilter === "all" && stockFilter === "all") setQuickFilter(nextStatus);
+    else setQuickFilter("all");
+  }
+
+  function changeTypeFilter(nextType: string) {
+    setTypeFilter(nextType);
+    setPageOffset(0);
+    setQuickFilter(nextType !== "all" && statusFilter === "all" && stockFilter === "all" && (nextType === "premium" || nextType === "classico") ? nextType : "all");
+  }
+
+  function changeStockFilter(nextStock: string) {
+    setStockFilter(nextStock);
+    setPageOffset(0);
+    setQuickFilter(nextStock === "without_stock" && statusFilter === "all" && typeFilter === "all" ? "without_stock" : "all");
+  }
+
+  function changeQuery(nextQuery: string) {
+    setQuery(nextQuery);
+    setPageOffset(0);
+  }
+
+  function goToPreviousPage() {
+    const nextOffset = Math.max(0, pageOffset - pageSize);
+    if (hasActiveFilters) {
+      setPageOffset(nextOffset);
+      return;
+    }
+    void syncListings({ offset: nextOffset, limit: pageSize });
+  }
+
+  function goToNextPage() {
+    const nextOffset = pageOffset + pageSize;
+    if (hasActiveFilters) {
+      setPageOffset(nextOffset);
+      return;
+    }
+    void syncListings({ offset: nextOffset, limit: pageSize });
+  }
+
+  const pictureGalleryPictures = useMemo(() => (pictureGalleryListing ? listingGalleryPictures(pictureGalleryListing) : []), [pictureGalleryListing]);
+  const selectedGalleryPicture = pictureGalleryPictures[pictureGalleryIndex] ?? null;
+
+  useEffect(() => {
+    if (!pictureGalleryListing) return;
+
+    function handleGalleryKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setPictureGalleryListing(null);
+        setPictureGalleryIndex(0);
+        return;
+      }
+
+      if (pictureGalleryPictures.length <= 1) return;
+
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        setPictureGalleryIndex((current) => Math.max(0, current - 1));
+      }
+
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        setPictureGalleryIndex((current) => Math.min(pictureGalleryPictures.length - 1, current + 1));
+      }
+    }
+
+    window.addEventListener("keydown", handleGalleryKeyDown);
+    return () => window.removeEventListener("keydown", handleGalleryKeyDown);
+  }, [pictureGalleryListing, pictureGalleryPictures.length]);
+
   const selectedListingIds = selectedIds.size;
-  const hasActiveFilters =
-    query.trim() !== "" ||
-    quickFilter !== "all" ||
-    statusFilter !== "all" ||
-    typeFilter !== "all" ||
-    stockFilter !== "all";
+  const technicalSheetHasMeasures = technicalSheetTabHasMeasures(technicalSheetPayload);
+  const technicalSheetSkuValues = useMemo(() => technicalSheetSkuCandidates(technicalSheetPayload), [technicalSheetPayload]);
+  const orderedTechnicalSheetSections = useMemo(
+    () => orderTechnicalSheetSections(technicalSheetPayload?.sections ?? [], technicalSheetSkuValues),
+    [technicalSheetPayload?.sections, technicalSheetSkuValues]
+  );
 
   function clearListingFilters() {
     setQuery("");
@@ -785,6 +1471,7 @@ export function MercadoLivreMarketplacePage() {
     setStatusFilter("all");
     setTypeFilter("all");
     setStockFilter("all");
+    setPageOffset(0);
   }
 
   return (
@@ -868,11 +1555,11 @@ export function MercadoLivreMarketplacePage() {
           </Card>
 
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
-            <KpiCard label="Ativos" value={String(kpis.active)} hint="Na pagina carregada" tone="success" />
-            <KpiCard label="Pausados" value={String(kpis.paused)} hint="Na pagina carregada" tone="warning" />
-            <KpiCard label="Com erro" value={String(kpis.errors)} hint="Pendencias na pagina" tone="danger" />
-            <KpiCard label="Sem estoque" value={String(kpis.withoutStock)} hint="Na pagina carregada" tone="warning" />
-            <KpiCard label="Vendas" value={String(kpis.sales)} hint="sold_quantity da pagina" tone="info" />
+            <KpiCard label="Ativos" value={String(kpis.active)} hint={kpiScopeHint} tone="success" />
+            <KpiCard label="Pausados" value={String(kpis.paused)} hint={kpiScopeHint} tone="warning" />
+            <KpiCard label="Com erro" value={String(kpis.errors)} hint={filteredModeActive ? "Pendencias no filtro" : "Pendencias na pagina"} tone="danger" />
+            <KpiCard label="Sem estoque" value={String(kpis.withoutStock)} hint={kpiScopeHint} tone="warning" />
+            <KpiCard label="Vendas" value={String(kpis.sales)} hint={filteredModeActive ? "sold_quantity do filtro" : "sold_quantity da pagina"} tone="info" />
             <KpiCard label="Visitas" value={String(kpis.visits)} hint="Nao sincronizado nesta fase" tone="purple" />
           </div>
 
@@ -887,7 +1574,7 @@ export function MercadoLivreMarketplacePage() {
                         ? "border-matrix-gold bg-matrix-gold text-black shadow-gold"
                         : "border-matrix-border bg-matrix-panel2/70 text-matrix-muted hover:border-matrix-gold/55 hover:text-matrix-fg"
                     }`}
-                    onClick={() => setQuickFilter(filter.value)}
+                    onClick={() => changeQuickFilter(filter.value)}
                     type="button"
                   >
                     {filter.label}
@@ -902,7 +1589,7 @@ export function MercadoLivreMarketplacePage() {
                     <Search className="h-4 w-4 shrink-0 text-matrix-goldDark" />
                     <input
                       className="min-w-0 flex-1 bg-transparent text-matrix-fg outline-none"
-                      onChange={(event) => setQuery(event.target.value)}
+                      onChange={(event) => changeQuery(event.target.value)}
                       placeholder="Digite titulo, SKU, ID ML ou GTIN"
                       value={query}
                     />
@@ -910,7 +1597,7 @@ export function MercadoLivreMarketplacePage() {
                 </label>
                 <label className="text-sm text-matrix-muted">
                   Status
-                  <select className="mt-2 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none" onChange={(event) => setStatusFilter(event.target.value)} value={statusFilter}>
+                  <select className="mt-2 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none" onChange={(event) => changeStatusFilter(event.target.value)} value={statusFilter}>
                     {statusOptions.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
@@ -920,7 +1607,7 @@ export function MercadoLivreMarketplacePage() {
                 </label>
                 <label className="text-sm text-matrix-muted">
                   Tipo
-                  <select className="mt-2 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none" onChange={(event) => setTypeFilter(event.target.value)} value={typeFilter}>
+                  <select className="mt-2 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none" onChange={(event) => changeTypeFilter(event.target.value)} value={typeFilter}>
                     {typeOptions.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
@@ -930,7 +1617,7 @@ export function MercadoLivreMarketplacePage() {
                 </label>
                 <label className="text-sm text-matrix-muted">
                   Estoque
-                  <select className="mt-2 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none" onChange={(event) => setStockFilter(event.target.value)} value={stockFilter}>
+                  <select className="mt-2 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none" onChange={(event) => changeStockFilter(event.target.value)} value={stockFilter}>
                     {stockOptions.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
@@ -975,22 +1662,27 @@ export function MercadoLivreMarketplacePage() {
                 <div>
                   <h3 className="font-semibold text-matrix-fg">Anuncios Mercado Livre</h3>
                   <p className="text-xs text-matrix-muted">
-                    {listingsCounterLabel(filteredListings.length, totalAvailable ?? listings.length)}
+                    {listingsCounterLabel({
+                      current: filteredListings.length,
+                      total: totalAvailable ?? filteredListings.length,
+                      filtered: filteredModeActive,
+                      subject: counterSubject
+                    })}
                   </p>
-                  {globalIdentifierSearchActive ? (
+                  {filteredModeActive ? (
                     <p className="text-xs text-matrix-gold">
-                      {globalSearchLoading
-                        ? `Buscando ${query.trim()} em todos os anuncios da conta...`
-                        : `${filteredListings.length} anuncio(s) encontrado(s) para ${query.trim()}. Chave unica: ID ML.`}
+                      {filteredListingsLoading
+                        ? "Filtrando anuncios antes da paginacao..."
+                        : `${totalAvailable ?? filteredListings.length} ${counterSubject}. Chave unica: ID ML.`}
                     </p>
                   ) : null}
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2 text-xs text-matrix-muted">
-                <span>{globalIdentifierSearchActive ? "Busca global" : `Pagina ${currentPage} de ${totalPages}`}</span>
+                <span>{`Pagina ${currentPage} de ${totalPages}`}</span>
                 <select
                   className="rounded-md border border-matrix-border bg-matrix-panel px-2 py-1.5 text-matrix-fg outline-none"
-                  disabled={syncing || globalIdentifierSearchActive}
+                  disabled={syncing || filteredListingsLoading}
                   onChange={(event) => changePageSize(Number(event.target.value))}
                   value={pageSize}
                 >
@@ -1000,20 +1692,20 @@ export function MercadoLivreMarketplacePage() {
                     </option>
                   ))}
                 </select>
-                <Button className="min-h-8 px-2 py-1 text-xs" disabled={syncing || globalIdentifierSearchActive || !hasPreviousPage} onClick={() => void syncListings({ offset: Math.max(0, pageOffset - pageSize), limit: pageSize })} type="button" variant="secondary">
+                <Button className="min-h-8 px-2 py-1 text-xs" disabled={syncing || filteredListingsLoading || !hasPreviousPage} onClick={goToPreviousPage} type="button" variant="secondary">
                   <ChevronLeft className="h-3.5 w-3.5" />
                   Anterior
                 </Button>
-                <Button className="min-h-8 px-2 py-1 text-xs" disabled={syncing || globalIdentifierSearchActive || !hasNextPage} onClick={() => void syncListings({ offset: pageOffset + pageSize, limit: pageSize })} type="button" variant="secondary">
+                <Button className="min-h-8 px-2 py-1 text-xs" disabled={syncing || filteredListingsLoading || !hasNextPage} onClick={goToNextPage} type="button" variant="secondary">
                   Proxima
                   <ChevronRight className="h-3.5 w-3.5" />
                 </Button>
               </div>
             </div>
 
-            {globalSearchError ? (
+            {filteredListingsError ? (
               <div className="mb-3 rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-sm text-red-200">
-                {globalSearchError}
+                {filteredListingsError}
               </div>
             ) : null}
 
@@ -1080,10 +1772,22 @@ export function MercadoLivreMarketplacePage() {
                         <ListingMetaItem label="Atualizado" value={formatDate(listing.updatedAt)} />
                       </dl>
                       <div className="mt-3 flex flex-wrap gap-2">
-                        <ListingInfoChip icon={SlidersHorizontal} label="F. Tecnica" muted={!listing.attributes.length} />
-                        <ListingInfoChip icon={FileText} label="Descricao" muted />
-                        <ListingInfoChip icon={Ruler} label={dimensionsChipLabel(listing)} muted={!listing.dimensionInfo?.hasDimensions} />
-                        <ListingInfoChip icon={ImageIcon} label={`Fotos (${listingPicturesCount(listing)})`} muted={listingPicturesCount(listing) === 0} />
+                        <ListingInfoChip icon={SlidersHorizontal} label="F. Tecnica" muted={!listing.categoryId} onClick={() => void openTechnicalSheet(listing)} title="Abrir ficha tecnica" />
+                        <ListingInfoChip icon={FileText} label="Descricao" onClick={() => setSelectedListing(listing)} title="Abrir detalhes do anuncio" />
+                        <ListingInfoChip
+                          icon={Ruler}
+                          label={dimensionsChipLabel(listing)}
+                          muted={!listing.dimensionInfo?.hasDimensions}
+                          onClick={() => void openDimensionsEditor(listing)}
+                          title="Abrir dimensoes do anuncio"
+                        />
+                        <ListingInfoChip
+                          icon={ImageIcon}
+                          label={`Fotos (${listingPicturesCount(listing)})`}
+                          muted={listingPicturesCount(listing) === 0}
+                          onClick={() => openPictureGallery(listing)}
+                          title={`Ver fotos do anuncio ${listing.externalId}`}
+                        />
                         <ListingInfoChip icon={Boxes} label="Preco Atacado" muted />
                         <ListingInfoChip icon={Factory} label="Fabricacao" muted />
                       </div>
@@ -1164,17 +1868,17 @@ export function MercadoLivreMarketplacePage() {
                   <div className="max-w-lg">
                     <PackageSearch className="mx-auto h-8 w-8 text-matrix-goldDark" />
                     <h4 className="mt-3 font-semibold text-matrix-fg">
-                      {globalSearchLoading
-                        ? "Buscando anuncios na conta Mercado Livre..."
+                      {filteredListingsLoading
+                        ? "Filtrando anuncios na conta Mercado Livre..."
                         : listings.length
                           ? "Nenhum anuncio corresponde aos filtros."
                           : "Sincronize os anuncios reais da conta conectada."}
                     </h4>
                     <p className="mt-2 text-sm text-matrix-muted">
-                      {globalSearchLoading
-                        ? "A busca por identificador varre os anuncios em leitura e preserva itens diferentes pelo ID ML."
+                      {filteredListingsLoading
+                        ? "Os filtros sao aplicados antes da paginacao e preservam itens diferentes pelo ID ML."
                         : listings.length
-                        ? "Ajuste busca, abas ou filtros avancados para visualizar outros anuncios carregados."
+                        ? "Ajuste busca, abas ou filtros avancados para visualizar outros anuncios filtrados."
                         : "Clique em Sincronizar anuncios para carregar a conta conectada."}
                     </p>
                   </div>
@@ -1184,9 +1888,9 @@ export function MercadoLivreMarketplacePage() {
 
             <div className="hidden">
               <span>Ultima sincronizacao: {formatDate(listingsPayload?.lastSyncedAt ?? account?.lastSyncAt ?? null)}</span>
-              {globalIdentifierSearchActive ? (
+              {filteredModeActive ? (
                 <span>
-                  {filteredListings.length} resultado(s) globais · {globalSearchPayload?.search?.scannedItemIds ?? 0} ID(s) analisado(s) · chave unica ID ML
+                  {totalAvailable ?? filteredListings.length} resultado(s) filtrados · {activeListingsPayload?.search?.scannedItemIds ?? 0} ID(s) analisado(s) · chave unica ID ML
                 </span>
               ) : (
                 <span>
@@ -1203,6 +1907,354 @@ export function MercadoLivreMarketplacePage() {
           <CheckCircle2 className="h-4 w-4 text-matrix-goldDark" />
           Verificando conexao Mercado Livre do cliente...
         </p>
+      ) : null}
+
+      {technicalSheetListing ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-3 md:items-center">
+          <div className="max-h-[92vh] w-full max-w-6xl overflow-y-auto rounded-md border border-matrix-border bg-matrix-panel p-3 shadow-glow md:p-4">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-xl font-bold text-matrix-fg">Ficha Tecnica do Anuncio</h3>
+                <p className="mt-1 text-sm text-matrix-muted">Atributos da categoria e valores ja preenchidos no anuncio.</p>
+              </div>
+              <Button type="button" variant="ghost" onClick={closeTechnicalSheet}>
+                <X className="h-4 w-4" />
+                Fechar
+              </Button>
+            </div>
+
+            <div className="mb-3 rounded-md border border-matrix-gold/20 bg-matrix-panel2/45 p-2.5">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center">
+                {listingMainImage(technicalSheetListing) ? (
+                  <img
+                    alt={technicalSheetListing.title}
+                    className="h-20 w-full rounded-md border border-matrix-border bg-white object-contain md:h-24 md:w-24"
+                    src={listingMainImage(technicalSheetListing) ?? undefined}
+                  />
+                ) : (
+                  <div className="grid h-20 w-full place-items-center rounded-md border border-dashed border-matrix-border text-xs text-matrix-muted md:h-24 md:w-24">
+                    <ImageIcon className="h-6 w-6" />
+                  </div>
+                )}
+
+                <div className="min-w-0 flex-1">
+                  <p className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">Anuncio</p>
+                  <h4 className="mt-1 line-clamp-2 text-base font-bold leading-5 text-matrix-fg">
+                    {technicalSheetListing.title}
+                  </h4>
+                  <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-[minmax(70px,0.55fr)_minmax(120px,0.8fr)_minmax(95px,0.65fr)_minmax(220px,2fr)]">
+                    <div className="min-w-0 border-matrix-border/70 sm:border-r sm:pr-3">
+                      <dt className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">SKU</dt>
+                      <dd className="mt-1 truncate font-semibold text-matrix-fg">{fieldValue(technicalSheetListing.sku)}</dd>
+                    </div>
+                    <div className="min-w-0 border-matrix-border/70 sm:border-r sm:pr-3">
+                      <dt className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">ID ML</dt>
+                      <dd className="mt-1 truncate font-mono font-semibold text-matrix-fg">{technicalSheetListing.externalId}</dd>
+                    </div>
+                    <div className="min-w-0 border-matrix-border/70 lg:border-r lg:pr-3">
+                      <dt className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">Preco atual</dt>
+                      <dd className="mt-1 whitespace-nowrap font-semibold text-matrix-fg">{formatPrice(technicalSheetListing.price, technicalSheetListing.currencyId)}</dd>
+                    </div>
+                    <div className="min-w-0">
+                      <dt className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">Categoria</dt>
+                      <dd className="mt-1 line-clamp-2 text-matrix-fg">
+                        {fieldValue(technicalSheetPayload?.category.path ?? technicalSheetPayload?.category.name ?? technicalSheetListing.categoryPath ?? technicalSheetListing.categoryName)}
+                      </dd>
+                    </div>
+                  </dl>
+                </div>
+              </div>
+            </div>
+
+            <div className="min-w-0">
+                {technicalSheetError ? (
+                  <div className="mb-3 rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                    {technicalSheetError}
+                  </div>
+                ) : null}
+
+                {technicalSheetPayload ? (
+                  <div className="grid gap-3">
+                    {technicalSheetPayload.warnings.length ? (
+                      <div className="rounded-md border border-orange-500/25 bg-orange-500/10 px-3 py-2 text-sm text-orange-200">
+                        {technicalSheetPayload.warnings.map((warning) => (
+                          <p key={warning}>{warning}</p>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    <div className="flex flex-wrap gap-2 border-b border-matrix-border pb-2">
+                      <button
+                        className={`rounded-md border px-3 py-2 text-sm font-semibold ${
+                          technicalSheetTab === "attributes"
+                            ? "border-matrix-gold bg-matrix-gold text-black"
+                            : "border-matrix-border bg-matrix-panel2/70 text-matrix-muted"
+                        }`}
+                        onClick={() => setTechnicalSheetTab("attributes")}
+                        type="button"
+                      >
+                        Atributos do Anuncio
+                      </button>
+                      {technicalSheetHasMeasures ? (
+                        <button
+                          className={`rounded-md border px-3 py-2 text-sm font-semibold ${
+                            technicalSheetTab === "measures"
+                              ? "border-matrix-gold bg-matrix-gold text-black"
+                              : "border-matrix-border bg-matrix-panel2/70 text-matrix-muted"
+                          }`}
+                          onClick={() => setTechnicalSheetTab("measures")}
+                          type="button"
+                        >
+                          Tabela de Medidas
+                        </button>
+                      ) : null}
+                    </div>
+
+                    {technicalSheetTab === "attributes" ? (
+                      <div className="grid gap-3">
+                        {orderedTechnicalSheetSections.length ? (
+                          orderedTechnicalSheetSections.map((section) => (
+                            <DetailSection key={section.name} title={section.name}>
+                              <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
+                                {section.attributes.map((attribute) => (
+                                  <TechnicalAttributeField key={attribute.id} attribute={attribute} />
+                                ))}
+                              </div>
+                            </DetailSection>
+                          ))
+                        ) : (
+                          <div className="rounded-md border border-dashed border-matrix-border bg-matrix-panel2/45 px-4 py-8 text-center text-sm text-matrix-muted">
+                            Ficha tecnica nao disponivel nos dados carregados.
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <DetailSection title="Tabela de Medidas">
+                        <dl className="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
+                          <DetailItem label="Dimensoes brutas" value={dimensionsLabel(technicalSheetPayload.listing as MercadoLivreClientListing)} />
+                          <DetailItem label="Altura" value={fieldValue(technicalSheetPayload.listing.dimensionInfo?.heightCm)} />
+                          <DetailItem label="Largura" value={fieldValue(technicalSheetPayload.listing.dimensionInfo?.widthCm)} />
+                          <DetailItem label="Comprimento" value={fieldValue(technicalSheetPayload.listing.dimensionInfo?.lengthCm)} />
+                          <DetailItem label="Peso" value={fieldValue(technicalSheetPayload.listing.dimensionInfo?.weightG)} />
+                        </dl>
+                        <div className="mt-3 grid gap-2 md:grid-cols-2 lg:grid-cols-3">
+                          {technicalSheetPayload.attributes
+                            .filter((attribute) => !isHiddenTechnicalSheetAttribute(attribute))
+                            .filter((attribute) => {
+                              const name = attribute.name
+                                .normalize("NFD")
+                                .replace(/[\u0300-\u036f]/g, "")
+                                .toLowerCase();
+                              return name.includes("medida") || name.includes("tamanho") || name.includes("altura") || name.includes("largura") || name.includes("comprimento") || name.includes("peso");
+                            })
+                            .map((attribute) => (
+                              <TechnicalAttributeField key={attribute.id} attribute={attribute} />
+                            ))}
+                        </div>
+                      </DetailSection>
+                    )}
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-dashed border-matrix-border bg-matrix-panel2/45 px-4 py-8 text-center text-sm text-matrix-muted">
+                    Ficha tecnica nao disponivel nos dados carregados.
+                  </div>
+                )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {dimensionsListing ? (
+        <div className="fixed inset-0 z-[65] flex items-end justify-center bg-black/75 p-3 md:items-center">
+          <div className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-md border border-matrix-border bg-matrix-panel p-4 shadow-glow">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-xl font-bold text-matrix-fg">Dimensoes do Anuncio</h3>
+                <p className="mt-1 text-sm text-matrix-muted">Medidas e peso disponiveis nos dados carregados da listagem.</p>
+              </div>
+              <Button aria-label="Fechar dimensoes do anuncio" type="button" variant="ghost" onClick={closeDimensionsEditor}>
+                <X className="h-4 w-4" />
+                Fechar
+              </Button>
+            </div>
+
+            <div className="mb-4 flex flex-col gap-3 rounded-md border border-matrix-border bg-matrix-panel2/55 p-3 md:flex-row md:items-center">
+              {listingMainImage(dimensionsListing) ? (
+                <img
+                  alt={dimensionsListing.title}
+                  className="h-20 w-20 shrink-0 rounded-md border border-matrix-border bg-white object-contain"
+                  src={listingMainImage(dimensionsListing) ?? undefined}
+                />
+              ) : (
+                <div className="grid h-20 w-20 shrink-0 place-items-center rounded-md border border-dashed border-matrix-border text-matrix-muted">
+                  <ImageIcon className="h-6 w-6" />
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] uppercase tracking-[0.14em] text-matrix-muted">Anuncio</p>
+                <h4 className="mt-1 text-base font-semibold leading-6 text-matrix-fg">{dimensionsListing.title}</h4>
+                <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                  <DetailItem label="SKU" value={fieldValue(dimensionsListing.sku)} />
+                  <DetailItem label="ID ML" value={dimensionsListing.externalId} mono />
+                  <DetailItem label="Preco atual" value={formatPrice(dimensionsListing.price, dimensionsListing.currencyId)} />
+                  <DetailItem label="Categoria" value={categoryLabel(dimensionsListing)} />
+                </dl>
+              </div>
+            </div>
+
+            <div className="grid gap-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-matrix-border bg-matrix-panel2/45 px-3 py-2">
+                <div>
+                  <p className="text-sm font-semibold text-matrix-fg">
+                    {dimensionsListing.dimensionInfo?.hasDimensions ? "Dimensoes disponiveis" : "Dimensoes pendentes"}
+                  </p>
+                  <p className="mt-1 text-xs text-matrix-muted">
+                    Estes dados vieram da listagem ja carregada. Nenhuma alteracao sera enviada ao Mercado Livre.
+                  </p>
+                </div>
+                <Badge tone={dimensionsListing.dimensionInfo?.hasDimensions ? "success" : "warning"}>
+                  {dimensionsListing.dimensionInfo?.hasDimensions ? "Com dimensoes" : "Pendente"}
+                </Badge>
+              </div>
+
+              {dimensionsListing.dimensionInfo?.hasDimensions ? (
+                <DetailSection title="Dimensoes carregadas">
+                  <dl className="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
+                    <DetailItem label="Dimensoes brutas" value={dimensionsLabel(dimensionsListing)} />
+                    <DetailItem label="Altura" value={fieldValue(dimensionsListing.dimensionInfo?.heightCm)} />
+                    <DetailItem label="Largura" value={fieldValue(dimensionsListing.dimensionInfo?.widthCm)} />
+                    <DetailItem label="Comprimento" value={fieldValue(dimensionsListing.dimensionInfo?.lengthCm)} />
+                    <DetailItem label="Peso" value={fieldValue(dimensionsListing.dimensionInfo?.weightG)} />
+                  </dl>
+                </DetailSection>
+              ) : (
+                <div className="rounded-md border border-dashed border-matrix-border bg-matrix-panel2/45 px-4 py-8 text-center text-sm text-matrix-muted">
+                  Dimensoes pendentes ou nao disponiveis nos dados carregados.
+                </div>
+              )}
+
+              <div className="flex flex-wrap justify-end gap-2 border-t border-matrix-border pt-4">
+                <Button onClick={closeDimensionsEditor} type="button" variant="secondary">
+                  Fechar
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {pictureGalleryListing ? (
+        <div className="fixed inset-0 z-[65] flex items-end justify-center bg-black/75 p-3 md:items-center">
+          <div className="max-h-[92vh] w-full max-w-6xl overflow-y-auto rounded-md border border-matrix-border bg-matrix-panel p-4 shadow-glow">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-xl font-bold text-matrix-fg">Fotos do Anuncio</h3>
+                <p className="mt-1 text-sm text-matrix-muted">Imagens disponiveis nos dados carregados da listagem.</p>
+              </div>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button aria-label="Fechar galeria de fotos" type="button" variant="ghost" onClick={closePictureGallery}>
+                  <X className="h-4 w-4" />
+                  Fechar
+                </Button>
+              </div>
+            </div>
+
+            <div className="mb-4 flex flex-col gap-3 rounded-md border border-matrix-border bg-matrix-panel2/55 p-3 md:flex-row md:items-center">
+              {listingMainImage(pictureGalleryListing) ? (
+                <img
+                  alt={pictureGalleryListing.title}
+                  className="h-20 w-20 shrink-0 rounded-md border border-matrix-border bg-white object-contain"
+                  src={listingMainImage(pictureGalleryListing) ?? undefined}
+                />
+              ) : (
+                <div className="grid h-20 w-20 shrink-0 place-items-center rounded-md border border-dashed border-matrix-border text-matrix-muted">
+                  <ImageIcon className="h-6 w-6" />
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] uppercase tracking-[0.14em] text-matrix-muted">Anuncio</p>
+                <h4 className="mt-1 text-base font-semibold leading-6 text-matrix-fg">{pictureGalleryListing.title}</h4>
+                <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                  <DetailItem label="SKU" value={fieldValue(pictureGalleryListing.sku)} />
+                  <DetailItem label="ID ML" value={pictureGalleryListing.externalId} mono />
+                  <DetailItem label="Preco atual" value={formatPrice(pictureGalleryListing.price, pictureGalleryListing.currencyId)} />
+                  <DetailItem label="Fotos" value={`${pictureGalleryPictures.length} imagem(ns)`} />
+                </dl>
+              </div>
+            </div>
+
+            {pictureGalleryPictures.length ? (
+              <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_190px]">
+                <div className="rounded-md border border-matrix-border bg-matrix-panel2/45 p-3">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <span className="rounded-md border border-matrix-gold/30 bg-matrix-goldSoft/18 px-2.5 py-1 text-xs font-semibold text-matrix-fg">
+                      {pictureGalleryIndex + 1} de {pictureGalleryPictures.length}
+                    </span>
+                    <div className="flex gap-2">
+                      <Button
+                        aria-label="Imagem anterior"
+                        className="min-h-8 px-2 py-1 text-xs"
+                        disabled={pictureGalleryPictures.length <= 1 || pictureGalleryIndex === 0}
+                        onClick={() => setPictureGalleryIndex((current) => Math.max(0, current - 1))}
+                        type="button"
+                        variant="secondary"
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                        Anterior
+                      </Button>
+                      <Button
+                        aria-label="Proxima imagem"
+                        className="min-h-8 px-2 py-1 text-xs"
+                        disabled={pictureGalleryPictures.length <= 1 || pictureGalleryIndex >= pictureGalleryPictures.length - 1}
+                        onClick={() => setPictureGalleryIndex((current) => Math.min(pictureGalleryPictures.length - 1, current + 1))}
+                        type="button"
+                        variant="secondary"
+                      >
+                        Proxima
+                        <ChevronRight className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+
+                  {selectedGalleryPicture ? (
+                    <img
+                      alt={`${pictureGalleryListing.title} - foto ${pictureGalleryIndex + 1}`}
+                      className="h-[52vh] max-h-[620px] min-h-72 w-full rounded-md border border-matrix-border bg-white object-contain"
+                      src={selectedGalleryPicture.url}
+                    />
+                  ) : null}
+                </div>
+
+                <div className="rounded-md border border-matrix-border bg-matrix-panel2/45 p-3">
+                  <p className="mb-3 text-xs font-semibold uppercase tracking-[0.14em] text-matrix-muted">Miniaturas</p>
+                  <div className="grid max-h-[58vh] grid-cols-4 gap-2 overflow-y-auto pr-1 sm:grid-cols-6 lg:grid-cols-1">
+                    {pictureGalleryPictures.map((picture, index) => (
+                      <button
+                        key={`${picture.url}-${index}`}
+                        aria-label={`Selecionar foto ${index + 1}`}
+                        className={`rounded-md border bg-white p-1 transition focus:outline-none focus:ring-2 focus:ring-matrix-gold ${
+                          pictureGalleryIndex === index ? "border-matrix-gold shadow-gold" : "border-matrix-border hover:border-matrix-gold/70"
+                        }`}
+                        onClick={() => setPictureGalleryIndex(index)}
+                        type="button"
+                      >
+                        <img alt="" className="h-16 w-full object-contain lg:h-20" src={picture.url} />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="grid min-h-72 place-items-center rounded-md border border-dashed border-matrix-border bg-matrix-panel2/45 px-4 py-8 text-center">
+                <div>
+                  <ImageIcon className="mx-auto h-9 w-9 text-matrix-goldDark" />
+                  <h4 className="mt-3 font-semibold text-matrix-fg">Fotos nao disponiveis nos dados carregados</h4>
+                  <p className="mt-2 max-w-md text-sm text-matrix-muted">Sincronize a listagem para atualizar os dados locais deste item.</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       ) : null}
 
       {selectedListing ? (
@@ -1278,8 +2330,6 @@ export function MercadoLivreMarketplacePage() {
                     <DetailItem label="Vendidos" value={fieldValue(selectedListing.soldQuantity)} />
                     <DetailItem label="Visitas" value={fieldValue(selectedListing.visits)} />
                     <DetailItem label="Moeda" value={fieldValue(selectedListing.currencyId)} />
-                    <DetailItem label="Fonte tarifa" value={feeSourceLabel(selectedListing)} />
-                    <DetailItem label="Observacao tarifa" value={feeObservationLabel(selectedListing)} />
                   </dl>
                 </DetailSection>
 
@@ -1288,11 +2338,9 @@ export function MercadoLivreMarketplacePage() {
                     <DetailItem label="Resumo" value={shippingLabel(selectedListing)} />
                     <DetailItem label="Frete" value={freightLabel(selectedListing)} />
                     <DetailItem label="Logistica" value={logisticsLabel(selectedListing)} />
-                    <DetailItem label="Código logístico" value={technicalLogisticsCode(selectedListing)} />
-                    <DetailItem label="Custo frete vendedor" value={shippingCostLabel(selectedListing)} />
-                    <DetailItem label="Fonte frete" value={shippingCostSourceLabel(selectedListing)} />
+                    <DetailItem label="Frete informado pelo ML" value={shippingCostLabel(selectedListing)} />
+                    <DetailItem label="Quem paga" value={shippingPayerLabel(selectedListing)} />
                     <DetailItem label="Retirada local" value={localPickupLabel(selectedListing)} />
-                    <DetailItem label="Tags envio" value={selectedListing.shipping?.tags?.length ? selectedListing.shipping.tags.join(", ") : "-"} />
                   </dl>
                 </DetailSection>
 
@@ -1365,15 +2413,9 @@ export function MercadoLivreMarketplacePage() {
                   <dl className="grid gap-3 text-sm sm:grid-cols-2">
                     <DetailItem label="Qualidade" value={qualityLabel(selectedListing.health)} />
                     <DetailItem label="Resumo" value={qualitySummary(selectedListing)} />
-                    <DetailItem label="Tags" value={selectedListing.quality?.tags?.length ? selectedListing.quality.tags.join(", ") : "-"} />
                   </dl>
                 </DetailSection>
 
-                <DetailSection title="Seguranca">
-                  <p className="text-sm leading-6 text-matrix-muted">
-                    Este detalhe e somente leitura. Edicao de preco, estoque, imagens, dimensoes, atributos, pausa, reativacao, clonagem e publicacao continuam bloqueadas nesta fase.
-                  </p>
-                </DetailSection>
               </div>
             </div>
 
@@ -1420,7 +2462,6 @@ export function MercadoLivreMarketplacePage() {
                 <dl className="grid gap-3 text-sm sm:grid-cols-2">
                   <DetailItem label="Valor de venda" value={formatPrice(calculatorListing.price, calculatorListing.currencyId)} />
                   <DetailItem label="Frete" value={shippingCostLabel(calculatorListing)} />
-                  <DetailItem label="Fonte frete" value={shippingCostSourceLabel(calculatorListing)} />
                   <DetailItem label="Custo" value={formatPrice(calculatorListing.localProduct?.costPrice ?? null, calculatorListing.currencyId)} />
                   <DetailItem label="Imposto" value={profitMarginTaxLabel()} />
                   <DetailItem label="Imposto R$" value={profitMarginTaxAmountLabel(calculatorListing)} />
