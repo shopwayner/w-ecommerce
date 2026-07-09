@@ -351,6 +351,50 @@ type DimensionsFormState = {
   packageMode: "manufacturer" | "custom";
 };
 
+type MercadoLivreWholesalePrice = {
+  price: number;
+  minQuantity: number;
+  source: "official" | "local";
+};
+
+type MercadoLivreWholesaleSimulation = {
+  quantity: number;
+  price: number | null;
+  regularAmount: number | null;
+  currencyId: string | null;
+  available: boolean;
+  source: string;
+};
+
+type MercadoLivreWholesalePricesPayload = {
+  externalWrite: boolean;
+  canEdit: boolean;
+  canManage?: boolean;
+  maxPrices: number;
+  writeAvailable: boolean;
+  writeUnavailableReason?: string;
+  listing: {
+    externalId: string;
+    itemId: string;
+    title: string;
+    thumbnail: string | null;
+    sellerSku: string | null;
+    sku: string | null;
+    price: number | null;
+    currencyId: string | null;
+    categoryId: string | null;
+  };
+  prices: MercadoLivreWholesalePrice[];
+  simulations: MercadoLivreWholesaleSimulation[];
+  warning: string;
+};
+
+type WholesalePriceFormRow = {
+  id: string;
+  price: string;
+  minQuantity: string;
+};
+
 type QuickFilterValue = "all" | "active" | "paused" | "under_review" | "error" | "without_stock" | "premium" | "classico";
 
 const quickFilters: Array<{ value: QuickFilterValue; label: string }> = [
@@ -397,6 +441,7 @@ const mercadoLivreLocalReadOnlyActions = new Set([
   "description",
   "pictures",
   "dimensions",
+  "wholesalePrices",
   "details",
   "filters",
   "pagination",
@@ -414,7 +459,8 @@ const mercadoLivreExternalWriteActions = new Set([
   "clone",
   "addPicture",
   "deletePicture",
-  "saveDimensions"
+  "saveDimensions",
+  "saveWholesalePrices"
 ]);
 
 const mercadoLivreTechnicalFields = new Set([
@@ -820,6 +866,99 @@ function dimensionInfoFromPayload(payload: MercadoLivreDimensionsPayload): Merca
     source: payload.dimensions.source ?? null,
     rawSummary: payload.dimensions.rawSummary ?? null
   };
+}
+
+function createWholesaleRowId() {
+  return `wholesale-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function parseMoneyValue(value: string | number | null | undefined) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const normalized = raw.includes(",")
+    ? raw.replace(/\./g, "").replace(",", ".")
+    : raw;
+  const cleaned = normalized.replace(/[^\d.-]/g, "");
+  if (!cleaned) return null;
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatWholesaleInputValue(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "";
+  return value.toLocaleString("pt-BR", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+}
+
+function localWholesalePayloadFromListing(listing: MercadoLivreClientListing): MercadoLivreWholesalePricesPayload {
+  return {
+    externalWrite: false,
+    canEdit: false,
+    canManage: false,
+    maxPrices: 5,
+    writeAvailable: false,
+    writeUnavailableReason: "A edicao de preco atacado ainda nao esta liberada.",
+    listing: {
+      externalId: listing.externalId,
+      itemId: listing.itemId,
+      title: listing.title,
+      thumbnail: listingMainImage(listing),
+      sellerSku: listing.sellerSku,
+      sku: listing.sku,
+      price: listing.price,
+      currencyId: listing.currencyId,
+      categoryId: listing.categoryId
+    },
+    prices: [],
+    simulations: [],
+    warning: "Preco atacado disponivel apenas para consulta nesta fase."
+  };
+}
+
+function wholesaleRowsFromPayload(payload: MercadoLivreWholesalePricesPayload): WholesalePriceFormRow[] {
+  return [...payload.prices]
+    .sort((left, right) => left.minQuantity - right.minQuantity)
+    .slice(0, payload.maxPrices)
+    .map((price) => ({
+      id: createWholesaleRowId(),
+      price: formatWholesaleInputValue(price.price),
+      minQuantity: String(price.minQuantity)
+    }));
+}
+
+function isWholesalePricesPayload(value: unknown): value is MercadoLivreWholesalePricesPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<MercadoLivreWholesalePricesPayload>;
+  return Boolean(payload.listing && typeof payload.listing === "object" && Array.isArray(payload.prices) && Array.isArray(payload.simulations));
+}
+
+function validateWholesaleRows(rows: WholesalePriceFormRow[], currentPrice: number | null | undefined, maxRows: number) {
+  if (rows.length > maxRows) return `Configure no maximo ${maxRows} precos de atacado.`;
+
+  const quantities = new Set<number>();
+  const referencePrice = typeof currentPrice === "number" && Number.isFinite(currentPrice) ? currentPrice : null;
+
+  for (const [index, row] of rows.entries()) {
+    const rowLabel = `Linha ${index + 1}`;
+    const price = parseMoneyValue(row.price);
+    const minQuantity = Number(row.minQuantity);
+
+    if (price === null) return `${rowLabel}: informe o preco de cada unidade.`;
+    if (price <= 0) return `${rowLabel}: o preco precisa ser maior que zero.`;
+    if (referencePrice !== null && price >= referencePrice) {
+      return `${rowLabel}: o preco de atacado precisa ser menor que o preco atual.`;
+    }
+    if (!Number.isInteger(minQuantity) || minQuantity < 2) {
+      return `${rowLabel}: a quantidade minima precisa ser um numero inteiro maior ou igual a 2.`;
+    }
+    if (quantities.has(minQuantity)) return `${rowLabel}: quantidade minima duplicada.`;
+    quantities.add(minQuantity);
+  }
+
+  return "";
 }
 
 function localProductLabel(listing: MercadoLivreClientListing) {
@@ -1579,6 +1718,13 @@ export function MercadoLivreMarketplacePage() {
   const [dimensionsSaving, setDimensionsSaving] = useState(false);
   const [dimensionsError, setDimensionsError] = useState("");
   const [dimensionsSuccess, setDimensionsSuccess] = useState("");
+  const [wholesaleListing, setWholesaleListing] = useState<MercadoLivreClientListing | null>(null);
+  const [wholesalePayload, setWholesalePayload] = useState<MercadoLivreWholesalePricesPayload | null>(null);
+  const [wholesaleRows, setWholesaleRows] = useState<WholesalePriceFormRow[]>([]);
+  const [wholesaleLoading, setWholesaleLoading] = useState(false);
+  const [wholesaleSaving, setWholesaleSaving] = useState(false);
+  const [wholesaleError, setWholesaleError] = useState("");
+  const [wholesaleSuccess, setWholesaleSuccess] = useState("");
   const [technicalSheetListing, setTechnicalSheetListing] = useState<MercadoLivreClientListing | null>(null);
   const [technicalSheetPayload, setTechnicalSheetPayload] = useState<TechnicalSheetPayload | null>(null);
   const [technicalSheetError, setTechnicalSheetError] = useState("");
@@ -2084,6 +2230,95 @@ export function MercadoLivreMarketplacePage() {
     }
   }
 
+  async function openWholesalePrices(listing: MercadoLivreClientListing) {
+    const fallbackPayload = localWholesalePayloadFromListing(listing);
+    setWholesaleListing(listing);
+    setWholesalePayload(fallbackPayload);
+    setWholesaleRows(wholesaleRowsFromPayload(fallbackPayload));
+    setWholesaleError("");
+    setWholesaleSuccess("");
+    setWholesaleLoading(true);
+
+    try {
+      const response = await fetch(`/api/marketplaces/mercado-livre/client/listings/${encodeURIComponent(listing.externalId)}/wholesale-prices`, {
+        cache: "no-store"
+      });
+      const payload = (await response.json().catch(() => null)) as unknown;
+
+      if (!response.ok || !isWholesalePricesPayload(payload)) {
+        const errorMessage =
+          payload && typeof payload === "object" && "error" in payload && typeof (payload as { error?: unknown }).error === "string"
+            ? (payload as { error: string }).error
+            : "Nao foi possivel carregar precos de atacado.";
+        throw new Error(errorMessage);
+      }
+
+      setWholesalePayload(payload);
+      setWholesaleRows(wholesaleRowsFromPayload(payload));
+      setWholesaleError("");
+    } catch {
+      setWholesalePayload((current) => current ?? fallbackPayload);
+      setWholesaleError("Nao foi possivel carregar precos de atacado. Preco atacado disponivel apenas para consulta nesta fase.");
+    } finally {
+      setWholesaleLoading(false);
+    }
+  }
+
+  function closeWholesalePrices() {
+    setWholesaleListing(null);
+    setWholesalePayload(null);
+    setWholesaleRows([]);
+    setWholesaleLoading(false);
+    setWholesaleSaving(false);
+    setWholesaleError("");
+    setWholesaleSuccess("");
+  }
+
+  function addWholesaleRow() {
+    if (!wholesalePayload?.writeAvailable || !wholesalePayload.externalWrite || !wholesalePayload.canEdit) {
+      setWholesaleError("A edicao de preco atacado ainda nao esta liberada.");
+      return;
+    }
+
+    const maxRows = wholesalePayload.maxPrices || 5;
+    if (wholesaleRows.length >= maxRows) {
+      setWholesaleError(`Configure no maximo ${maxRows} precos de atacado.`);
+      return;
+    }
+
+    setWholesaleRows((current) => [
+      ...current,
+      {
+        id: createWholesaleRowId(),
+        price: "",
+        minQuantity: ""
+      }
+    ]);
+    setWholesaleError("");
+  }
+
+  function updateWholesaleRow(rowId: string, field: keyof Omit<WholesalePriceFormRow, "id">, value: string) {
+    setWholesaleRows((current) => current.map((row) => (row.id === rowId ? { ...row, [field]: value } : row)));
+    setWholesaleError("");
+    setWholesaleSuccess("");
+  }
+
+  function removeWholesaleRow(rowId: string) {
+    if (!wholesalePayload?.writeAvailable || !wholesalePayload.externalWrite || !wholesalePayload.canEdit) {
+      setWholesaleError("A edicao de preco atacado ainda nao esta liberada.");
+      return;
+    }
+
+    setWholesaleRows((current) => current.filter((row) => row.id !== rowId));
+    setWholesaleError("");
+    setWholesaleSuccess("");
+  }
+
+  function saveWholesalePrices() {
+    setWholesaleError("A edicao de preco atacado ainda nao esta liberada.");
+    setWholesaleSuccess("");
+  }
+
   function toggleSelected(id: string) {
     setSelectedIds((current) => {
       const next = new Set(current);
@@ -2221,9 +2456,17 @@ export function MercadoLivreMarketplacePage() {
   const canOpenDescription = canViewLocalDetails && isLocalReadOnlyAction("description");
   const canOpenPictures = canViewLocalDetails && isLocalReadOnlyAction("pictures");
   const canOpenDimensions = canViewLocalDetails && isLocalReadOnlyAction("dimensions");
+  const canOpenWholesalePrices = canViewLocalDetails && isLocalReadOnlyAction("wholesalePrices");
   const canOpenDetails = canViewLocalDetails && isLocalReadOnlyAction("details");
   const dimensionsCanEdit = Boolean(dimensionsPayload?.externalWrite && dimensionsPayload.canEdit);
   const dimensionsValidationError = validateDimensionsForm(dimensionsForm);
+  const wholesaleCanEdit = Boolean(wholesalePayload?.writeAvailable && wholesalePayload.externalWrite && wholesalePayload.canEdit);
+  const wholesaleValidationError = validateWholesaleRows(
+    wholesaleRows,
+    wholesaleListing?.price ?? wholesalePayload?.listing.price ?? null,
+    wholesalePayload?.maxPrices ?? 5
+  );
+  const wholesaleAvailableSimulations = wholesalePayload?.simulations.filter((simulation) => simulation.available && typeof simulation.price === "number") ?? [];
   const picturesCanEdit = Boolean(pictureGalleryPayload?.externalWrite && pictureGalleryPayload.canEdit);
   const pictureUploadValidationError = validatePictureUploadFile(pictureUploadFile);
   const selectedPictureCanBeRemoved = Boolean(
@@ -2339,7 +2582,7 @@ export function MercadoLivreMarketplacePage() {
             <KpiCard label="Pausados" value={String(kpis.paused)} hint={kpiScopeHint} tone="warning" />
             <KpiCard label="Com erro" value={String(kpis.errors)} hint={filteredModeActive ? "Pendencias no filtro" : "Pendencias na pagina"} tone="danger" />
             <KpiCard label="Sem estoque" value={String(kpis.withoutStock)} hint={kpiScopeHint} tone="warning" />
-            <KpiCard label="Vendas" value={String(kpis.sales)} hint={filteredModeActive ? "sold_quantity do filtro" : "sold_quantity da pagina"} tone="info" />
+            <KpiCard label="Vendas" value={String(kpis.sales)} hint={filteredModeActive ? "Vendas do filtro" : "Vendas da pagina"} tone="info" />
             <KpiCard label="Visitas" value={String(kpis.visits)} hint="Nao sincronizado nesta fase" tone="purple" />
           </div>
 
@@ -2588,7 +2831,12 @@ export function MercadoLivreMarketplacePage() {
                           onClick={canOpenPictures ? () => openPictureGallery(listing) : undefined}
                           title={`Ver fotos do anuncio ${listing.externalId}`}
                         />
-                        <ListingInfoChip icon={Boxes} label="Preco Atacado" muted />
+                        <ListingInfoChip
+                          icon={Boxes}
+                          label="Preco Atacado"
+                          onClick={canOpenWholesalePrices ? () => void openWholesalePrices(listing) : undefined}
+                          title="Abrir precos de atacado"
+                        />
                         <ListingInfoChip icon={Factory} label="Fabricacao" muted />
                       </div>
                     </div>
@@ -2870,6 +3118,171 @@ export function MercadoLivreMarketplacePage() {
                     Ficha tecnica nao disponivel nos dados carregados.
                   </div>
                 )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {wholesaleListing ? (
+        <div className="fixed inset-0 z-[65] flex items-end justify-center bg-black/75 p-3 md:items-center">
+          <div className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-md border border-matrix-border bg-matrix-panel p-4 shadow-glow">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-xl font-bold text-matrix-fg">Precos de Atacado</h3>
+                <p className="mt-1 text-sm text-matrix-muted">Descontos progressivos por quantidade do anuncio.</p>
+              </div>
+              <Button aria-label="Fechar precos de atacado" type="button" variant="ghost" onClick={closeWholesalePrices}>
+                <X className="h-4 w-4" />
+                Fechar
+              </Button>
+            </div>
+
+            <div className="mb-4 flex flex-col gap-3 rounded-md border border-matrix-border bg-matrix-panel2/55 p-3 md:flex-row md:items-center">
+              {listingMainImage(wholesaleListing) || wholesalePayload?.listing.thumbnail ? (
+                <img
+                  alt={wholesaleListing.title}
+                  className="h-16 w-16 shrink-0 rounded-md border border-matrix-border bg-white object-contain"
+                  src={listingMainImage(wholesaleListing) ?? wholesalePayload?.listing.thumbnail ?? undefined}
+                />
+              ) : (
+                <div className="grid h-16 w-16 shrink-0 place-items-center rounded-md border border-dashed border-matrix-border text-matrix-muted">
+                  <ImageIcon className="h-5 w-5" />
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] uppercase tracking-[0.14em] text-matrix-muted">Anuncio</p>
+                <h4 className="mt-1 text-base font-semibold leading-6 text-matrix-fg">{wholesaleListing.title}</h4>
+                <dl className="mt-2 grid gap-2 text-sm sm:grid-cols-3">
+                  <DetailItem label="SKU" value={fieldValue(wholesaleListing.sku)} />
+                  <DetailItem label="ID ML" value={wholesaleListing.externalId} mono />
+                  <DetailItem label="Preco atual" value={formatPrice(wholesaleListing.price, wholesaleListing.currencyId)} />
+                </dl>
+              </div>
+            </div>
+
+            <div className="grid gap-4">
+              <p className="rounded-md border border-matrix-border bg-matrix-panel2/45 px-3 py-3 text-sm leading-5 text-matrix-muted">
+                Defina descontos progressivos para quem comprar em quantidade. Voce pode configurar ate 5 precos de atacado para o anuncio. Os precos ficam disponiveis apenas para pessoas juridicas, negocios ou empresas.
+              </p>
+
+              {wholesaleLoading ? (
+                <div className="inline-flex items-center gap-2 rounded-md border border-matrix-gold/25 bg-matrix-gold/10 px-3 py-2 text-sm text-matrix-fg">
+                  <RefreshCw className="h-4 w-4 animate-spin text-matrix-gold" />
+                  Carregando precos de atacado...
+                </div>
+              ) : null}
+
+              {wholesaleError ? (
+                <div className="rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                  {wholesaleError}
+                </div>
+              ) : null}
+
+              {wholesaleSuccess ? (
+                <div className="rounded-md border border-green-500/25 bg-green-500/10 px-3 py-2 text-sm text-green-200">
+                  {wholesaleSuccess}
+                </div>
+              ) : null}
+
+              {!wholesaleCanEdit ? (
+                <div className="rounded-md border border-matrix-border bg-matrix-panel2/45 px-3 py-2 text-sm text-matrix-muted">
+                  <p>A edicao de preco atacado ainda nao esta liberada.</p>
+                </div>
+              ) : null}
+
+              {wholesaleAvailableSimulations.length ? (
+                <DetailSection title="Valores por quantidade">
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {wholesaleAvailableSimulations.map((simulation) => (
+                      <div key={simulation.quantity} className="rounded-md border border-matrix-border bg-matrix-panel/65 p-3">
+                        <p className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">Quantidade {simulation.quantity}</p>
+                        <p className="mt-1 text-sm font-semibold text-matrix-fg">
+                          {formatPrice(simulation.price, simulation.currencyId ?? wholesalePayload?.listing.currencyId ?? null)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </DetailSection>
+              ) : null}
+
+              <DetailSection title="Precos configurados">
+                <div className="overflow-hidden rounded-md border border-matrix-border">
+                  <div className="grid grid-cols-[minmax(0,1fr)_minmax(120px,0.85fr)_48px] gap-3 border-b border-matrix-border bg-matrix-panel2/55 px-3 py-2 text-xs font-semibold text-matrix-muted">
+                    <span>Preco de Cada Unidade</span>
+                    <span>Quantidade Minima de Compra</span>
+                    <span className="sr-only">Acoes</span>
+                  </div>
+
+                  {wholesaleRows.length ? (
+                    <div className="grid gap-2 bg-matrix-panel2/25 p-3">
+                      {[...wholesaleRows]
+                        .sort((left, right) => (Number(left.minQuantity) || 0) - (Number(right.minQuantity) || 0))
+                        .map((row) => (
+                          <div key={row.id} className="grid grid-cols-[minmax(0,1fr)_minmax(120px,0.85fr)_48px] gap-3">
+                            <input
+                              className="w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm text-matrix-fg outline-none read-only:text-matrix-muted"
+                              inputMode="decimal"
+                              onChange={(event) => updateWholesaleRow(row.id, "price", event.target.value)}
+                              placeholder="R$ 0,00"
+                              readOnly={!wholesaleCanEdit || wholesaleSaving}
+                              value={row.price}
+                            />
+                            <input
+                              className="w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm text-matrix-fg outline-none read-only:text-matrix-muted"
+                              inputMode="numeric"
+                              min={2}
+                              onChange={(event) => updateWholesaleRow(row.id, "minQuantity", event.target.value)}
+                              readOnly={!wholesaleCanEdit || wholesaleSaving}
+                              value={row.minQuantity}
+                            />
+                            <Button
+                              aria-label="Remover preco de atacado"
+                              className="min-h-9 justify-center px-2 py-2"
+                              disabled={!wholesaleCanEdit || wholesaleSaving}
+                              onClick={() => removeWholesaleRow(row.id)}
+                              type="button"
+                              variant="danger"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        ))}
+                    </div>
+                  ) : (
+                    <div className="bg-matrix-panel2/25 px-4 py-8 text-center text-sm text-matrix-muted">
+                      Nenhum preco de atacado encontrado nos dados disponiveis.
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                  <Button
+                    disabled={!wholesaleCanEdit || wholesaleSaving || wholesaleRows.length >= (wholesalePayload?.maxPrices ?? 5)}
+                    onClick={addWholesaleRow}
+                    type="button"
+                    variant="secondary"
+                  >
+                    + Adicionar Preco
+                  </Button>
+                  {wholesaleValidationError && wholesaleCanEdit ? (
+                    <p className="text-sm text-red-200">{wholesaleValidationError}</p>
+                  ) : null}
+                </div>
+              </DetailSection>
+
+              <div className="flex flex-wrap justify-end gap-2 border-t border-matrix-border pt-4">
+                <Button onClick={closeWholesalePrices} type="button" variant="secondary">
+                  Fechar
+                </Button>
+                <Button
+                  disabled={!wholesaleCanEdit || Boolean(wholesaleValidationError) || wholesaleSaving}
+                  onClick={saveWholesalePrices}
+                  title={wholesaleCanEdit ? "Salvar precos de atacado" : "A edicao de preco atacado ainda nao esta liberada."}
+                  type="button"
+                >
+                  {wholesaleSaving ? "Salvando..." : "Salvar"}
+                </Button>
+              </div>
             </div>
           </div>
         </div>
@@ -3342,7 +3755,7 @@ export function MercadoLivreMarketplacePage() {
                       ))}
                     </div>
                   ) : (
-                    <p className="text-sm text-matrix-muted">A API nao retornou atributos detalhados para este anuncio.</p>
+                    <p className="text-sm text-matrix-muted">Nao ha atributos detalhados para este anuncio.</p>
                   )}
                 </DetailSection>
 
