@@ -280,6 +280,53 @@ type TechnicalSheetMainField = {
   attributeIds: string[];
 };
 
+type MercadoLivreDimensionsPayload = {
+  externalWrite: boolean;
+  canEdit: boolean;
+  message?: string;
+  changedFields?: string[];
+  listing: {
+    externalId: string;
+    itemId: string;
+    title: string;
+    thumbnail: string | null;
+    sellerSku: string | null;
+    sku: string | null;
+    price: number | null;
+    currencyId: string | null;
+    categoryId: string | null;
+    shipping: {
+      mode: string | null;
+      logisticType: string | null;
+      freeShipping: boolean | null;
+      localPickUp?: boolean | null;
+      tags?: string[];
+    } | null;
+  };
+  dimensions: {
+    raw: string | null;
+    widthCm: number | null;
+    heightCm: number | null;
+    lengthCm: number | null;
+    weightGrams: number | null;
+    hasDimensions: boolean;
+    packageMode: "manufacturer" | "custom";
+  };
+  packaging?: {
+    mode: "manufacturer" | "custom";
+    label: string;
+  };
+  warning: string;
+};
+
+type DimensionsFormState = {
+  widthCm: string;
+  heightCm: string;
+  lengthCm: string;
+  weightGrams: string;
+  packageMode: "manufacturer" | "custom";
+};
+
 type QuickFilterValue = "all" | "active" | "paused" | "under_review" | "error" | "without_stock" | "premium" | "classico";
 
 const quickFilters: Array<{ value: QuickFilterValue; label: string }> = [
@@ -617,6 +664,93 @@ function dimensionsChipLabel(listing: MercadoLivreClientListing) {
   return listing.dimensionInfo?.hasDimensions ? "Dimensoes OK" : "Dimensoes pendente";
 }
 
+function numberFromDimensionValue(value: string | number | null | undefined) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const match = String(value ?? "").replace(",", ".").match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatDimensionFormValue(value: number | string | null | undefined) {
+  const parsed = numberFromDimensionValue(value);
+  if (parsed === null) return "";
+  return Number.isInteger(parsed) ? String(parsed) : String(parsed).replace(".", ",");
+}
+
+function localDimensionsPayloadFromListing(listing: MercadoLivreClientListing): MercadoLivreDimensionsPayload {
+  return {
+    externalWrite: false,
+    canEdit: false,
+    listing: {
+      externalId: listing.externalId,
+      itemId: listing.itemId,
+      title: listing.title,
+      thumbnail: listing.thumbnail,
+      sellerSku: listing.sellerSku,
+      sku: listing.sku,
+      price: listing.price,
+      currencyId: listing.currencyId,
+      categoryId: listing.categoryId,
+      shipping: listing.shipping
+    },
+    dimensions: {
+      raw: listing.dimensionInfo?.raw ?? listing.dimensions ?? null,
+      widthCm: numberFromDimensionValue(listing.dimensionInfo?.widthCm),
+      heightCm: numberFromDimensionValue(listing.dimensionInfo?.heightCm),
+      lengthCm: numberFromDimensionValue(listing.dimensionInfo?.lengthCm),
+      weightGrams: numberFromDimensionValue(listing.dimensionInfo?.weightG),
+      hasDimensions: Boolean(listing.dimensionInfo?.hasDimensions),
+      packageMode: "manufacturer"
+    },
+    packaging: {
+      mode: "manufacturer",
+      label: "Usar embalagem do fabricante"
+    },
+    warning: "Dimensoes impactam frete, logistica e possiveis divergencias de cobranca."
+  };
+}
+
+function dimensionsFormFromPayload(payload: MercadoLivreDimensionsPayload): DimensionsFormState {
+  return {
+    widthCm: formatDimensionFormValue(payload.dimensions.widthCm),
+    heightCm: formatDimensionFormValue(payload.dimensions.heightCm),
+    lengthCm: formatDimensionFormValue(payload.dimensions.lengthCm),
+    weightGrams: formatDimensionFormValue(payload.dimensions.weightGrams),
+    packageMode: payload.dimensions.packageMode
+  };
+}
+
+function validateDimensionsForm(form: DimensionsFormState) {
+  const fields = [
+    { key: "widthCm", label: "Largura", max: 300, integer: false },
+    { key: "heightCm", label: "Altura", max: 300, integer: false },
+    { key: "lengthCm", label: "Comprimento", max: 300, integer: false },
+    { key: "weightGrams", label: "Peso", max: 30000, integer: true }
+  ] as const;
+
+  for (const field of fields) {
+    const value = numberFromDimensionValue(form[field.key]);
+    if (value === null) return `${field.label} precisa ser preenchido.`;
+    if (value <= 0) return `${field.label} precisa ser maior que zero.`;
+    if (value > field.max) return `${field.label} precisa ser no maximo ${field.max}.`;
+    if (field.integer && !Number.isInteger(value)) return `${field.label} precisa ser informado em gramas inteiros.`;
+  }
+
+  return "";
+}
+
+function dimensionInfoFromPayload(payload: MercadoLivreDimensionsPayload): MercadoLivreClientListing["dimensionInfo"] {
+  return {
+    raw: payload.dimensions.raw,
+    widthCm: payload.dimensions.widthCm === null ? null : formatDimensionFormValue(payload.dimensions.widthCm),
+    heightCm: payload.dimensions.heightCm === null ? null : formatDimensionFormValue(payload.dimensions.heightCm),
+    lengthCm: payload.dimensions.lengthCm === null ? null : formatDimensionFormValue(payload.dimensions.lengthCm),
+    weightG: payload.dimensions.weightGrams === null ? null : formatDimensionFormValue(payload.dimensions.weightGrams),
+    hasDimensions: payload.dimensions.hasDimensions
+  };
+}
+
 function localProductLabel(listing: MercadoLivreClientListing) {
   if (!listing.localProduct?.found) return "Sem vinculo local";
   return listing.localProduct.matchBy === "gtin" ? "Vinculo por GTIN" : "Vinculo por SKU";
@@ -776,6 +910,12 @@ function isTechnicalSheetPayload(value: unknown): value is TechnicalSheetPayload
   if (!value || typeof value !== "object") return false;
   const payload = value as Partial<TechnicalSheetPayload>;
   return payload.readOnly === true && payload.externalWrite === false && Array.isArray(payload.attributes) && Array.isArray(payload.sections);
+}
+
+function isDimensionsPayload(value: unknown): value is MercadoLivreDimensionsPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<MercadoLivreDimensionsPayload>;
+  return Boolean(payload.dimensions && typeof payload.dimensions === "object" && payload.listing && typeof payload.listing === "object");
 }
 
 function ListingMetaItem({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
@@ -1288,6 +1428,18 @@ export function MercadoLivreMarketplacePage() {
   const [pictureGalleryListing, setPictureGalleryListing] = useState<MercadoLivreClientListing | null>(null);
   const [pictureGalleryIndex, setPictureGalleryIndex] = useState(0);
   const [dimensionsListing, setDimensionsListing] = useState<MercadoLivreClientListing | null>(null);
+  const [dimensionsPayload, setDimensionsPayload] = useState<MercadoLivreDimensionsPayload | null>(null);
+  const [dimensionsForm, setDimensionsForm] = useState<DimensionsFormState>({
+    widthCm: "",
+    heightCm: "",
+    lengthCm: "",
+    weightGrams: "",
+    packageMode: "manufacturer"
+  });
+  const [dimensionsLoading, setDimensionsLoading] = useState(false);
+  const [dimensionsSaving, setDimensionsSaving] = useState(false);
+  const [dimensionsError, setDimensionsError] = useState("");
+  const [dimensionsSuccess, setDimensionsSuccess] = useState("");
   const [technicalSheetListing, setTechnicalSheetListing] = useState<MercadoLivreClientListing | null>(null);
   const [technicalSheetPayload, setTechnicalSheetPayload] = useState<TechnicalSheetPayload | null>(null);
   const [technicalSheetError, setTechnicalSheetError] = useState("");
@@ -1506,12 +1658,127 @@ export function MercadoLivreMarketplacePage() {
     setPictureGalleryIndex(0);
   }
 
-  function openDimensionsEditor(listing: MercadoLivreClientListing) {
+  function updateListingDimensionsFromPayload(listing: MercadoLivreClientListing, payload: MercadoLivreDimensionsPayload): MercadoLivreClientListing {
+    return {
+      ...listing,
+      dimensions: payload.dimensions.raw,
+      dimensionInfo: dimensionInfoFromPayload(payload)
+    };
+  }
+
+  function replaceListingDimensions(payload: MercadoLivreDimensionsPayload) {
+    const apply = (current: MercadoLivreListingsPayload | null): MercadoLivreListingsPayload | null => {
+      if (!current) return current;
+      return {
+        ...current,
+        listings: current.listings.map((listing) =>
+          listing.externalId === payload.listing.externalId ? updateListingDimensionsFromPayload(listing, payload) : listing
+        )
+      };
+    };
+
+    setListingsPayload(apply);
+    setFilteredListingsPayload(apply);
+    setDimensionsListing((current) => (current ? updateListingDimensionsFromPayload(current, payload) : current));
+  }
+
+  async function openDimensionsEditor(listing: MercadoLivreClientListing) {
+    const fallbackPayload = localDimensionsPayloadFromListing(listing);
     setDimensionsListing(listing);
+    setDimensionsPayload(fallbackPayload);
+    setDimensionsForm(dimensionsFormFromPayload(fallbackPayload));
+    setDimensionsError("");
+    setDimensionsSuccess("");
+    setDimensionsLoading(true);
+
+    try {
+      const response = await fetch(`/api/marketplaces/mercado-livre/client/listings/${encodeURIComponent(listing.externalId)}/dimensions`, {
+        cache: "no-store"
+      });
+      const payload = (await response.json().catch(() => null)) as unknown;
+
+      if (!response.ok || !isDimensionsPayload(payload)) {
+        const errorMessage =
+          payload && typeof payload === "object" && "error" in payload && typeof (payload as { error?: unknown }).error === "string"
+            ? (payload as { error: string }).error
+            : "Nao foi possivel carregar dimensoes atuais.";
+        throw new Error(errorMessage);
+      }
+
+      setDimensionsPayload(payload);
+      setDimensionsForm(dimensionsFormFromPayload(payload));
+      setDimensionsError("");
+      setDimensionsListing((current) => (current ? updateListingDimensionsFromPayload(current, payload) : current));
+    } catch {
+      setDimensionsPayload((current) => current ?? fallbackPayload);
+      setDimensionsError("Nao foi possivel carregar dimensoes atuais. Exibindo dados carregados da listagem.");
+    } finally {
+      setDimensionsLoading(false);
+    }
   }
 
   function closeDimensionsEditor() {
     setDimensionsListing(null);
+    setDimensionsPayload(null);
+    setDimensionsForm({
+      widthCm: "",
+      heightCm: "",
+      lengthCm: "",
+      weightGrams: "",
+      packageMode: "manufacturer"
+    });
+    setDimensionsLoading(false);
+    setDimensionsSaving(false);
+    setDimensionsError("");
+    setDimensionsSuccess("");
+  }
+
+  async function saveDimensions() {
+    if (!dimensionsListing || !dimensionsPayload?.externalWrite || !dimensionsPayload.canEdit) return;
+
+    const validationError = validateDimensionsForm(dimensionsForm);
+    if (validationError) {
+      setDimensionsError(validationError);
+      return;
+    }
+
+    const confirmed = window.confirm("Confirmar alteracao real das dimensoes no Mercado Livre?");
+    if (!confirmed) return;
+
+    setDimensionsSaving(true);
+    setDimensionsError("");
+    setDimensionsSuccess("");
+
+    try {
+      const response = await fetch(`/api/marketplaces/mercado-livre/client/listings/${encodeURIComponent(dimensionsListing.externalId)}/dimensions`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          widthCm: numberFromDimensionValue(dimensionsForm.widthCm),
+          heightCm: numberFromDimensionValue(dimensionsForm.heightCm),
+          lengthCm: numberFromDimensionValue(dimensionsForm.lengthCm),
+          weightGrams: numberFromDimensionValue(dimensionsForm.weightGrams)
+        })
+      });
+      const payload = (await response.json().catch(() => null)) as unknown;
+
+      if (!response.ok || !isDimensionsPayload(payload)) {
+        const errorMessage =
+          payload && typeof payload === "object" && "error" in payload && typeof (payload as { error?: unknown }).error === "string"
+            ? (payload as { error: string }).error
+            : "Nao foi possivel salvar dimensoes.";
+        throw new Error(errorMessage);
+      }
+
+      setDimensionsPayload(payload);
+      setDimensionsForm(dimensionsFormFromPayload(payload));
+      replaceListingDimensions(payload);
+      setDimensionsSuccess(payload.message ?? "Dimensoes atualizadas com sucesso.");
+    } catch (error) {
+      setDimensionsError(error instanceof Error ? error.message : "Nao foi possivel salvar dimensoes.");
+    } finally {
+      setDimensionsSaving(false);
+    }
   }
 
   function toggleSelected(id: string) {
@@ -1649,6 +1916,8 @@ export function MercadoLivreMarketplacePage() {
   const canOpenPictures = canViewLocalDetails && isLocalReadOnlyAction("pictures");
   const canOpenDimensions = canViewLocalDetails && isLocalReadOnlyAction("dimensions");
   const canOpenDetails = canViewLocalDetails && isLocalReadOnlyAction("details");
+  const dimensionsCanEdit = Boolean(dimensionsPayload?.externalWrite && dimensionsPayload.canEdit);
+  const dimensionsValidationError = validateDimensionsForm(dimensionsForm);
   const technicalSheetHasMeasures = technicalSheetTabHasMeasures(technicalSheetPayload);
   const technicalSheetSkuValues = useMemo(() => technicalSheetSkuCandidates(technicalSheetPayload), [technicalSheetPayload]);
   const technicalSheetMainFields = useMemo(
@@ -2296,7 +2565,7 @@ export function MercadoLivreMarketplacePage() {
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
                 <h3 className="text-xl font-bold text-matrix-fg">Dimensoes do Anuncio</h3>
-                <p className="mt-1 text-sm text-matrix-muted">Medidas e peso disponiveis nos dados carregados da listagem.</p>
+                <p className="mt-1 text-sm text-matrix-muted">Consulta das medidas atuais do anuncio e impacto em frete/logistica.</p>
               </div>
               <Button aria-label="Fechar dimensoes do anuncio" type="button" variant="ghost" onClick={closeDimensionsEditor}>
                 <X className="h-4 w-4" />
@@ -2332,37 +2601,122 @@ export function MercadoLivreMarketplacePage() {
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-matrix-border bg-matrix-panel2/45 px-3 py-2">
                 <div>
                   <p className="text-sm font-semibold text-matrix-fg">
-                    {dimensionsListing.dimensionInfo?.hasDimensions ? "Dimensoes disponiveis" : "Dimensoes pendentes"}
+                    {dimensionsPayload?.dimensions.hasDimensions ? "Dimensoes disponiveis" : "Dimensoes pendentes"}
                   </p>
                   <p className="mt-1 text-xs text-matrix-muted">
-                    Estes dados vieram da listagem ja carregada. Nenhuma alteracao sera enviada ao Mercado Livre.
+                    Dimensoes impactam frete, logistica e possiveis divergencias de cobranca.
                   </p>
                 </div>
-                <Badge tone={dimensionsListing.dimensionInfo?.hasDimensions ? "success" : "warning"}>
-                  {dimensionsListing.dimensionInfo?.hasDimensions ? "Com dimensoes" : "Pendente"}
+                <Badge tone={dimensionsPayload?.dimensions.hasDimensions ? "success" : "warning"}>
+                  {dimensionsPayload?.dimensions.hasDimensions ? "Com dimensoes" : "Pendente"}
                 </Badge>
               </div>
 
-              {dimensionsListing.dimensionInfo?.hasDimensions ? (
-                <DetailSection title="Dimensoes carregadas">
-                  <dl className="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
-                    <DetailItem label="Dimensoes brutas" value={dimensionsLabel(dimensionsListing)} />
-                    <DetailItem label="Altura" value={fieldValue(dimensionsListing.dimensionInfo?.heightCm)} />
-                    <DetailItem label="Largura" value={fieldValue(dimensionsListing.dimensionInfo?.widthCm)} />
-                    <DetailItem label="Comprimento" value={fieldValue(dimensionsListing.dimensionInfo?.lengthCm)} />
-                    <DetailItem label="Peso" value={fieldValue(dimensionsListing.dimensionInfo?.weightG)} />
-                  </dl>
-                </DetailSection>
-              ) : (
+              {dimensionsLoading ? (
+                <div className="inline-flex items-center gap-2 rounded-md border border-matrix-gold/25 bg-matrix-gold/10 px-3 py-2 text-sm text-matrix-fg">
+                  <RefreshCw className="h-4 w-4 animate-spin text-matrix-gold" />
+                  Carregando dimensoes atuais...
+                </div>
+              ) : null}
+
+              {dimensionsError ? (
+                <div className="rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                  {dimensionsError}
+                </div>
+              ) : null}
+
+              {dimensionsSuccess ? (
+                <div className="rounded-md border border-green-500/25 bg-green-500/10 px-3 py-2 text-sm text-green-200">
+                  {dimensionsSuccess}
+                </div>
+              ) : null}
+
+              {!dimensionsLoading && !dimensionsPayload?.dimensions.hasDimensions ? (
                 <div className="rounded-md border border-dashed border-matrix-border bg-matrix-panel2/45 px-4 py-8 text-center text-sm text-matrix-muted">
                   Dimensoes pendentes ou nao disponiveis nos dados carregados.
                 </div>
-              )}
+              ) : null}
+
+              <DetailSection title="Dimensoes carregadas">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  {[
+                    { key: "widthCm", label: "Largura (cm)" },
+                    { key: "heightCm", label: "Altura (cm)" },
+                    { key: "lengthCm", label: "Profundidade / comprimento (cm)" },
+                    { key: "weightGrams", label: "Peso (g)" }
+                  ].map((field) => (
+                    <label key={field.key} className="text-sm text-matrix-muted">
+                      {field.label}
+                      <input
+                        className="mt-2 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none read-only:text-matrix-muted"
+                        inputMode="decimal"
+                        onChange={(event) =>
+                          setDimensionsForm((current) => ({
+                            ...current,
+                            [field.key]: event.target.value
+                          }))
+                        }
+                        readOnly={!dimensionsCanEdit || dimensionsSaving}
+                        value={dimensionsForm[field.key as keyof Omit<DimensionsFormState, "packageMode">]}
+                      />
+                    </label>
+                  ))}
+                </div>
+                <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
+                  <DetailItem label="Dimensoes brutas" value={fieldValue(dimensionsPayload?.dimensions.raw)} />
+                  <DetailItem label="Fonte" value={dimensionsPayload?.dimensions.hasDimensions ? "Mercado Livre" : "Dados carregados"} />
+                  <DetailItem label="Frete" value={freightLabel(dimensionsListing)} />
+                  <DetailItem label="Logistica" value={logisticsLabel(dimensionsListing)} />
+                </dl>
+              </DetailSection>
+
+              <DetailSection title="Embalagem">
+                <div className="grid gap-2 md:grid-cols-2">
+                  {[
+                    { value: "manufacturer", label: "Usar embalagem do fabricante" },
+                    { value: "custom", label: "Usar embalagem propria" }
+                  ].map((option) => (
+                    <label key={option.value} className="flex items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel2/45 px-3 py-2 text-sm text-matrix-fg">
+                      <input
+                        checked={dimensionsForm.packageMode === option.value}
+                        disabled={!dimensionsCanEdit || dimensionsSaving}
+                        onChange={() =>
+                          setDimensionsForm((current) => ({
+                            ...current,
+                            packageMode: option.value as DimensionsFormState["packageMode"]
+                          }))
+                        }
+                        type="radio"
+                      />
+                      {option.label}
+                    </label>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs text-matrix-muted">
+                  A opcao de embalagem fica local/visual nesta etapa; o envio ao Mercado Livre usa somente largura, altura, comprimento e peso.
+                </p>
+              </DetailSection>
+
+              {!dimensionsCanEdit ? (
+                <div className="rounded-md border border-matrix-border bg-matrix-panel2/45 px-3 py-2 text-sm text-matrix-muted">
+                  Edicao de dimensoes esta bloqueada nesta fase. Os dados sao somente leitura.
+                </div>
+              ) : null}
 
               <div className="flex flex-wrap justify-end gap-2 border-t border-matrix-border pt-4">
                 <Button onClick={closeDimensionsEditor} type="button" variant="secondary">
                   Fechar
                 </Button>
+                {dimensionsPayload?.externalWrite ? (
+                  <Button
+                    disabled={!dimensionsCanEdit || Boolean(dimensionsValidationError) || dimensionsSaving}
+                    onClick={() => void saveDimensions()}
+                    title={dimensionsValidationError || "Salvar dimensoes no Mercado Livre"}
+                    type="button"
+                  >
+                    {dimensionsSaving ? "Salvando..." : "Salvar"}
+                  </Button>
+                ) : null}
               </div>
             </div>
           </div>
