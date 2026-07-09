@@ -36,6 +36,37 @@ type MercadoLivreSalePrice = {
   metadata?: Record<string, unknown> | null;
 };
 
+type MercadoLivrePrice = {
+  id?: string | null;
+  type?: string | null;
+  amount?: number | null;
+  currency_id?: string | null;
+  conditions?: {
+    context_restrictions?: string[] | null;
+    min_purchase_unit?: number | string | null;
+  } | null;
+};
+
+type MercadoLivrePricesPayload = {
+  id?: string | null;
+  prices?: MercadoLivrePrice[] | null;
+};
+
+type WholesalePriceInput = {
+  price?: unknown;
+  minQuantity?: unknown;
+};
+
+class MercadoLivreApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "MercadoLivreApiError";
+    this.status = status;
+  }
+}
+
 function canManageMarketplace(role: string) {
   return role === "OWNER" || role === "ADMIN";
 }
@@ -61,26 +92,53 @@ function numberOrNull(value: unknown) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function positiveNumberOrNull(value: unknown) {
+  const parsed = numberOrNull(value);
+  return parsed !== null && parsed > 0 ? parsed : null;
+}
+
 function salePriceAmount(payload: MercadoLivreSalePrice | null) {
   return numberOrNull(payload?.amount);
 }
 
-async function fetchMercadoLivreJson<T>(path: string, accessToken: string): Promise<T> {
+function safeMercadoLivreApiMessage(status: number, payload: unknown) {
+  const record = payload && typeof payload === "object" ? (payload as { message?: unknown; error?: unknown }) : null;
+  const rawMessage = String(record?.message ?? record?.error ?? "").toLowerCase();
+
+  if (rawMessage.includes("caller id must match")) return "O anuncio informado nao pertence a conta Mercado Livre conectada.";
+  if (rawMessage.includes("does not have rights") || rawMessage.includes("forbidden")) {
+    return "O Mercado Livre nao liberou preco atacado para esta conta ou anuncio.";
+  }
+  if (rawMessage.includes("not found")) return "Anuncio Mercado Livre nao encontrado.";
+  if (rawMessage.includes("maximum of 5")) return `Configure no maximo ${maxWholesalePrices} precos de atacado.`;
+  if (rawMessage.includes("min_purchase_unit") || rawMessage.includes("context_restrictions")) {
+    return "Revise as quantidades minimas e os precos de atacado informados.";
+  }
+  if (rawMessage.includes("not unique")) return "As quantidades minimas precisam ser unicas.";
+  if (rawMessage.includes("currencies must be the same")) return "A moeda do preco atacado precisa ser a mesma do anuncio.";
+  if (status === 403) return "O Mercado Livre nao liberou preco atacado para esta conta ou anuncio.";
+  if (status === 404) return "O Mercado Livre nao permitiu configurar preco atacado para este anuncio.";
+
+  return "O Mercado Livre nao permitiu atualizar os precos de atacado.";
+}
+
+async function fetchMercadoLivreJson<T>(path: string, accessToken: string, init?: RequestInit): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
-  const headers = new Headers();
+  const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
   headers.set("Authorization", `Bearer ${accessToken}`);
 
   try {
     const response = await fetch(`${apiBaseUrl}${path}`, {
-      method: "GET",
+      ...init,
       headers,
       signal: controller.signal
     });
 
     if (!response.ok) {
-      throw new Error(`Mercado Livre retornou HTTP ${response.status}.`);
+      const payload = (await response.json().catch(() => null)) as unknown;
+      throw new MercadoLivreApiError(response.status, safeMercadoLivreApiMessage(response.status, payload));
     }
 
     return (await response.json()) as T;
@@ -160,6 +218,119 @@ async function fetchSalePriceSimulation(itemId: string, accessToken: string, qua
   }
 }
 
+async function fetchItemPrices(itemId: string, accessToken: string) {
+  return fetchMercadoLivreJson<MercadoLivrePricesPayload>(`/items/${encodeURIComponent(itemId)}/prices`, accessToken, {
+    headers: {
+      "show-all-prices": "TRUE"
+    }
+  });
+}
+
+function priceContextRestrictions(price: MercadoLivrePrice) {
+  return (price.conditions?.context_restrictions ?? []).map((restriction) => String(restriction).toLowerCase());
+}
+
+function priceMinPurchaseUnit(price: MercadoLivrePrice) {
+  const minPurchaseUnit = numberOrNull(price.conditions?.min_purchase_unit);
+  return minPurchaseUnit !== null && Number.isInteger(minPurchaseUnit) && minPurchaseUnit >= 2 ? minPurchaseUnit : null;
+}
+
+function isQuantityPrice(price: MercadoLivrePrice) {
+  const restrictions = priceContextRestrictions(price);
+  return restrictions.includes("channel_marketplace") && restrictions.includes("user_type_business") && priceMinPurchaseUnit(price) !== null;
+}
+
+function officialWholesalePricesFromPrices(payload: MercadoLivrePricesPayload | null) {
+  return (payload?.prices ?? [])
+    .filter(isQuantityPrice)
+    .map((price) => ({
+      price: positiveNumberOrNull(price.amount),
+      minQuantity: priceMinPurchaseUnit(price),
+      source: "official" as const
+    }))
+    .filter((price): price is { price: number; minQuantity: number; source: "official" } => price.price !== null && price.minQuantity !== null)
+    .sort((left, right) => left.minQuantity - right.minQuantity);
+}
+
+function hasPreservableBasePrice(payload: MercadoLivrePricesPayload | null) {
+  return (payload?.prices ?? []).some((price) => price.id && !isQuantityPrice(price));
+}
+
+function normalizeWholesaleInputs(input: unknown, currentPrice: number | null | undefined, currencyId: string | null | undefined) {
+  if (!Array.isArray(input)) throw new Error("Informe os precos de atacado antes de salvar.");
+  if (input.length > maxWholesalePrices) throw new Error(`Configure no maximo ${maxWholesalePrices} precos de atacado.`);
+  if (!currencyId) throw new Error("Moeda do anuncio nao identificada.");
+
+  const quantities = new Set<number>();
+  const rows = input.map((row, index) => {
+    const candidate = (row ?? {}) as WholesalePriceInput;
+    const price = positiveNumberOrNull(candidate.price);
+    const minQuantity = numberOrNull(candidate.minQuantity);
+    const rowLabel = `Linha ${index + 1}`;
+
+    if (price === null) throw new Error(`${rowLabel}: informe o preco de cada unidade.`);
+    if (typeof currentPrice === "number" && Number.isFinite(currentPrice) && price >= currentPrice) {
+      throw new Error(`${rowLabel}: o preco de atacado precisa ser menor que o preco atual.`);
+    }
+    if (minQuantity === null || !Number.isInteger(minQuantity) || minQuantity < 2) {
+      throw new Error(`${rowLabel}: a quantidade minima precisa ser um numero inteiro maior ou igual a 2.`);
+    }
+    if (quantities.has(minQuantity)) throw new Error(`${rowLabel}: quantidade minima duplicada.`);
+    quantities.add(minQuantity);
+
+    return {
+      price: Number(price.toFixed(2)),
+      minQuantity
+    };
+  });
+
+  const sorted = rows.sort((left, right) => left.minQuantity - right.minQuantity);
+  for (let index = 1; index < sorted.length; index += 1) {
+    if (sorted[index].price >= sorted[index - 1].price) {
+      throw new Error("Cada faixa maior precisa ter preco menor que a faixa anterior.");
+    }
+  }
+
+  return sorted;
+}
+
+function buildWholesaleUpdatePayload(input: {
+  currentPrices: MercadoLivrePricesPayload;
+  rows: Array<{ price: number; minQuantity: number }>;
+  currencyId: string;
+}) {
+  const existingPrices = input.currentPrices.prices ?? [];
+  const keepExistingPrices = existingPrices
+    .filter((price) => price.id && !isQuantityPrice(price))
+    .map((price) => ({ id: String(price.id) }));
+  if (!keepExistingPrices.length) {
+    throw new Error("Nao foi possivel identificar o preco principal para preservar.");
+  }
+
+  const existingQuantityPrices = existingPrices.filter((price) => price.id && isQuantityPrice(price));
+  const nextQuantityPrices = input.rows.map((row) => {
+    const existing = existingQuantityPrices.find((price) => {
+      const amount = positiveNumberOrNull(price.amount);
+      return priceMinPurchaseUnit(price) === row.minQuantity && amount !== null && Math.abs(amount - row.price) < 0.005;
+    });
+
+    if (existing?.id) return { id: String(existing.id) };
+
+    return {
+      amount: row.price,
+      currency_id: input.currencyId,
+      conditions: {
+        context_restrictions: ["channel_marketplace", "user_type_business"],
+        min_purchase_unit: row.minQuantity
+      }
+    };
+  });
+
+  return {
+    prices: [...keepExistingPrices, ...nextQuantityPrices]
+  };
+}
+
 async function wholesalePayload(item: MercadoLivreItem, accessToken: string, input: { role: string }) {
   const sellerSku =
     item.seller_custom_field?.trim() ||
@@ -167,14 +338,22 @@ async function wholesalePayload(item: MercadoLivreItem, accessToken: string, inp
     null;
   const simulations = await Promise.all(sampleQuantities.map((quantity) => fetchSalePriceSimulation(item.id, accessToken, quantity)));
   const externalWrite = wholesaleExternalWriteEnabled();
+  const canManage = canManageMarketplace(input.role);
+  const currentPrices = await fetchItemPrices(item.id, accessToken).catch(() => null);
+  const prices = officialWholesalePricesFromPrices(currentPrices);
+  const canEdit = externalWrite && canManage && hasPreservableBasePrice(currentPrices);
 
   return {
     externalWrite,
-    canEdit: false,
-    canManage: canManageMarketplace(input.role),
+    canEdit,
+    canManage,
     maxPrices: maxWholesalePrices,
-    writeAvailable: false,
-    writeUnavailableReason: "Endpoint oficial de escrita de preco por quantidade nao identificado com seguranca.",
+    writeAvailable: canEdit,
+    writeUnavailableReason: canEdit
+      ? undefined
+      : externalWrite && canManage
+        ? "Nao foi possivel carregar a base de precos necessaria para salvar com seguranca."
+        : "A edicao de preco atacado ainda nao esta liberada.",
     listing: {
       externalId: item.id,
       itemId: item.id,
@@ -186,21 +365,18 @@ async function wholesalePayload(item: MercadoLivreItem, accessToken: string, inp
       currencyId: item.currency_id ?? null,
       categoryId: item.category_id ?? null
     },
-    prices: [] as Array<{
-      price: number;
-      minQuantity: number;
-      source: "official";
-    }>,
+    prices,
     simulations,
-    officialReadEndpoint: "GET /items/{id}/sale_price?context=channel_marketplace,user_type_business&quantity={quantity}",
-    officialWriteEndpoint: null,
-    warning: "Consulta em modo seguro. A lista editavel de precos de atacado fica bloqueada ate confirmacao do endpoint oficial de escrita."
+    warning: canEdit
+      ? "Preco atacado altera a condicao comercial do anuncio. Salve apenas com confirmacao."
+      : "Preco atacado disponivel para consulta."
   };
 }
 
 function safeErrorMessage(error: unknown) {
   if (error instanceof Error) {
     if (error.name === "AbortError") return "Tempo esgotado ao carregar precos de atacado.";
+    if (error instanceof MercadoLivreApiError) return error.message;
     if (error.message.includes("Conecte") || error.message.includes("Reconecte") || error.message.includes("nao pertence") || error.message.includes("Permissao")) {
       return error.message;
     }
@@ -230,6 +406,64 @@ export async function GET(_request: Request, { params }: Params) {
     return NextResponse.json(await wholesalePayload(item, accessToken, { role: auth.context.role }));
   } catch (error) {
     const message = safeErrorMessage(error);
-    return NextResponse.json({ error: message, externalWrite: false, canEdit: false }, { status: statusForError(message) });
+    const status = error instanceof MercadoLivreApiError ? error.status : statusForError(message);
+    return NextResponse.json({ error: message, externalWrite: false, canEdit: false }, { status });
+  }
+}
+
+export async function PATCH(request: Request, { params }: Params) {
+  const auth = await requireApiAuth("integrations:write");
+  if (!auth.ok) return auth.response;
+  if (!canManageMarketplace(auth.context.role)) {
+    return NextResponse.json({ error: "Permissao insuficiente", externalWrite: false, canEdit: false }, { status: 403 });
+  }
+  if (!wholesaleExternalWriteEnabled()) {
+    return NextResponse.json({ error: "A edicao de preco atacado ainda nao esta liberada.", externalWrite: false, canEdit: false }, { status: 403 });
+  }
+
+  try {
+    const { id } = await params;
+    const itemId = sanitizeItemId(decodeURIComponent(id));
+    if (!itemId) {
+      return NextResponse.json({ error: "ID do anuncio Mercado Livre invalido.", externalWrite: false, canEdit: false }, { status: 400 });
+    }
+
+    const body = (await request.json().catch(() => ({}))) as {
+      confirmed?: unknown;
+      prices?: unknown;
+    };
+    if (body.confirmed !== true) {
+      return NextResponse.json({ error: "Confirme a alteracao antes de salvar.", externalWrite: true, canEdit: true }, { status: 400 });
+    }
+
+    const { item, accessToken } = await loadOwnedItem(auth.context.organizationId, itemId);
+    const rows = normalizeWholesaleInputs(body.prices, item.price, item.currency_id);
+    const currentPrices = await fetchItemPrices(itemId, accessToken);
+    const payload = buildWholesaleUpdatePayload({
+      currentPrices,
+      rows,
+      currencyId: item.currency_id ?? "BRL"
+    });
+
+    await fetchMercadoLivreJson<MercadoLivrePricesPayload>(
+      `/items/${encodeURIComponent(itemId)}/prices/standard/quantity`,
+      accessToken,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }
+    );
+
+    const nextPayload = await wholesalePayload(item, accessToken, { role: auth.context.role });
+    return NextResponse.json({
+      ...nextPayload,
+      changedFields: ["wholesalePrices"],
+      message: "Precos de atacado atualizados com sucesso."
+    });
+  } catch (error) {
+    const message = safeErrorMessage(error);
+    const status = error instanceof MercadoLivreApiError ? error.status : statusForError(message);
+    return NextResponse.json({ error: message, externalWrite: true, canEdit: true }, { status });
   }
 }

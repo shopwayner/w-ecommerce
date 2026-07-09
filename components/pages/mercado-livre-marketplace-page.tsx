@@ -370,6 +370,8 @@ type MercadoLivreWholesalePricesPayload = {
   externalWrite: boolean;
   canEdit: boolean;
   canManage?: boolean;
+  changedFields?: string[];
+  message?: string;
   maxPrices: number;
   writeAvailable: boolean;
   writeUnavailableReason?: string;
@@ -939,6 +941,7 @@ function validateWholesaleRows(rows: WholesalePriceFormRow[], currentPrice: numb
   if (rows.length > maxRows) return `Configure no maximo ${maxRows} precos de atacado.`;
 
   const quantities = new Set<number>();
+  const parsedRows: Array<{ price: number; minQuantity: number }> = [];
   const referencePrice = typeof currentPrice === "number" && Number.isFinite(currentPrice) ? currentPrice : null;
 
   for (const [index, row] of rows.entries()) {
@@ -956,6 +959,14 @@ function validateWholesaleRows(rows: WholesalePriceFormRow[], currentPrice: numb
     }
     if (quantities.has(minQuantity)) return `${rowLabel}: quantidade minima duplicada.`;
     quantities.add(minQuantity);
+    parsedRows.push({ price, minQuantity });
+  }
+
+  const sortedRows = parsedRows.sort((left, right) => left.minQuantity - right.minQuantity);
+  for (let index = 1; index < sortedRows.length; index += 1) {
+    if (sortedRows[index].price >= sortedRows[index - 1].price) {
+      return "Cada faixa maior precisa ter preco menor que a faixa anterior.";
+    }
   }
 
   return "";
@@ -2315,8 +2326,68 @@ export function MercadoLivreMarketplacePage() {
   }
 
   function saveWholesalePrices() {
-    setWholesaleError("A edicao de preco atacado ainda nao esta liberada.");
+    if (!wholesaleListing || !wholesalePayload?.writeAvailable || !wholesalePayload.externalWrite || !wholesalePayload.canEdit) {
+      setWholesaleError("A edicao de preco atacado ainda nao esta liberada.");
+      setWholesaleSuccess("");
+      return;
+    }
+
+    const validationError = validateWholesaleRows(wholesaleRows, wholesaleListing.price ?? wholesalePayload.listing.price, wholesalePayload.maxPrices || 5);
+    if (validationError) {
+      setWholesaleError(validationError);
+      setWholesaleSuccess("");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Essa acao ira atualizar os precos de atacado deste anuncio no Mercado Livre. Deseja continuar?"
+    );
+    if (!confirmed) return;
+
+    const prices = [...wholesaleRows]
+      .map((row) => ({
+        price: parseMoneyValue(row.price),
+        minQuantity: Number(row.minQuantity)
+      }))
+      .filter((row): row is { price: number; minQuantity: number } => row.price !== null && Number.isFinite(row.minQuantity))
+      .sort((left, right) => left.minQuantity - right.minQuantity);
+
+    setWholesaleSaving(true);
+    setWholesaleError("");
     setWholesaleSuccess("");
+
+    void (async () => {
+      try {
+        const response = await fetch(
+          `/api/marketplaces/mercado-livre/client/listings/${encodeURIComponent(wholesaleListing.externalId)}/wholesale-prices`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              confirmed: true,
+              prices
+            })
+          }
+        );
+        const payload = (await response.json().catch(() => null)) as unknown;
+
+        if (!response.ok || !isWholesalePricesPayload(payload)) {
+          const errorMessage =
+            payload && typeof payload === "object" && "error" in payload && typeof (payload as { error?: unknown }).error === "string"
+              ? (payload as { error: string }).error
+              : "Nao foi possivel salvar os precos de atacado.";
+          throw new Error(errorMessage);
+        }
+
+        setWholesalePayload(payload);
+        setWholesaleRows(wholesaleRowsFromPayload(payload));
+        setWholesaleSuccess(payload.message ?? "Precos de atacado atualizados com sucesso.");
+      } catch (error) {
+        setWholesaleError(error instanceof Error ? error.message : "Nao foi possivel salvar os precos de atacado.");
+      } finally {
+        setWholesaleSaving(false);
+      }
+    })();
   }
 
   function toggleSelected(id: string) {
@@ -3207,10 +3278,14 @@ export function MercadoLivreMarketplacePage() {
 
               <DetailSection title="Precos configurados">
                 <div className="overflow-hidden rounded-md border border-matrix-border">
-                  <div className="grid grid-cols-[minmax(0,1fr)_minmax(120px,0.85fr)_48px] gap-3 border-b border-matrix-border bg-matrix-panel2/55 px-3 py-2 text-xs font-semibold text-matrix-muted">
+                  <div
+                    className={`grid gap-3 border-b border-matrix-border bg-matrix-panel2/55 px-3 py-2 text-xs font-semibold text-matrix-muted ${
+                      wholesaleCanEdit ? "grid-cols-[minmax(0,1fr)_minmax(120px,0.85fr)_48px]" : "grid-cols-[minmax(0,1fr)_minmax(120px,0.85fr)]"
+                    }`}
+                  >
                     <span>Preco de Cada Unidade</span>
                     <span>Quantidade Minima de Compra</span>
-                    <span className="sr-only">Acoes</span>
+                    {wholesaleCanEdit ? <span className="sr-only">Acoes</span> : null}
                   </div>
 
                   {wholesaleRows.length ? (
@@ -3218,7 +3293,12 @@ export function MercadoLivreMarketplacePage() {
                       {[...wholesaleRows]
                         .sort((left, right) => (Number(left.minQuantity) || 0) - (Number(right.minQuantity) || 0))
                         .map((row) => (
-                          <div key={row.id} className="grid grid-cols-[minmax(0,1fr)_minmax(120px,0.85fr)_48px] gap-3">
+                          <div
+                            key={row.id}
+                            className={`grid gap-3 ${
+                              wholesaleCanEdit ? "grid-cols-[minmax(0,1fr)_minmax(120px,0.85fr)_48px]" : "grid-cols-[minmax(0,1fr)_minmax(120px,0.85fr)]"
+                            }`}
+                          >
                             <input
                               className="w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm text-matrix-fg outline-none read-only:text-matrix-muted"
                               inputMode="decimal"
@@ -3235,16 +3315,18 @@ export function MercadoLivreMarketplacePage() {
                               readOnly={!wholesaleCanEdit || wholesaleSaving}
                               value={row.minQuantity}
                             />
-                            <Button
-                              aria-label="Remover preco de atacado"
-                              className="min-h-9 justify-center px-2 py-2"
-                              disabled={!wholesaleCanEdit || wholesaleSaving}
-                              onClick={() => removeWholesaleRow(row.id)}
-                              type="button"
-                              variant="danger"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
+                            {wholesaleCanEdit ? (
+                              <Button
+                                aria-label="Remover preco de atacado"
+                                className="min-h-9 justify-center px-2 py-2"
+                                disabled={wholesaleSaving}
+                                onClick={() => removeWholesaleRow(row.id)}
+                                type="button"
+                                variant="danger"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </Button>
+                            ) : null}
                           </div>
                         ))}
                     </div>
@@ -3255,33 +3337,35 @@ export function MercadoLivreMarketplacePage() {
                   )}
                 </div>
 
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                  <Button
-                    disabled={!wholesaleCanEdit || wholesaleSaving || wholesaleRows.length >= (wholesalePayload?.maxPrices ?? 5)}
-                    onClick={addWholesaleRow}
-                    type="button"
-                    variant="secondary"
-                  >
-                    + Adicionar Preco
-                  </Button>
-                  {wholesaleValidationError && wholesaleCanEdit ? (
-                    <p className="text-sm text-red-200">{wholesaleValidationError}</p>
-                  ) : null}
-                </div>
+                {wholesaleCanEdit ? (
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                    <Button
+                      disabled={wholesaleSaving || wholesaleRows.length >= (wholesalePayload?.maxPrices ?? 5)}
+                      onClick={addWholesaleRow}
+                      type="button"
+                      variant="secondary"
+                    >
+                      + Adicionar Preco
+                    </Button>
+                    {wholesaleValidationError ? <p className="text-sm text-red-200">{wholesaleValidationError}</p> : null}
+                  </div>
+                ) : null}
               </DetailSection>
 
               <div className="flex flex-wrap justify-end gap-2 border-t border-matrix-border pt-4">
                 <Button onClick={closeWholesalePrices} type="button" variant="secondary">
                   Fechar
                 </Button>
-                <Button
-                  disabled={!wholesaleCanEdit || Boolean(wholesaleValidationError) || wholesaleSaving}
-                  onClick={saveWholesalePrices}
-                  title={wholesaleCanEdit ? "Salvar precos de atacado" : "A edicao de preco atacado ainda nao esta liberada."}
-                  type="button"
-                >
-                  {wholesaleSaving ? "Salvando..." : "Salvar"}
-                </Button>
+                {wholesaleCanEdit ? (
+                  <Button
+                    disabled={Boolean(wholesaleValidationError) || wholesaleSaving}
+                    onClick={saveWholesalePrices}
+                    title="Salvar precos de atacado"
+                    type="button"
+                  >
+                    {wholesaleSaving ? "Salvando..." : "Salvar"}
+                  </Button>
+                ) : null}
               </div>
             </div>
           </div>
