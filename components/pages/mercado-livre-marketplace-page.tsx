@@ -912,7 +912,6 @@ const TECHNICAL_ATTRIBUTE_LABELS: Record<string, string> = {
   WIDTH: "Largura"
 };
 
-const TECHNICAL_SHEET_MAIN_SECTION: TechnicalSheetAttribute["section"] = "Caracteristicas principais";
 const TECHNICAL_SHEET_HIDDEN_ATTRIBUTE_IDS = new Set(["SELLER_SKU", "SELLER_CUSTOM_FIELD"]);
 const TECHNICAL_SHEET_PART_NUMBER_IDS = new Set(["PART_NUMBER", "ITEM_PART_NUMBER", "OEM", "MPN"]);
 const TECHNICAL_SHEET_GTIN_IDS = new Set(["GTIN", "EAN", "UPC", "UNIVERSAL_PRODUCT_CODE"]);
@@ -928,31 +927,6 @@ const TECHNICAL_SHEET_DIMENSION_IDS = new Set([
   "SELLER_PACKAGE_LENGTH"
 ]);
 const TECHNICAL_SHEET_WEIGHT_IDS = new Set(["WEIGHT", "PACKAGE_WEIGHT", "SELLER_PACKAGE_WEIGHT"]);
-
-const TECHNICAL_SHEET_PRIORITY_IDS = new Map<string, number>([
-  ["BRAND", 10],
-  ["MODEL", 20],
-  ["GTIN", 40],
-  ["EAN", 41],
-  ["UPC", 42],
-  ["UNIVERSAL_PRODUCT_CODE", 43],
-  ["PART_NUMBER", 50],
-  ["OEM", 51],
-  ["MPN", 52],
-  ["ITEM_PART_NUMBER", 53],
-  ["WIDTH", 60],
-  ["HEIGHT", 61],
-  ["LENGTH", 62],
-  ["WEIGHT", 63],
-  ["PACKAGE_WIDTH", 64],
-  ["PACKAGE_HEIGHT", 65],
-  ["PACKAGE_LENGTH", 66],
-  ["PACKAGE_WEIGHT", 67],
-  ["SELLER_PACKAGE_WIDTH", 68],
-  ["SELLER_PACKAGE_HEIGHT", 69],
-  ["SELLER_PACKAGE_LENGTH", 70],
-  ["SELLER_PACKAGE_WEIGHT", 71]
-]);
 
 function looksLikeTechnicalCode(value: string | null | undefined) {
   if (!value) return false;
@@ -1002,19 +976,6 @@ function isSuspectedSkuPartNumber(attribute: TechnicalSheetAttribute, skuCandida
   if (!isPartNumberAttribute(attribute) || !attribute.currentValue) return false;
   const normalizedValue = normalizeIdentifier(attribute.currentValue);
   return skuCandidates.some((sku) => identifiersLookRelated(normalizedValue, normalizeIdentifier(sku)));
-}
-
-function shouldPrioritizePartNumberAttribute(attribute: TechnicalSheetAttribute, skuCandidates: string[]) {
-  if (!isPartNumberAttribute(attribute)) return true;
-  if (attribute.required && !attribute.currentValue) return true;
-  if (!attribute.currentValue) return false;
-  return !isSuspectedSkuPartNumber(attribute, skuCandidates);
-}
-
-function technicalSheetPriorityRank(attribute: TechnicalSheetDisplayAttribute, skuCandidates: string[] = []) {
-  if (isHiddenTechnicalSheetAttribute(attribute)) return null;
-  if (!shouldPrioritizePartNumberAttribute(attribute, skuCandidates)) return null;
-  return TECHNICAL_SHEET_PRIORITY_IDS.get(attribute.id.trim().toUpperCase()) ?? null;
 }
 
 function technicalSheetAttributeId(attribute: TechnicalSheetAttribute) {
@@ -1194,76 +1155,30 @@ function orderTechnicalSheetSections(
     suspectedSkuAttributes.length && !sectionsWithSuspectedInOutros.some((section) => section.name === "Outros")
       ? [...sectionsWithSuspectedInOutros, { name: "Outros" as const, attributes: suspectedSkuAttributes }]
       : sectionsWithSuspectedInOutros;
-  const mainSectionIndex = sectionsToOrder.findIndex((section) => section.name === TECHNICAL_SHEET_MAIN_SECTION);
-
-  if (mainSectionIndex === -1) {
-    return sectionsToOrder.map((section) => ({
-      ...section,
-      attributes: orderTechnicalSheetAttributes(section.attributes, skuCandidates)
-    }));
-  }
-
-  const priorityItems = sectionsToOrder.flatMap((section, sectionIndex) =>
-    section.attributes
-      .map((attribute, attributeIndex) => ({
-        attribute,
-        attributeIndex,
-        key: `${sectionIndex}:${attribute.id}:${attributeIndex}`,
-        rank: technicalSheetPriorityRank(attribute, skuCandidates),
-        sectionIndex
-      }))
-      .filter((item) => item.rank !== null)
-  );
-
-  if (!priorityItems.length) {
-    return sectionsToOrder.map((section) => ({
-      ...section,
-      attributes: orderTechnicalSheetAttributes(section.attributes, skuCandidates)
-    }));
-  }
-
-  const priorityKeys = new Set(priorityItems.map((item) => item.key));
-  const orderedPriorityAttributes = priorityItems
-    .sort((left, right) => {
-      const rankDiff = (left.rank ?? Number.MAX_SAFE_INTEGER) - (right.rank ?? Number.MAX_SAFE_INTEGER);
-      if (rankDiff !== 0) return rankDiff;
-      if (left.sectionIndex !== right.sectionIndex) return left.sectionIndex - right.sectionIndex;
-      return left.attributeIndex - right.attributeIndex;
-    })
-    .map((item) => item.attribute);
 
   return sectionsToOrder
-    .map((section, sectionIndex) => {
-      const nonPriorityAttributes = section.attributes.filter((attribute, attributeIndex) => {
-        return !priorityKeys.has(`${sectionIndex}:${attribute.id}:${attributeIndex}`);
-      });
-
-      if (sectionIndex === mainSectionIndex) {
-        return {
-          ...section,
-          attributes: [...orderedPriorityAttributes, ...nonPriorityAttributes]
-        };
-      }
-
-      return {
-        ...section,
-        attributes: nonPriorityAttributes
-      };
-    })
-    .filter((section) => section.name === TECHNICAL_SHEET_MAIN_SECTION || section.attributes.length > 0);
+    .map((section) => ({
+      ...section,
+      attributes: orderTechnicalSheetAttributes(section.attributes)
+    }))
+    .filter((section) => section.attributes.length > 0);
 }
 
-function orderTechnicalSheetAttributes(attributes: TechnicalSheetDisplayAttribute[], skuCandidates: string[] = []) {
+function technicalSheetAttributeSortGroup(attribute: TechnicalSheetDisplayAttribute) {
+  if (attribute.status === "filled") return 0;
+  if (technicalSheetAttributeDisplayValue(attribute)) return 1;
+  return 2;
+}
+
+function orderTechnicalSheetAttributes(attributes: TechnicalSheetDisplayAttribute[]) {
   return attributes
     .map((attribute, index) => ({
       attribute,
       index,
-      rank: technicalSheetPriorityRank(attribute, skuCandidates)
+      sortGroup: technicalSheetAttributeSortGroup(attribute)
     }))
     .sort((left, right) => {
-      const leftRank = left.rank ?? Number.MAX_SAFE_INTEGER;
-      const rightRank = right.rank ?? Number.MAX_SAFE_INTEGER;
-      if (leftRank !== rightRank) return leftRank - rightRank;
+      if (left.sortGroup !== right.sortGroup) return left.sortGroup - right.sortGroup;
       return left.index - right.index;
     })
     .map((item) => item.attribute);
@@ -2294,8 +2209,6 @@ export function MercadoLivreMarketplacePage() {
                       </div>
                     ) : null}
 
-                    <TechnicalSheetMainFields fields={technicalSheetMainFields} />
-
                     <div className="flex flex-wrap gap-2 border-b border-matrix-border pb-2">
                       <button
                         className={`rounded-md border px-3 py-2 text-sm font-semibold ${
@@ -2322,6 +2235,8 @@ export function MercadoLivreMarketplacePage() {
                         </button>
                       ) : null}
                     </div>
+
+                    <TechnicalSheetMainFields fields={technicalSheetMainFields} />
 
                     {technicalSheetTab === "attributes" ? (
                       <div className="grid gap-3">
