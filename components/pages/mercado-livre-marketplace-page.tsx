@@ -2896,11 +2896,11 @@ export function MercadoLivreMarketplacePage() {
                   {[
                     { key: "widthCm", label: "Largura (cm)" },
                     { key: "heightCm", label: "Altura (cm)" },
-                    { key: "lengthCm", label: "Profundidade / comprimento (cm)" },
+                    { key: "lengthCm", label: "Profundidade (cm)" },
                     { key: "weightGrams", label: "Peso (g)" }
                   ].map((field) => (
-                    <label key={field.key} className="text-sm text-matrix-muted">
-                      {field.label}
+                    <label key={field.key} className="flex min-h-[76px] flex-col justify-end text-sm text-matrix-muted">
+                      <span className="leading-5">{field.label}</span>
                       <input
                         className="mt-2 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none read-only:text-matrix-muted"
                         inputMode="decimal"
