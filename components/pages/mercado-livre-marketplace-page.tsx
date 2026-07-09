@@ -87,6 +87,8 @@ type MercadoLivreClientListing = {
     lengthCm: string | null;
     weightG: string | null;
     hasDimensions: boolean;
+    source?: string | null;
+    rawSummary?: string | null;
   };
   shipping: {
     mode: string | null;
@@ -330,6 +332,8 @@ type MercadoLivreDimensionsPayload = {
     lengthCm: number | null;
     weightGrams: number | null;
     hasDimensions: boolean;
+    source?: string | null;
+    rawSummary?: string | null;
     packageMode: "manufacturer" | "custom";
   };
   packaging?: {
@@ -723,6 +727,8 @@ function localDimensionsPayloadFromListing(listing: MercadoLivreClientListing): 
       lengthCm: numberFromDimensionValue(listing.dimensionInfo?.lengthCm),
       weightGrams: numberFromDimensionValue(listing.dimensionInfo?.weightG),
       hasDimensions: Boolean(listing.dimensionInfo?.hasDimensions),
+      source: listing.dimensionInfo?.source ?? "fallback.local",
+      rawSummary: listing.dimensionInfo?.rawSummary ?? listing.dimensionInfo?.raw ?? listing.dimensions ?? null,
       packageMode: "manufacturer"
     },
     packaging: {
@@ -731,6 +737,14 @@ function localDimensionsPayloadFromListing(listing: MercadoLivreClientListing): 
     },
     warning: "Dimensoes impactam frete, logistica e possiveis divergencias de cobranca."
   };
+}
+
+function dimensionsSourceLabel(source: string | null | undefined, hasDimensions: boolean | undefined) {
+  if (!hasDimensions) return "Dados carregados";
+  if (!source) return "Mercado Livre";
+  if (source.startsWith("attributes.")) return "Atributos do anuncio";
+  if (source === "fallback.local") return "Dados carregados";
+  return "Mercado Livre";
 }
 
 function dimensionsFormFromPayload(payload: MercadoLivreDimensionsPayload): DimensionsFormState {
@@ -769,7 +783,9 @@ function dimensionInfoFromPayload(payload: MercadoLivreDimensionsPayload): Merca
     heightCm: payload.dimensions.heightCm === null ? null : formatDimensionFormValue(payload.dimensions.heightCm),
     lengthCm: payload.dimensions.lengthCm === null ? null : formatDimensionFormValue(payload.dimensions.lengthCm),
     weightG: payload.dimensions.weightGrams === null ? null : formatDimensionFormValue(payload.dimensions.weightGrams),
-    hasDimensions: payload.dimensions.hasDimensions
+    hasDimensions: payload.dimensions.hasDimensions,
+    source: payload.dimensions.source ?? null,
+    rawSummary: payload.dimensions.rawSummary ?? null
   };
 }
 
@@ -2917,8 +2933,11 @@ export function MercadoLivreMarketplacePage() {
                   ))}
                 </div>
                 <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
-                  <DetailItem label="Dimensoes brutas" value={fieldValue(dimensionsPayload?.dimensions.raw)} />
-                  <DetailItem label="Fonte" value={dimensionsPayload?.dimensions.hasDimensions ? "Mercado Livre" : "Dados carregados"} />
+                  <DetailItem label="Dimensoes brutas" value={fieldValue(dimensionsPayload?.dimensions.rawSummary ?? dimensionsPayload?.dimensions.raw)} />
+                  <DetailItem
+                    label="Fonte"
+                    value={dimensionsSourceLabel(dimensionsPayload?.dimensions.source, dimensionsPayload?.dimensions.hasDimensions)}
+                  />
                   <DetailItem label="Frete" value={freightLabel(dimensionsListing)} />
                   <DetailItem label="Logistica" value={logisticsLabel(dimensionsListing)} />
                 </dl>

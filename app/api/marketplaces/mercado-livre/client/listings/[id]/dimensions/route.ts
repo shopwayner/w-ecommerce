@@ -22,14 +22,15 @@ type MercadoLivreItem = {
   category_id?: string | null;
   seller_id?: number | string | null;
   seller_custom_field?: string | null;
-  dimensions?: string | null;
-  package_dimensions?: string | null;
+  dimensions?: unknown;
+  package_dimensions?: unknown;
   shipping?: {
     mode?: string | null;
     logistic_type?: string | null;
     free_shipping?: boolean | null;
     local_pick_up?: boolean | null;
-    dimensions?: string | null;
+    dimensions?: unknown;
+    package_dimensions?: unknown;
     tags?: string[];
   } | null;
   attributes?: MercadoLivreAttribute[];
@@ -62,6 +63,8 @@ type ParsedDimensions = {
   lengthCm: number | null;
   weightGrams: number | null;
   hasDimensions: boolean;
+  source: string | null;
+  rawSummary: string | null;
 };
 
 function canManageMarketplace(role: string) {
@@ -84,44 +87,109 @@ function sanitizeItemId(value: string) {
   return normalized.toUpperCase();
 }
 
-function parseMercadoLivreDimensions(raw: string | null | undefined): ParsedDimensions {
-  const normalizedRaw = raw?.trim() || null;
+function emptyDimensions(): ParsedDimensions {
+  return {
+    raw: null,
+    widthCm: null,
+    heightCm: null,
+    lengthCm: null,
+    weightGrams: null,
+    hasDimensions: false,
+    source: null,
+    rawSummary: null
+  };
+}
+
+function dimensionsWithValues(input: {
+  raw: string | null;
+  widthCm: number | null;
+  heightCm: number | null;
+  lengthCm: number | null;
+  weightGrams: number | null;
+  source: string | null;
+}) {
+  const dimensions: ParsedDimensions = {
+    ...input,
+    hasDimensions: [input.widthCm, input.heightCm, input.lengthCm, input.weightGrams].some((value) => value !== null),
+    rawSummary: null
+  };
+  dimensions.rawSummary = dimensions.hasDimensions
+    ? [
+        dimensions.widthCm === null ? "-" : `${formatDimensionComponent(dimensions.widthCm)} cm`,
+        dimensions.heightCm === null ? "-" : `${formatDimensionComponent(dimensions.heightCm)} cm`,
+        dimensions.lengthCm === null ? "-" : `${formatDimensionComponent(dimensions.lengthCm)} cm`,
+        dimensions.weightGrams === null ? "-" : `${formatDimensionComponent(dimensions.weightGrams)} g`
+      ].join(" x ")
+    : null;
+  return dimensions;
+}
+
+function parseMercadoLivreDimensions(raw: unknown, source: string): ParsedDimensions {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const record = raw as Record<string, unknown>;
+    const width = positiveNumberOrNull(lengthToCm({ number: numberFromUnknown(record.width ?? record.widthCm ?? record.largura) ?? 0, unit: stringOrNull(record.width_unit ?? record.widthUnit ?? record.unit) }));
+    const height = positiveNumberOrNull(lengthToCm({ number: numberFromUnknown(record.height ?? record.heightCm ?? record.altura) ?? 0, unit: stringOrNull(record.height_unit ?? record.heightUnit ?? record.unit) }));
+    const length = positiveNumberOrNull(lengthToCm({ number: numberFromUnknown(record.length ?? record.lengthCm ?? record.depth ?? record.profundidade ?? record.comprimento) ?? 0, unit: stringOrNull(record.length_unit ?? record.lengthUnit ?? record.depth_unit ?? record.depthUnit ?? record.unit) }));
+    const weight = positiveNumberOrNull(weightToGrams({ number: numberFromUnknown(record.weight ?? record.weightGrams ?? record.peso) ?? 0, unit: stringOrNull(record.weight_unit ?? record.weightUnit ?? record.unit) }));
+    return dimensionsWithValues({
+      raw: null,
+      widthCm: width,
+      heightCm: height,
+      lengthCm: length,
+      weightGrams: weight,
+      source
+    });
+  }
+
+  const normalizedRaw = typeof raw === "string" || typeof raw === "number" ? String(raw).trim() : null;
   if (!normalizedRaw) {
     return {
-      raw: null,
-      widthCm: null,
-      heightCm: null,
-      lengthCm: null,
-      weightGrams: null,
-      hasDimensions: false
+      ...emptyDimensions(),
+      source
     };
   }
 
-  const match = normalizedRaw.match(/^([\d.,]+)x([\d.,]+)x([\d.,]+),([\d.,]+)$/i);
-  if (!match) {
+  const parts = normalizedRaw.split(/\s*x\s*/i);
+  if (parts.length < 3) {
     return {
       raw: normalizedRaw,
       widthCm: null,
       heightCm: null,
       lengthCm: null,
       weightGrams: null,
-      hasDimensions: true
+      hasDimensions: false,
+      source,
+      rawSummary: normalizedRaw
     };
   }
 
-  const heightCm = positiveNumberOrNull(Number(match[1].replace(",", ".")));
-  const widthCm = positiveNumberOrNull(Number(match[2].replace(",", ".")));
-  const lengthCm = positiveNumberOrNull(Number(match[3].replace(",", ".")));
-  const weightGrams = positiveNumberOrNull(Number(match[4].replace(",", ".")));
+  const thirdPart = parts.slice(2).join("x").trim();
+  const commaWeightMatch = thirdPart.match(/^(\d+(?:\.\d+)?)\s*(mm|cm|m)?\s*,\s*(\d+(?:[,.]\d+)?)\s*(kg|g|gr|gramas?)?\s*$/i);
+  const whitespaceWeightMatch = thirdPart.match(/^(\d+(?:[,.]\d+)?)\s*(mm|cm|m)?\s+(\d+(?:[,.]\d+)?)\s*(kg|g|gr|gramas?)\s*$/i);
+  const lengthPart = commaWeightMatch
+    ? `${commaWeightMatch[1]} ${commaWeightMatch[2] ?? "cm"}`
+    : whitespaceWeightMatch
+      ? `${whitespaceWeightMatch[1]} ${whitespaceWeightMatch[2] ?? "cm"}`
+      : thirdPart;
+  const weightPart = commaWeightMatch
+    ? `${commaWeightMatch[3]} ${commaWeightMatch[4] ?? "g"}`
+    : whitespaceWeightMatch
+      ? `${whitespaceWeightMatch[3]} ${whitespaceWeightMatch[4]}`
+      : null;
 
-  return {
+  const widthCm = parseLengthTextToCm(parts[0]);
+  const heightCm = parseLengthTextToCm(parts[1]);
+  const lengthCm = parseLengthTextToCm(lengthPart);
+  const weightGrams = parseWeightTextToGrams(weightPart);
+
+  return dimensionsWithValues({
     raw: [widthCm, heightCm, lengthCm, weightGrams].some((value) => value !== null) ? normalizedRaw : null,
     widthCm,
     heightCm,
     lengthCm,
     weightGrams,
-    hasDimensions: [widthCm, heightCm, lengthCm, weightGrams].some((value) => value !== null)
-  };
+    source
+  });
 }
 
 function normalizeAttributeText(value: unknown) {
@@ -145,13 +213,33 @@ function numberFromUnknown(value: unknown) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseLengthTextToCm(value: unknown) {
+  const match = String(value ?? "").match(/(\d+(?:[,.]\d+)?)\s*(mm|cm|m)?/i);
+  const number = positiveNumberOrNull(numberFromUnknown(match?.[1]));
+  if (number === null) return null;
+  return positiveNumberOrNull(lengthToCm({ number, unit: match?.[2] ?? "cm" }));
+}
+
+function parseWeightTextToGrams(value: unknown) {
+  const match = String(value ?? "").match(/(\d+(?:[,.]\d+)?)\s*(kg|g|gr|gramas?)?/i);
+  const number = positiveNumberOrNull(numberFromUnknown(match?.[1]));
+  if (number === null) return null;
+  const unit = normalizeLooseText(match?.[2] ?? "g");
+  return positiveNumberOrNull(unit === "kg" ? number * 1000 : number);
+}
+
+function stringOrNull(value: unknown) {
+  const parsed = String(value ?? "").trim();
+  return parsed || null;
+}
+
 function positiveNumberOrNull(value: number | null) {
   return value !== null && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function attributeNumberAndUnit(attribute: MercadoLivreAttribute) {
   const structuredNumber = numberFromUnknown(attribute.value_struct?.number);
-  if (structuredNumber !== null) {
+  if (structuredNumber !== null && structuredNumber > 0) {
     return {
       number: structuredNumber,
       unit: attribute.value_struct?.unit ?? null,
@@ -161,7 +249,7 @@ function attributeNumberAndUnit(attribute: MercadoLivreAttribute) {
 
   for (const value of attribute.values ?? []) {
     const valueNumber = numberFromUnknown(value.struct?.number);
-    if (valueNumber !== null) {
+    if (valueNumber !== null && valueNumber > 0) {
       return {
         number: valueNumber,
         unit: value.struct?.unit ?? null,
@@ -203,6 +291,8 @@ const weightAttributeIds = new Set(["PACKAGE_WEIGHT", "SELLER_PACKAGE_WEIGHT", "
 
 function dimensionKindForAttribute(attribute: MercadoLivreAttribute) {
   const id = normalizeAttributeText(attribute.id);
+  if (id === "SELLER_PACKAGE_HEIGHT") return "widthCm" as const;
+  if (id === "SELLER_PACKAGE_WIDTH") return "heightCm" as const;
   if (widthAttributeIds.has(id)) return "widthCm" as const;
   if (heightAttributeIds.has(id)) return "heightCm" as const;
   if (lengthAttributeIds.has(id)) return "lengthCm" as const;
@@ -222,15 +312,15 @@ function dimensionKindForAttribute(attribute: MercadoLivreAttribute) {
   return null;
 }
 
+function attributeDimensionPriority(attribute: MercadoLivreAttribute) {
+  const id = normalizeAttributeText(attribute.id);
+  if (id.startsWith("SELLER_PACKAGE_")) return "attributes.SELLER_PACKAGE_*";
+  if (id.startsWith("PACKAGE_")) return "attributes.PACKAGE_*";
+  return "attributes.WIDTH_HEIGHT_LENGTH";
+}
+
 function dimensionsFromAttributes(attributes: MercadoLivreAttribute[] | undefined): ParsedDimensions {
-  const parsed: ParsedDimensions = {
-    raw: null,
-    widthCm: null,
-    heightCm: null,
-    lengthCm: null,
-    weightGrams: null,
-    hasDimensions: false
-  };
+  const parsed: ParsedDimensions = emptyDimensions();
 
   for (const attribute of attributes ?? []) {
     const kind = dimensionKindForAttribute(attribute);
@@ -244,17 +334,20 @@ function dimensionsFromAttributes(attributes: MercadoLivreAttribute[] | undefine
     } else {
       parsed[kind] = positiveNumberOrNull(lengthToCm(value));
     }
+    parsed.source = parsed.source ?? attributeDimensionPriority(attribute);
   }
 
   parsed.hasDimensions = [parsed.widthCm, parsed.heightCm, parsed.lengthCm, parsed.weightGrams].some((value) => value !== null);
   if (parsed.hasDimensions) {
-    const parts = [
-      parsed.heightCm === null ? null : formatDimensionComponent(parsed.heightCm),
-      parsed.widthCm === null ? null : formatDimensionComponent(parsed.widthCm),
-      parsed.lengthCm === null ? null : formatDimensionComponent(parsed.lengthCm),
-      parsed.weightGrams === null ? null : formatDimensionComponent(parsed.weightGrams)
-    ];
-    parsed.raw = parts.every((part) => part !== null) ? `${parts[0]}x${parts[1]}x${parts[2]},${parts[3]}` : null;
+    parsed.raw = [parsed.widthCm, parsed.heightCm, parsed.lengthCm, parsed.weightGrams].every((value) => value !== null)
+      ? `${formatDimensionComponent(parsed.widthCm as number)}x${formatDimensionComponent(parsed.heightCm as number)}x${formatDimensionComponent(parsed.lengthCm as number)},${formatDimensionComponent(parsed.weightGrams as number)}`
+      : null;
+    parsed.rawSummary = [
+      parsed.widthCm === null ? "-" : `${formatDimensionComponent(parsed.widthCm)} cm`,
+      parsed.heightCm === null ? "-" : `${formatDimensionComponent(parsed.heightCm)} cm`,
+      parsed.lengthCm === null ? "-" : `${formatDimensionComponent(parsed.lengthCm)} cm`,
+      parsed.weightGrams === null ? "-" : `${formatDimensionComponent(parsed.weightGrams)} g`
+    ].join(" x ");
   }
 
   return parsed;
@@ -271,13 +364,24 @@ function mergeDimensions(primary: ParsedDimensions, fallback: ParsedDimensions):
     heightCm,
     lengthCm,
     weightGrams,
-    hasDimensions: primary.hasDimensions || fallback.hasDimensions || [widthCm, heightCm, lengthCm, weightGrams].some((value) => value !== null)
+    hasDimensions: primary.hasDimensions || fallback.hasDimensions || [widthCm, heightCm, lengthCm, weightGrams].some((value) => value !== null),
+    source: primary.hasDimensions ? primary.source : fallback.source,
+    rawSummary: primary.rawSummary ?? fallback.rawSummary
   };
 }
 
 function resolveItemDimensions(item: MercadoLivreItem): ParsedDimensions {
-  const directRaw = item.package_dimensions?.trim() || item.dimensions?.trim() || item.shipping?.dimensions?.trim() || null;
-  const directDimensions = parseMercadoLivreDimensions(directRaw);
+  const directCandidates = [
+    { value: item.shipping?.dimensions, source: "shipping.dimensions" },
+    { value: item.shipping?.package_dimensions, source: "shipping.package_dimensions" },
+    { value: item.package_dimensions, source: "package_dimensions" },
+    { value: item.dimensions, source: "dimensions" }
+  ];
+  const directDimensions = directCandidates.reduce((current, candidate) => {
+    if (current.hasDimensions) return current;
+    return parseMercadoLivreDimensions(candidate.value, candidate.source);
+  }, emptyDimensions());
+
   return mergeDimensions(directDimensions, dimensionsFromAttributes(item.attributes));
 }
 
