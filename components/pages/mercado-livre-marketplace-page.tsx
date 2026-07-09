@@ -264,9 +264,12 @@ type TechnicalSheetPayload = {
 
 type TechnicalSheetSection = TechnicalSheetPayload["sections"][number];
 type TechnicalSheetDisplayAttribute = TechnicalSheetAttribute & {
+  originalSection?: string;
+  sortIndex?: number;
   suspectedSkuValue?: boolean;
 };
-type TechnicalSheetDisplaySection = Omit<TechnicalSheetSection, "attributes"> & {
+type TechnicalSheetDisplaySection = {
+  name: string;
   attributes: TechnicalSheetDisplayAttribute[];
 };
 type TechnicalSheetMainField = {
@@ -1116,58 +1119,52 @@ function orderTechnicalSheetSections(
   skuCandidates: string[] = [],
   excludedAttributeIds: Set<string> = new Set()
 ): TechnicalSheetDisplaySection[] {
-  const visibleSections = sections
-    .map((section) => ({
-      ...section,
-      attributes: section.attributes
-        .filter((attribute) => !isHiddenTechnicalSheetAttribute(attribute) && !excludedAttributeIds.has(technicalSheetAttributeId(attribute)))
-        .map((attribute) => ({
-          ...attribute,
-          suspectedSkuValue: isSuspectedSkuPartNumber(attribute, skuCandidates)
-        }))
-    }))
-    .map((section) => {
-      const regularAttributes = section.attributes.filter((attribute) => !attribute.suspectedSkuValue);
-      const suspectedAttributes = section.attributes.filter((attribute) => attribute.suspectedSkuValue);
-      return {
-        ...section,
-        attributes: regularAttributes,
-        suspectedAttributes
-      };
-    });
+  const visibleAttributes = sections.flatMap((section, sectionIndex) =>
+    section.attributes
+      .filter((attribute) => !isHiddenTechnicalSheetAttribute(attribute) && !excludedAttributeIds.has(technicalSheetAttributeId(attribute)))
+      .map((attribute, attributeIndex) => ({
+        ...attribute,
+        originalSection: section.name,
+        sortIndex: sectionIndex * 1000 + attributeIndex,
+        suspectedSkuValue: isSuspectedSkuPartNumber(attribute, skuCandidates)
+      }))
+  );
 
-  const suspectedSkuAttributes = visibleSections.flatMap((section) => section.suspectedAttributes ?? []);
-  const sectionsWithSuspectedInOutros = visibleSections
-    .map((sectionWithSuspected) => {
-      const section = {
-        name: sectionWithSuspected.name,
-        attributes: sectionWithSuspected.attributes
-      };
-      if (section.name !== "Outros" || !suspectedSkuAttributes.length) return section;
-      return {
-        ...section,
-        attributes: [...section.attributes, ...suspectedSkuAttributes]
-      };
-    })
-    .filter((section) => section.attributes.length || section.name === "Outros");
+  const groupedAttributes = orderTechnicalSheetAttributes(visibleAttributes).reduce(
+    (groups, attribute) => {
+      const group = technicalSheetAttributeSortGroup(attribute);
+      groups[group].push(attribute);
+      return groups;
+    },
+    {
+      filled: [] as TechnicalSheetDisplayAttribute[],
+      valued: [] as TechnicalSheetDisplayAttribute[],
+      required: [] as TechnicalSheetDisplayAttribute[],
+      optional: [] as TechnicalSheetDisplayAttribute[]
+    }
+  );
 
-  const sectionsToOrder =
-    suspectedSkuAttributes.length && !sectionsWithSuspectedInOutros.some((section) => section.name === "Outros")
-      ? [...sectionsWithSuspectedInOutros, { name: "Outros" as const, attributes: suspectedSkuAttributes }]
-      : sectionsWithSuspectedInOutros;
-
-  return sectionsToOrder
-    .map((section) => ({
-      ...section,
-      attributes: orderTechnicalSheetAttributes(section.attributes)
-    }))
-    .filter((section) => section.attributes.length > 0);
+  return [
+    { name: "Atributos preenchidos", attributes: groupedAttributes.filled },
+    { name: "Atributos com valor", attributes: groupedAttributes.valued },
+    { name: "Pendentes / obrigatorios", attributes: groupedAttributes.required },
+    { name: "Opcionais", attributes: groupedAttributes.optional }
+  ].filter((section) => section.attributes.length > 0);
 }
 
-function technicalSheetAttributeSortGroup(attribute: TechnicalSheetDisplayAttribute) {
-  if (attribute.status === "filled") return 0;
-  if (technicalSheetAttributeDisplayValue(attribute)) return 1;
-  return 2;
+function technicalSheetAttributeSortGroup(attribute: TechnicalSheetDisplayAttribute): "filled" | "valued" | "required" | "optional" {
+  if (attribute.status === "filled") return "filled";
+  if (technicalSheetAttributeDisplayValue(attribute)) return "valued";
+  if (attribute.status === "missing_required" || attribute.required) return "required";
+  return "optional";
+}
+
+function technicalSheetAttributeSortRank(attribute: TechnicalSheetDisplayAttribute) {
+  const group = technicalSheetAttributeSortGroup(attribute);
+  if (group === "filled") return 0;
+  if (group === "valued") return 1;
+  if (group === "required") return 2;
+  return 3;
 }
 
 function orderTechnicalSheetAttributes(attributes: TechnicalSheetDisplayAttribute[]) {
@@ -1175,11 +1172,11 @@ function orderTechnicalSheetAttributes(attributes: TechnicalSheetDisplayAttribut
     .map((attribute, index) => ({
       attribute,
       index,
-      sortGroup: technicalSheetAttributeSortGroup(attribute)
+      sortRank: technicalSheetAttributeSortRank(attribute)
     }))
     .sort((left, right) => {
-      if (left.sortGroup !== right.sortGroup) return left.sortGroup - right.sortGroup;
-      return left.index - right.index;
+      if (left.sortRank !== right.sortRank) return left.sortRank - right.sortRank;
+      return (left.attribute.sortIndex ?? left.index) - (right.attribute.sortIndex ?? right.index);
     })
     .map((item) => item.attribute);
 }
@@ -1224,6 +1221,7 @@ function TechnicalAttributeField({ attribute }: { attribute: TechnicalSheetDispl
         {attribute.required ? <Badge tone="warning">Obrigatorio</Badge> : null}
         {attribute.allowsNotApplicable ? <Badge tone="info">N/A permitido</Badge> : null}
         {attribute.suspectedSkuValue ? <Badge tone="warning">Possivel SKU usado como numero de peca</Badge> : null}
+        {attribute.originalSection ? <Badge tone="muted">{attribute.originalSection}</Badge> : null}
         {attribute.groupName && !looksLikeTechnicalCode(attribute.groupName) ? <Badge tone="muted">{attribute.groupName}</Badge> : null}
       </div>
       {visibleAllowedValues.length ? (
