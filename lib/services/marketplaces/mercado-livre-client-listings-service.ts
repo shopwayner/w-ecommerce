@@ -44,6 +44,17 @@ type MercadoLivreAttribute = {
   name?: string;
   value_id?: string | null;
   value_name?: string | null;
+  value_struct?: {
+    number?: number | string | null;
+    unit?: string | null;
+  } | null;
+  values?: Array<{
+    name?: string | null;
+    struct?: {
+      number?: number | string | null;
+      unit?: string | null;
+    } | null;
+  }>;
 };
 
 type MercadoLivrePicture = {
@@ -61,6 +72,8 @@ type MercadoLivreShipping = {
   free_shipping?: boolean;
   local_pick_up?: boolean;
   tags?: string[];
+  dimensions?: string | null;
+  package_dimensions?: string | null;
   cost?: number | null;
   list_cost?: number | null;
   base_cost?: number | null;
@@ -216,6 +229,8 @@ export type MercadoLivreClientListing = {
     lengthCm: string | null;
     weightG: string | null;
     hasDimensions: boolean;
+    source?: string | null;
+    rawSummary?: string | null;
   };
   shipping: {
     mode: string | null;
@@ -429,25 +444,194 @@ function normalizeStatusDetail(value: MercadoLivreItemBody["status_detail"]) {
   return value?.message?.trim() || value?.description?.trim() || null;
 }
 
-function normalizeDimensions(raw: string | null | undefined): MercadoLivreClientListing["dimensionInfo"] {
+function emptyDimensionInfo(): MercadoLivreClientListing["dimensionInfo"] {
+  return {
+    raw: null,
+    heightCm: null,
+    widthCm: null,
+    lengthCm: null,
+    weightG: null,
+    hasDimensions: false,
+    source: null,
+    rawSummary: null
+  };
+}
+
+function normalizeDimensionNumber(value: unknown) {
+  const parsed =
+    typeof value === "number"
+      ? value
+      : Number(
+          String(value ?? "")
+            .replace(",", ".")
+            .match(/-?\d+(?:\.\d+)?/)?.[0] ?? NaN
+        );
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function normalizeDimensionText(value: unknown) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function normalizeDimensionAttributeId(value: unknown) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+}
+
+function dimensionLengthToCm(value: { number: number; unit: string | null }) {
+  const unit = normalizeDimensionText(value.unit);
+  if (unit === "mm" || unit.includes("milimetro")) return value.number / 10;
+  if (unit === "m" || unit.includes("metro")) return value.number * 100;
+  return value.number;
+}
+
+function dimensionWeightToGrams(value: { number: number; unit: string | null }) {
+  const unit = normalizeDimensionText(value.unit);
+  if (unit === "kg" || unit.includes("quilo")) return value.number * 1000;
+  if (unit === "mg" || unit.includes("miligrama")) return value.number / 1000;
+  return value.number;
+}
+
+function dimensionComponent(value: number | null, unit: "cm" | "g") {
+  if (value === null) return null;
+  const formatted = Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+  return `${formatted} ${unit}`;
+}
+
+function hasCompleteDimensionValues(input: Pick<MercadoLivreClientListing["dimensionInfo"], "heightCm" | "widthCm" | "lengthCm" | "weightG">) {
+  return [input.widthCm, input.heightCm, input.lengthCm, input.weightG].every((value) => normalizeDimensionNumber(value) !== null);
+}
+
+function dimensionAttributeValue(attribute: MercadoLivreAttribute) {
+  const structuredNumber = normalizeDimensionNumber(attribute.value_struct?.number);
+  if (structuredNumber !== null) {
+    return { number: structuredNumber, unit: attribute.value_struct?.unit ?? null };
+  }
+
+  for (const value of attribute.values ?? []) {
+    const valueNumber = normalizeDimensionNumber(value.struct?.number);
+    if (valueNumber !== null) {
+      return { number: valueNumber, unit: value.struct?.unit ?? null };
+    }
+  }
+
+  const raw = attribute.value_name ?? attribute.values?.find((value) => value.name)?.name ?? null;
+  const match = raw?.match(/([\d]+(?:[,.]\d+)?)\s*([A-Za-zÀ-ÿ]+)?/);
+  const rawNumber = normalizeDimensionNumber(match?.[1]);
+  return rawNumber === null ? null : { number: rawNumber, unit: match?.[2] ?? null };
+}
+
+const widthDimensionAttributeIds = new Set(["PACKAGE_WIDTH", "SELLER_PACKAGE_WIDTH", "WIDTH"]);
+const heightDimensionAttributeIds = new Set(["PACKAGE_HEIGHT", "SELLER_PACKAGE_HEIGHT", "HEIGHT"]);
+const lengthDimensionAttributeIds = new Set(["PACKAGE_LENGTH", "SELLER_PACKAGE_LENGTH", "LENGTH", "DEPTH", "PACKAGE_DEPTH", "SELLER_PACKAGE_DEPTH"]);
+const weightDimensionAttributeIds = new Set(["PACKAGE_WEIGHT", "SELLER_PACKAGE_WEIGHT", "WEIGHT"]);
+
+function dimensionKindForListingAttribute(attribute: MercadoLivreAttribute) {
+  const id = normalizeDimensionAttributeId(attribute.id);
+  if (id === "SELLER_PACKAGE_HEIGHT") return "widthCm" as const;
+  if (id === "SELLER_PACKAGE_WIDTH") return "heightCm" as const;
+  if (widthDimensionAttributeIds.has(id)) return "widthCm" as const;
+  if (heightDimensionAttributeIds.has(id)) return "heightCm" as const;
+  if (lengthDimensionAttributeIds.has(id)) return "lengthCm" as const;
+  if (weightDimensionAttributeIds.has(id)) return "weightG" as const;
+
+  const name = normalizeDimensionText(attribute.name);
+  if (name.includes("peso") && (name.includes("embalagem") || name.includes("pacote"))) return "weightG" as const;
+  if (name.includes("largura") && (name.includes("embalagem") || name.includes("pacote") || name.includes("produto"))) return "widthCm" as const;
+  if (name.includes("altura") && (name.includes("embalagem") || name.includes("pacote") || name.includes("produto"))) return "heightCm" as const;
+  if (
+    (name.includes("comprimento") || name.includes("profundidade")) &&
+    (name.includes("embalagem") || name.includes("pacote") || name.includes("produto"))
+  ) {
+    return "lengthCm" as const;
+  }
+  return null;
+}
+
+function dimensionSourceFromAttribute(attribute: MercadoLivreAttribute) {
+  const id = normalizeDimensionAttributeId(attribute.id);
+  if (id.startsWith("SELLER_PACKAGE_")) return "attributes.SELLER_PACKAGE_*";
+  if (id.startsWith("PACKAGE_")) return "attributes.PACKAGE_*";
+  return "attributes.WIDTH_HEIGHT_LENGTH";
+}
+
+function dimensionsFromListingAttributes(attributes: MercadoLivreAttribute[]): MercadoLivreClientListing["dimensionInfo"] {
+  const parsed = emptyDimensionInfo();
+
+  for (const attribute of attributes) {
+    const kind = dimensionKindForListingAttribute(attribute);
+    if (!kind || parsed[kind] !== null) continue;
+
+    const value = dimensionAttributeValue(attribute);
+    if (!value) continue;
+
+    const normalizedValue = kind === "weightG" ? normalizeDimensionNumber(dimensionWeightToGrams(value)) : normalizeDimensionNumber(dimensionLengthToCm(value));
+    if (normalizedValue === null) continue;
+
+    parsed[kind] = dimensionComponent(normalizedValue, kind === "weightG" ? "g" : "cm");
+    parsed.source = parsed.source ?? dimensionSourceFromAttribute(attribute);
+  }
+
+  parsed.hasDimensions = hasCompleteDimensionValues(parsed);
+  if (parsed.hasDimensions) {
+    const width = normalizeDimensionNumber(parsed.widthCm);
+    const height = normalizeDimensionNumber(parsed.heightCm);
+    const length = normalizeDimensionNumber(parsed.lengthCm);
+    const weight = normalizeDimensionNumber(parsed.weightG);
+    parsed.raw = `${width}x${height}x${length},${weight}`;
+    parsed.rawSummary = [parsed.widthCm, parsed.heightCm, parsed.lengthCm, parsed.weightG].join(" x ");
+  }
+
+  return parsed;
+}
+
+function normalizeDimensions(raw: string | null | undefined, source: string | null = "dimensions"): MercadoLivreClientListing["dimensionInfo"] {
   const normalizedRaw = raw?.trim() || null;
   if (!normalizedRaw) {
-    return { raw: null, heightCm: null, widthCm: null, lengthCm: null, weightG: null, hasDimensions: false };
+    return emptyDimensionInfo();
   }
 
   const match = normalizedRaw.match(/^([\d.,]+)x([\d.,]+)x([\d.,]+),([\d.,]+)$/i);
   if (!match) {
-    return { raw: normalizedRaw, heightCm: null, widthCm: null, lengthCm: null, weightG: null, hasDimensions: true };
+    return { ...emptyDimensionInfo(), raw: normalizedRaw, source };
   }
 
-  return {
+  const parsed = {
     raw: normalizedRaw,
     heightCm: `${match[1].replace(",", ".")} cm`,
     widthCm: `${match[2].replace(",", ".")} cm`,
     lengthCm: `${match[3].replace(",", ".")} cm`,
     weightG: `${match[4].replace(",", ".")} g`,
-    hasDimensions: true
+    hasDimensions: false,
+    source,
+    rawSummary: `${match[2].replace(",", ".")} cm x ${match[1].replace(",", ".")} cm x ${match[3].replace(",", ".")} cm x ${match[4].replace(",", ".")} g`
   };
+  parsed.hasDimensions = hasCompleteDimensionValues(parsed);
+  return parsed;
+}
+
+function rawDimensionCandidate(item: MercadoLivreItemBody) {
+  const candidates = [
+    { value: item.shipping?.dimensions, source: "shipping.dimensions" },
+    { value: item.shipping?.package_dimensions, source: "shipping.package_dimensions" },
+    { value: item.package_dimensions, source: "package_dimensions" },
+    { value: item.dimensions, source: "dimensions" }
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate.value === "string" && candidate.value.trim()) {
+      return { value: candidate.value.trim(), source: candidate.source };
+    }
+  }
+
+  return { value: null, source: null };
 }
 
 function normalizeFees(item: MercadoLivreItemBody, currencyId: string | null): MercadoLivreClientListing["fees"] {
@@ -488,12 +672,10 @@ function normalizeListing(item: MercadoLivreItemBody, syncedAt: Date): MercadoLi
   const updatedAt = typeof item.last_updated === "string" ? item.last_updated : typeof item.date_created === "string" ? item.date_created : null;
   const listingTypeId = typeof item.listing_type_id === "string" ? item.listing_type_id : null;
   const currencyId = typeof item.currency_id === "string" ? item.currency_id : null;
-  const rawDimensions =
-    typeof item.package_dimensions === "string" && item.package_dimensions.trim()
-      ? item.package_dimensions.trim()
-      : typeof item.dimensions === "string" && item.dimensions.trim()
-        ? item.dimensions.trim()
-        : null;
+  const rawDimensions = rawDimensionCandidate(item);
+  const directDimensionInfo = normalizeDimensions(rawDimensions.value, rawDimensions.source);
+  const attributeDimensionInfo = dimensionsFromListingAttributes(attributes);
+  const dimensionInfo = directDimensionInfo.hasDimensions ? directDimensionInfo : attributeDimensionInfo;
 
   return {
     externalId,
@@ -518,8 +700,8 @@ function normalizeListing(item: MercadoLivreItemBody, syncedAt: Date): MercadoLi
     categoryName: null,
     categoryPath: null,
     attributes: normalizeItemAttributes(item),
-    dimensions: rawDimensions,
-    dimensionInfo: normalizeDimensions(rawDimensions),
+    dimensions: dimensionInfo.raw ?? rawDimensions.value,
+    dimensionInfo,
     shipping: item.shipping
       ? {
           mode: typeof item.shipping.mode === "string" ? item.shipping.mode : null,

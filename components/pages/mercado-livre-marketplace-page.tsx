@@ -682,12 +682,12 @@ function profitMarginTaxAmountLabel(listing: MercadoLivreClientListing) {
 }
 
 function dimensionsLabel(listing: MercadoLivreClientListing) {
-  if (listing.dimensionInfo?.hasDimensions) return listing.dimensionInfo.raw || listing.dimensions || "OK";
+  if (hasCompleteListingDimensions(listing)) return listing.dimensionInfo?.rawSummary || listing.dimensionInfo?.raw || listing.dimensions || "OK";
   return "-";
 }
 
 function dimensionsChipLabel(listing: MercadoLivreClientListing) {
-  return listing.dimensionInfo?.hasDimensions ? "Dimensoes OK" : "Dimensoes pendente";
+  return hasCompleteListingDimensions(listing) ? "Dimensoes OK" : "Dimensoes pendente";
 }
 
 function numberFromDimensionValue(value: string | number | null | undefined) {
@@ -696,6 +696,39 @@ function numberFromDimensionValue(value: string | number | null | undefined) {
   if (!match) return null;
   const parsed = Number(match[0]);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hasCompleteDimensionValues(input: {
+  widthCm?: string | number | null;
+  heightCm?: string | number | null;
+  lengthCm?: string | number | null;
+  weightGrams?: string | number | null;
+  weightG?: string | number | null;
+}) {
+  const weightValue = input.weightGrams ?? input.weightG ?? null;
+  return [input.widthCm, input.heightCm, input.lengthCm, weightValue].every((value) => {
+    const parsed = numberFromDimensionValue(value);
+    return parsed !== null && parsed > 0;
+  });
+}
+
+function hasCompleteListingDimensions(listing: MercadoLivreClientListing) {
+  return hasCompleteDimensionValues({
+    widthCm: listing.dimensionInfo?.widthCm,
+    heightCm: listing.dimensionInfo?.heightCm,
+    lengthCm: listing.dimensionInfo?.lengthCm,
+    weightG: listing.dimensionInfo?.weightG
+  });
+}
+
+function hasCompleteDimensionsPayload(payload: MercadoLivreDimensionsPayload | null) {
+  if (!payload) return false;
+  return hasCompleteDimensionValues({
+    widthCm: payload.dimensions.widthCm,
+    heightCm: payload.dimensions.heightCm,
+    lengthCm: payload.dimensions.lengthCm,
+    weightGrams: payload.dimensions.weightGrams
+  });
 }
 
 function formatDimensionFormValue(value: number | string | null | undefined) {
@@ -726,7 +759,7 @@ function localDimensionsPayloadFromListing(listing: MercadoLivreClientListing): 
       heightCm: numberFromDimensionValue(listing.dimensionInfo?.heightCm),
       lengthCm: numberFromDimensionValue(listing.dimensionInfo?.lengthCm),
       weightGrams: numberFromDimensionValue(listing.dimensionInfo?.weightG),
-      hasDimensions: Boolean(listing.dimensionInfo?.hasDimensions),
+      hasDimensions: hasCompleteListingDimensions(listing),
       source: listing.dimensionInfo?.source ?? "fallback.local",
       rawSummary: listing.dimensionInfo?.rawSummary ?? listing.dimensionInfo?.raw ?? listing.dimensions ?? null,
       packageMode: "manufacturer"
@@ -783,7 +816,7 @@ function dimensionInfoFromPayload(payload: MercadoLivreDimensionsPayload): Merca
     heightCm: payload.dimensions.heightCm === null ? null : formatDimensionFormValue(payload.dimensions.heightCm),
     lengthCm: payload.dimensions.lengthCm === null ? null : formatDimensionFormValue(payload.dimensions.lengthCm),
     weightG: payload.dimensions.weightGrams === null ? null : formatDimensionFormValue(payload.dimensions.weightGrams),
-    hasDimensions: payload.dimensions.hasDimensions,
+    hasDimensions: hasCompleteDimensionsPayload(payload),
     source: payload.dimensions.source ?? null,
     rawSummary: payload.dimensions.rawSummary ?? null
   };
@@ -1966,7 +1999,7 @@ export function MercadoLivreMarketplacePage() {
       setDimensionsPayload(payload);
       setDimensionsForm(dimensionsFormFromPayload(payload));
       setDimensionsError("");
-      setDimensionsListing((current) => (current ? updateListingDimensionsFromPayload(current, payload) : current));
+      replaceListingDimensions(payload);
     } catch {
       setDimensionsPayload((current) => current ?? fallbackPayload);
       setDimensionsError("Nao foi possivel carregar dimensoes atuais. Exibindo dados carregados da listagem.");
@@ -2531,7 +2564,7 @@ export function MercadoLivreMarketplacePage() {
                         <ListingInfoChip
                           icon={Ruler}
                           label={dimensionsChipLabel(listing)}
-                          muted={!listing.dimensionInfo?.hasDimensions}
+                          muted={!hasCompleteListingDimensions(listing)}
                           onClick={canOpenDimensions ? () => void openDimensionsEditor(listing) : undefined}
                           title="Abrir dimensoes do anuncio"
                         />
