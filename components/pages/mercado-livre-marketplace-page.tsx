@@ -152,6 +152,26 @@ type ListingGalleryPicture = {
   isThumbnailFallback?: boolean;
 };
 
+type MercadoLivrePicturesPayload = {
+  externalWrite: boolean;
+  canEdit: boolean;
+  message?: string;
+  changedFields?: string[];
+  listing: {
+    externalId: string;
+    itemId: string;
+    title: string;
+    thumbnail: string | null;
+    sellerSku: string | null;
+    sku: string | null;
+    price: number | null;
+    currencyId: string | null;
+    categoryId: string | null;
+  };
+  pictures: ListingGalleryPicture[];
+  warning: string;
+};
+
 type MercadoLivreListingsPayload = {
   connected: boolean;
   account: MercadoLivreClientAccount;
@@ -365,6 +385,8 @@ const stockOptions = [
 const pageSizeOptions = [25, 50, 100];
 // Visual-only tax rate for Bling - 262 Moto until account-level fiscal config exists.
 const profitMarginTaxRate = 0.085;
+const allowedPictureUploadMimeTypes = new Set(["image/jpeg", "image/png"]);
+const maxPictureUploadBytes = 10 * 1024 * 1024;
 
 const mercadoLivreLocalReadOnlyActions = new Set([
   "technicalSheet",
@@ -798,6 +820,48 @@ function listingGalleryPictures(listing: MercadoLivreClientListing): ListingGall
   return pictures;
 }
 
+function localPicturesPayloadFromListing(listing: MercadoLivreClientListing): MercadoLivrePicturesPayload {
+  const pictures = listingGalleryPictures(listing);
+  return {
+    externalWrite: false,
+    canEdit: false,
+    listing: {
+      externalId: listing.externalId,
+      itemId: listing.itemId,
+      title: listing.title,
+      thumbnail: listing.thumbnail ?? pictures[0]?.url ?? null,
+      sellerSku: listing.sellerSku,
+      sku: listing.sku,
+      price: listing.price,
+      currencyId: listing.currencyId,
+      categoryId: listing.categoryId
+    },
+    pictures,
+    warning: "Fotos nao disponiveis nos dados carregados."
+  };
+}
+
+function validatePictureUploadFile(file: File | null) {
+  if (!file) return "Selecione uma imagem para adicionar.";
+  if (!allowedPictureUploadMimeTypes.has(file.type)) return "Formato nao suportado. Envie uma imagem JPG, JPEG ou PNG.";
+  if (file.size <= 0 || file.size > maxPictureUploadBytes) return "Imagem muito grande. Envie um arquivo de ate 10 MB.";
+  return "";
+}
+
+function pictureListingFromPayload(listing: MercadoLivreClientListing, payload: MercadoLivrePicturesPayload): MercadoLivreClientListing {
+  return {
+    ...listing,
+    thumbnail: payload.listing.thumbnail ?? payload.pictures[0]?.url ?? listing.thumbnail,
+    pictures: payload.pictures.map((picture) => ({
+      id: picture.id,
+      url: picture.url,
+      size: picture.size ?? null,
+      maxSize: picture.maxSize ?? null,
+      quality: picture.quality ?? null
+    }))
+  };
+}
+
 function technicalSheetStatusLabel(attribute: TechnicalSheetAttribute) {
   if (attribute.status === "filled") return "Preenchido";
   if (attribute.status === "missing_required") return "Faltando";
@@ -916,6 +980,12 @@ function isDimensionsPayload(value: unknown): value is MercadoLivreDimensionsPay
   if (!value || typeof value !== "object") return false;
   const payload = value as Partial<MercadoLivreDimensionsPayload>;
   return Boolean(payload.dimensions && typeof payload.dimensions === "object" && payload.listing && typeof payload.listing === "object");
+}
+
+function isPicturesPayload(value: unknown): value is MercadoLivrePicturesPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<MercadoLivrePicturesPayload>;
+  return Boolean(payload.listing && typeof payload.listing === "object" && Array.isArray(payload.pictures));
 }
 
 function ListingMetaItem({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
@@ -1426,7 +1496,15 @@ export function MercadoLivreMarketplacePage() {
   const [selectedListing, setSelectedListing] = useState<MercadoLivreClientListing | null>(null);
   const [calculatorListing, setCalculatorListing] = useState<MercadoLivreClientListing | null>(null);
   const [pictureGalleryListing, setPictureGalleryListing] = useState<MercadoLivreClientListing | null>(null);
+  const [pictureGalleryPayload, setPictureGalleryPayload] = useState<MercadoLivrePicturesPayload | null>(null);
   const [pictureGalleryIndex, setPictureGalleryIndex] = useState(0);
+  const [pictureGalleryLoading, setPictureGalleryLoading] = useState(false);
+  const [pictureGallerySaving, setPictureGallerySaving] = useState(false);
+  const [pictureGalleryDeleting, setPictureGalleryDeleting] = useState(false);
+  const [pictureGalleryError, setPictureGalleryError] = useState("");
+  const [pictureGallerySuccess, setPictureGallerySuccess] = useState("");
+  const [pictureUploadFile, setPictureUploadFile] = useState<File | null>(null);
+  const [pictureUploadPreview, setPictureUploadPreview] = useState("");
   const [dimensionsListing, setDimensionsListing] = useState<MercadoLivreClientListing | null>(null);
   const [dimensionsPayload, setDimensionsPayload] = useState<MercadoLivreDimensionsPayload | null>(null);
   const [dimensionsForm, setDimensionsForm] = useState<DimensionsFormState>({
@@ -1492,6 +1570,17 @@ export function MercadoLivreMarketplacePage() {
   useEffect(() => {
     setPictureGalleryIndex(0);
   }, [pictureGalleryListing?.externalId]);
+
+  useEffect(() => {
+    if (!pictureUploadFile) {
+      setPictureUploadPreview("");
+      return;
+    }
+
+    const previewUrl = URL.createObjectURL(pictureUploadFile);
+    setPictureUploadPreview(previewUrl);
+    return () => URL.revokeObjectURL(previewUrl);
+  }, [pictureUploadFile]);
 
   const hasClientConnection = Boolean(account?.connected && account.status === "ACTIVE");
   const normalizedQuery = normalizedSearchQuery(query);
@@ -1648,14 +1737,167 @@ export function MercadoLivreMarketplacePage() {
     setTechnicalSheetTab("attributes");
   }
 
-  function openPictureGallery(listing: MercadoLivreClientListing) {
+  function updateListingPicturesFromPayload(listing: MercadoLivreClientListing, payload: MercadoLivrePicturesPayload): MercadoLivreClientListing {
+    return pictureListingFromPayload(listing, payload);
+  }
+
+  function replaceListingPictures(payload: MercadoLivrePicturesPayload) {
+    const apply = (current: MercadoLivreListingsPayload | null): MercadoLivreListingsPayload | null => {
+      if (!current) return current;
+      return {
+        ...current,
+        listings: current.listings.map((listing) =>
+          listing.externalId === payload.listing.externalId ? updateListingPicturesFromPayload(listing, payload) : listing
+        )
+      };
+    };
+
+    setListingsPayload(apply);
+    setFilteredListingsPayload(apply);
+    setPictureGalleryListing((current) => (current ? updateListingPicturesFromPayload(current, payload) : current));
+  }
+
+  async function openPictureGallery(listing: MercadoLivreClientListing) {
+    const fallbackPayload = localPicturesPayloadFromListing(listing);
     setPictureGalleryListing(listing);
+    setPictureGalleryPayload(fallbackPayload);
     setPictureGalleryIndex(0);
+    setPictureGalleryError("");
+    setPictureGallerySuccess("");
+    setPictureUploadFile(null);
+    setPictureGalleryLoading(true);
+
+    try {
+      const response = await fetch(`/api/marketplaces/mercado-livre/client/listings/${encodeURIComponent(listing.externalId)}/pictures`, {
+        cache: "no-store"
+      });
+      const payload = (await response.json().catch(() => null)) as unknown;
+
+      if (!response.ok || !isPicturesPayload(payload)) {
+        const errorMessage =
+          payload && typeof payload === "object" && "error" in payload && typeof (payload as { error?: unknown }).error === "string"
+            ? (payload as { error: string }).error
+            : "Nao foi possivel carregar fotos atuais.";
+        throw new Error(errorMessage);
+      }
+
+      setPictureGalleryPayload(payload);
+      setPictureGalleryIndex(0);
+      setPictureGalleryError("");
+      setPictureGalleryListing((current) => (current ? updateListingPicturesFromPayload(current, payload) : current));
+    } catch {
+      setPictureGalleryPayload((current) => current ?? fallbackPayload);
+      setPictureGalleryError("Nao foi possivel carregar fotos atuais. Exibindo dados carregados da listagem.");
+    } finally {
+      setPictureGalleryLoading(false);
+    }
   }
 
   function closePictureGallery() {
     setPictureGalleryListing(null);
+    setPictureGalleryPayload(null);
     setPictureGalleryIndex(0);
+    setPictureGalleryLoading(false);
+    setPictureGallerySaving(false);
+    setPictureGalleryDeleting(false);
+    setPictureGalleryError("");
+    setPictureGallerySuccess("");
+    setPictureUploadFile(null);
+  }
+
+  async function addPictureToListing() {
+    if (!pictureGalleryListing || !pictureGalleryPayload?.externalWrite || !pictureGalleryPayload.canEdit) return;
+
+    const validationError = validatePictureUploadFile(pictureUploadFile);
+    if (validationError) {
+      setPictureGalleryError(validationError);
+      return;
+    }
+
+    const confirmed = window.confirm("Confirmar envio desta imagem para o anuncio no Mercado Livre?");
+    if (!confirmed || !pictureUploadFile) return;
+
+    setPictureGallerySaving(true);
+    setPictureGalleryError("");
+    setPictureGallerySuccess("");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", pictureUploadFile, pictureUploadFile.name || "imagem.jpg");
+      const response = await fetch(`/api/marketplaces/mercado-livre/client/listings/${encodeURIComponent(pictureGalleryListing.externalId)}/pictures`, {
+        method: "POST",
+        body: formData
+      });
+      const payload = (await response.json().catch(() => null)) as unknown;
+
+      if (!response.ok || !isPicturesPayload(payload)) {
+        const errorMessage =
+          payload && typeof payload === "object" && "error" in payload && typeof (payload as { error?: unknown }).error === "string"
+            ? (payload as { error: string }).error
+            : "Nao foi possivel adicionar imagem.";
+        throw new Error(errorMessage);
+      }
+
+      setPictureGalleryPayload(payload);
+      replaceListingPictures(payload);
+      setPictureGalleryIndex(Math.max(0, payload.pictures.length - 1));
+      setPictureUploadFile(null);
+      setPictureGallerySuccess(payload.message ?? "Imagem adicionada com sucesso.");
+    } catch (error) {
+      setPictureGalleryError(error instanceof Error ? error.message : "Nao foi possivel adicionar imagem.");
+    } finally {
+      setPictureGallerySaving(false);
+    }
+  }
+
+  async function deleteSelectedPicture() {
+    if (!pictureGalleryListing || !pictureGalleryPayload?.externalWrite || !pictureGalleryPayload.canEdit) return;
+
+    const selectedPicture = (pictureGalleryPayload.pictures[pictureGalleryIndex] ?? null) as ListingGalleryPicture | null;
+    if (!selectedPicture || selectedPicture.isThumbnailFallback || (!selectedPicture.id && !selectedPicture.url)) {
+      setPictureGalleryError("Imagem selecionada invalida.");
+      return;
+    }
+    if (pictureGalleryPayload.pictures.length <= 1) {
+      setPictureGalleryError("O anuncio precisa manter pelo menos uma imagem.");
+      return;
+    }
+
+    const confirmed = window.confirm("Confirmar remocao desta imagem do anuncio no Mercado Livre?");
+    if (!confirmed) return;
+
+    setPictureGalleryDeleting(true);
+    setPictureGalleryError("");
+    setPictureGallerySuccess("");
+
+    try {
+      const response = await fetch(`/api/marketplaces/mercado-livre/client/listings/${encodeURIComponent(pictureGalleryListing.externalId)}/pictures`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pictureId: selectedPicture.id,
+          pictureUrl: selectedPicture.url
+        })
+      });
+      const payload = (await response.json().catch(() => null)) as unknown;
+
+      if (!response.ok || !isPicturesPayload(payload)) {
+        const errorMessage =
+          payload && typeof payload === "object" && "error" in payload && typeof (payload as { error?: unknown }).error === "string"
+            ? (payload as { error: string }).error
+            : "Nao foi possivel remover imagem.";
+        throw new Error(errorMessage);
+      }
+
+      setPictureGalleryPayload(payload);
+      replaceListingPictures(payload);
+      setPictureGalleryIndex((current) => Math.min(current, Math.max(0, payload.pictures.length - 1)));
+      setPictureGallerySuccess(payload.message ?? "Imagem removida com sucesso.");
+    } catch (error) {
+      setPictureGalleryError(error instanceof Error ? error.message : "Nao foi possivel remover imagem.");
+    } finally {
+      setPictureGalleryDeleting(false);
+    }
   }
 
   function updateListingDimensionsFromPayload(listing: MercadoLivreClientListing, payload: MercadoLivreDimensionsPayload): MercadoLivreClientListing {
@@ -1869,7 +2111,10 @@ export function MercadoLivreMarketplacePage() {
     void syncListings({ offset: nextOffset, limit: pageSize });
   }
 
-  const pictureGalleryPictures = useMemo(() => (pictureGalleryListing ? listingGalleryPictures(pictureGalleryListing) : []), [pictureGalleryListing]);
+  const pictureGalleryPictures = useMemo(
+    () => pictureGalleryPayload?.pictures ?? (pictureGalleryListing ? listingGalleryPictures(pictureGalleryListing) : []),
+    [pictureGalleryListing, pictureGalleryPayload?.pictures]
+  );
   const selectedGalleryPicture = pictureGalleryPictures[pictureGalleryIndex] ?? null;
 
   useEffect(() => {
@@ -1918,6 +2163,15 @@ export function MercadoLivreMarketplacePage() {
   const canOpenDetails = canViewLocalDetails && isLocalReadOnlyAction("details");
   const dimensionsCanEdit = Boolean(dimensionsPayload?.externalWrite && dimensionsPayload.canEdit);
   const dimensionsValidationError = validateDimensionsForm(dimensionsForm);
+  const picturesCanEdit = Boolean(pictureGalleryPayload?.externalWrite && pictureGalleryPayload.canEdit);
+  const pictureUploadValidationError = validatePictureUploadFile(pictureUploadFile);
+  const selectedPictureCanBeRemoved = Boolean(
+    picturesCanEdit &&
+      selectedGalleryPicture &&
+      !selectedGalleryPicture.isThumbnailFallback &&
+      (selectedGalleryPicture.id || selectedGalleryPicture.url) &&
+      pictureGalleryPictures.length > 1
+  );
   const technicalSheetHasMeasures = technicalSheetTabHasMeasures(technicalSheetPayload);
   const technicalSheetSkuValues = useMemo(() => technicalSheetSkuCandidates(technicalSheetPayload), [technicalSheetPayload]);
   const technicalSheetMainFields = useMemo(
@@ -2729,7 +2983,7 @@ export function MercadoLivreMarketplacePage() {
             <div className="mb-4 flex items-start justify-between gap-3">
               <div>
                 <h3 className="text-xl font-bold text-matrix-fg">Fotos do Anuncio</h3>
-                <p className="mt-1 text-sm text-matrix-muted">Imagens disponiveis nos dados carregados da listagem.</p>
+                <p className="mt-1 text-sm text-matrix-muted">Galeria atual do anuncio no Mercado Livre.</p>
               </div>
               <div className="flex flex-wrap justify-end gap-2">
                 <Button aria-label="Fechar galeria de fotos" type="button" variant="ghost" onClick={closePictureGallery}>
@@ -2763,6 +3017,67 @@ export function MercadoLivreMarketplacePage() {
               </div>
             </div>
 
+            {pictureGalleryLoading ? (
+              <div className="mb-3 inline-flex items-center gap-2 rounded-md border border-matrix-gold/25 bg-matrix-gold/10 px-3 py-2 text-sm text-matrix-fg">
+                <RefreshCw className="h-4 w-4 animate-spin text-matrix-gold" />
+                Carregando fotos atuais...
+              </div>
+            ) : null}
+
+            {pictureGalleryError ? (
+              <div className="mb-3 rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                {pictureGalleryError}
+              </div>
+            ) : null}
+
+            {pictureGallerySuccess ? (
+              <div className="mb-3 rounded-md border border-green-500/25 bg-green-500/10 px-3 py-2 text-sm text-green-200">
+                {pictureGallerySuccess}
+              </div>
+            ) : null}
+
+            {!picturesCanEdit ? (
+              <div className="mb-3 rounded-md border border-matrix-border bg-matrix-panel2/45 px-3 py-2 text-sm text-matrix-muted">
+                Edicao de fotos esta bloqueada nesta fase. As imagens sao somente leitura.
+              </div>
+            ) : (
+              <div className="mb-4 grid gap-3 rounded-md border border-matrix-border bg-matrix-panel2/45 p-3 lg:grid-cols-[1fr_auto] lg:items-end">
+                <label className="block">
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-matrix-muted">Adicionar imagem</span>
+                  <input
+                    accept="image/jpeg,image/png"
+                    className="mt-2 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm text-matrix-fg file:mr-3 file:rounded-md file:border-0 file:bg-matrix-gold file:px-3 file:py-1.5 file:text-sm file:font-semibold file:text-black"
+                    disabled={pictureGallerySaving || pictureGalleryDeleting}
+                    onChange={(event) => {
+                      setPictureGalleryError("");
+                      setPictureGallerySuccess("");
+                      setPictureUploadFile(event.target.files?.[0] ?? null);
+                    }}
+                    type="file"
+                  />
+                  <span className="mt-1 block text-xs text-matrix-muted">JPG, JPEG ou PNG ate 10 MB. Nada sera enviado sem confirmacao.</span>
+                </label>
+                <div className="flex flex-wrap items-center gap-2">
+                  {pictureUploadPreview ? (
+                    <img alt="Previa da imagem selecionada" className="h-14 w-14 rounded-md border border-matrix-border bg-white object-contain" src={pictureUploadPreview} />
+                  ) : null}
+                  <Button
+                    disabled={Boolean(pictureUploadValidationError) || pictureGallerySaving || pictureGalleryDeleting}
+                    onClick={() => void addPictureToListing()}
+                    title={pictureUploadValidationError || "Adicionar imagem ao anuncio"}
+                    type="button"
+                  >
+                    {pictureGallerySaving ? "Enviando..." : "Adicionar imagem"}
+                  </Button>
+                  {pictureUploadFile ? (
+                    <Button disabled={pictureGallerySaving} onClick={() => setPictureUploadFile(null)} type="button" variant="secondary">
+                      Cancelar
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            )}
+
             {pictureGalleryPictures.length ? (
               <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_190px]">
                 <div className="rounded-md border border-matrix-border bg-matrix-panel2/45 p-3">
@@ -2771,6 +3086,20 @@ export function MercadoLivreMarketplacePage() {
                       {pictureGalleryIndex + 1} de {pictureGalleryPictures.length}
                     </span>
                     <div className="flex gap-2">
+                      {picturesCanEdit ? (
+                        <Button
+                          aria-label="Remover imagem selecionada"
+                          className="min-h-8 px-2 py-1 text-xs"
+                          disabled={!selectedPictureCanBeRemoved || pictureGalleryDeleting || pictureGallerySaving}
+                          onClick={() => void deleteSelectedPicture()}
+                          title={selectedPictureCanBeRemoved ? "Remover imagem selecionada" : "Selecione uma imagem removivel"}
+                          type="button"
+                          variant="danger"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                          {pictureGalleryDeleting ? "Removendo..." : "Remover"}
+                        </Button>
+                      ) : null}
                       <Button
                         aria-label="Imagem anterior"
                         className="min-h-8 px-2 py-1 text-xs"
@@ -2829,7 +3158,7 @@ export function MercadoLivreMarketplacePage() {
                 <div>
                   <ImageIcon className="mx-auto h-9 w-9 text-matrix-goldDark" />
                   <h4 className="mt-3 font-semibold text-matrix-fg">Fotos nao disponiveis nos dados carregados</h4>
-                  <p className="mt-2 max-w-md text-sm text-matrix-muted">Sincronize a listagem para atualizar os dados locais deste item.</p>
+                  <p className="mt-2 max-w-md text-sm text-matrix-muted">Nao encontramos imagens para exibir neste anuncio agora.</p>
                 </div>
               </div>
             )}
