@@ -1794,7 +1794,7 @@ function TechnicalSheetEditableControl({
 }) {
   const currentDraft = draft ?? initialTechnicalSheetDraftValue(attribute);
   const baseClassName =
-    "mt-1 w-full rounded-md border border-matrix-border bg-matrix-panel2 px-2.5 py-2 text-sm font-semibold text-matrix-fg outline-none transition focus:border-matrix-gold";
+    "min-h-8 w-full rounded-md border-0 bg-transparent px-0 py-1 text-sm font-semibold text-matrix-fg outline-none transition placeholder:text-matrix-muted focus:ring-0";
 
   if ((attribute.editKind === "select" || attribute.editKind === "boolean") && attribute.allowedValues.length) {
     return (
@@ -1838,6 +1838,67 @@ function TechnicalSheetEditableControl({
   );
 }
 
+function technicalSheetStatusBadgeLabel(attribute: TechnicalSheetAttribute) {
+  if (attribute.status === "not_applicable_allowed") return "N/A";
+  return technicalSheetStatusLabel(attribute);
+}
+
+function technicalSheetSectionIcon(sectionName: string) {
+  const normalized = sectionName
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+  if (normalized.includes("registro")) return ShieldCheck;
+  if (normalized.includes("legal") || normalized.includes("pendente")) return AlertTriangle;
+  if (normalized.includes("medida") || normalized.includes("dimens")) return Ruler;
+  if (normalized.includes("opcion")) return PackageSearch;
+  return Boxes;
+}
+
+function TechnicalSheetSectionBlock({ title, children }: { title: string; children: ReactNode }) {
+  const Icon = technicalSheetSectionIcon(title);
+
+  return (
+    <section className="grid gap-3">
+      <div className="flex items-center gap-2">
+        <Icon className="h-4 w-4 text-matrix-goldDark" />
+        <h4 className="text-base font-bold text-matrix-gold">{title}</h4>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function TechnicalSheetStatusLegend() {
+  return (
+    <div className="flex flex-wrap items-center gap-3 text-[11px] text-matrix-muted">
+      <span className="inline-flex items-center gap-2">
+        <Badge tone="success">Preenchido</Badge>
+        Atributo preenchido no anuncio
+      </span>
+      <span className="inline-flex items-center gap-2">
+        <Badge tone="info">N/A</Badge>
+        Nao se aplica
+      </span>
+      <span className="inline-flex items-center gap-2">
+        <Badge tone="muted">Opcional</Badge>
+        Atributo opcional
+      </span>
+    </div>
+  );
+}
+
+function TechnicalSheetInfoField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <dt className="truncate text-xs font-semibold leading-5 text-matrix-muted">{label}</dt>
+      <dd className={`mt-1 min-h-10 rounded-md border border-matrix-gold/25 bg-black/20 px-3 py-2 text-sm font-semibold text-matrix-fg shadow-inner ${value === "-" ? "text-matrix-muted" : ""}`}>
+        {value}
+      </dd>
+    </div>
+  );
+}
+
 function TechnicalAttributeField({
   attribute,
   canEdit = false,
@@ -1855,29 +1916,32 @@ function TechnicalAttributeField({
   const editing = canEdit && Boolean(attribute.editable);
 
   return (
-    <article className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel/65 p-2.5">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <h5 className="text-sm font-semibold leading-5 text-matrix-fg">
-            {displayName}
-            {attribute.required ? <span className="ml-1 text-matrix-goldDark">*</span> : null}
-          </h5>
-        </div>
-        <Badge tone={technicalSheetStatusTone(attribute)}>{technicalSheetStatusLabel(attribute)}</Badge>
+    <article className="min-w-0">
+      <div className="block min-w-0">
+        <span className="block truncate text-xs font-semibold leading-5 text-matrix-muted">
+          {displayName}
+          {attribute.required ? <span className="ml-1 text-matrix-goldDark">*</span> : null}
+        </span>
       </div>
-      <div className="mt-2 rounded-md border border-matrix-border/70 bg-matrix-panel2/55 px-2.5 py-2">
-        <p className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">{editing ? "Valor" : "Valor atual"}</p>
-        {editing ? (
-          <TechnicalSheetEditableControl attribute={attribute} draft={draft} onDraftChange={onDraftChange} />
-        ) : (
-          <p className={`mt-1 min-h-5 break-words text-sm font-semibold text-matrix-fg ${attribute.currentValue ? "" : "text-matrix-muted"}`}>
-            {technicalSheetValue(attribute)}
-          </p>
-        )}
+      <div
+        className={`mt-1 flex min-h-10 items-center gap-2 rounded-md border border-matrix-gold/25 bg-black/20 px-3 py-1.5 shadow-inner transition ${
+          editing ? "focus-within:border-matrix-gold focus-within:bg-black/30" : ""
+        }`}
+      >
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <TechnicalSheetEditableControl attribute={attribute} draft={draft} onDraftChange={onDraftChange} />
+          ) : (
+            <p className={`min-h-5 break-words text-sm font-semibold text-matrix-fg ${attribute.currentValue ? "" : "text-matrix-muted"}`}>
+              {technicalSheetValue(attribute)}
+            </p>
+          )}
+        </div>
+        <Badge tone={technicalSheetStatusTone(attribute)}>{technicalSheetStatusBadgeLabel(attribute)}</Badge>
       </div>
       <div className="mt-2 flex flex-wrap gap-1.5">
         {attribute.required ? <Badge tone="warning">Obrigatorio</Badge> : null}
-        {attribute.allowsNotApplicable ? <Badge tone="info">N/A permitido</Badge> : null}
+        {attribute.allowsNotApplicable ? <Badge tone="info">N/A</Badge> : null}
         {attribute.suspectedSkuValue ? <Badge tone="warning">Possivel SKU usado como numero de peca</Badge> : null}
         {canEdit && !attribute.editable ? <Badge tone="muted">{attribute.readOnlyReason ?? "Somente consulta"}</Badge> : null}
         {attribute.originalSection ? <Badge tone="muted">{attribute.originalSection}</Badge> : null}
@@ -1916,29 +1980,35 @@ function TechnicalSheetMainFields({
   onDraftChange?: (attribute: TechnicalSheetDisplayAttribute, draft: TechnicalSheetDraftValue) => void;
 }) {
   return (
-    <DetailSection title="Campos principais">
-      <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+    <TechnicalSheetSectionBlock title="Caracteristicas principais">
+      <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {fields.map((field) => {
           const editing = canEdit && Boolean(field.attribute?.editable);
           return (
-            <div key={field.key} className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel/65 p-2.5">
-              <div className="flex items-start justify-between gap-2">
-                <dt className="text-[11px] font-semibold uppercase tracking-[0.12em] text-matrix-muted">{field.label}</dt>
-                {field.attribute ? <Badge tone={technicalSheetStatusTone(field.attribute)}>{technicalSheetStatusLabel(field.attribute)}</Badge> : null}
+            <div key={field.key} className="min-w-0">
+              <dt className="truncate text-xs font-semibold leading-5 text-matrix-muted">{field.label}</dt>
+              <div
+                className={`mt-1 flex min-h-10 items-center gap-2 rounded-md border border-matrix-gold/25 bg-black/20 px-3 py-1.5 shadow-inner transition ${
+                  editing ? "focus-within:border-matrix-gold focus-within:bg-black/30" : ""
+                }`}
+              >
+                <div className="min-w-0 flex-1">
+                  {editing && field.attribute ? (
+                    <dd>
+                      <TechnicalSheetEditableControl
+                        attribute={field.attribute}
+                        draft={drafts[technicalSheetDraftKey(field.attribute)]}
+                        onDraftChange={onDraftChange}
+                      />
+                    </dd>
+                  ) : (
+                    <dd className={`min-h-5 break-words text-sm font-semibold text-matrix-fg ${field.value === "-" ? "text-matrix-muted" : ""}`}>
+                      {field.value}
+                    </dd>
+                  )}
+                </div>
+                {field.attribute ? <Badge tone={technicalSheetStatusTone(field.attribute)}>{technicalSheetStatusBadgeLabel(field.attribute)}</Badge> : null}
               </div>
-              {editing && field.attribute ? (
-                <dd>
-                  <TechnicalSheetEditableControl
-                    attribute={field.attribute}
-                    draft={drafts[technicalSheetDraftKey(field.attribute)]}
-                    onDraftChange={onDraftChange}
-                  />
-                </dd>
-              ) : (
-                <dd className={`mt-2 min-h-5 break-words text-sm font-semibold text-matrix-fg ${field.value === "-" ? "text-matrix-muted" : ""}`}>
-                  {field.value}
-                </dd>
-              )}
               {canEdit && field.attribute && !field.attribute.editable ? (
                 <div className="mt-2">
                   <Badge tone="muted">{field.attribute.readOnlyReason ?? "Somente consulta"}</Badge>
@@ -1948,7 +2018,7 @@ function TechnicalSheetMainFields({
           );
         })}
       </dl>
-    </DetailSection>
+    </TechnicalSheetSectionBlock>
   );
 }
 
@@ -2264,18 +2334,7 @@ export function MercadoLivreMarketplacePage() {
     setTechnicalSheetSuccess("");
   }
 
-  function resetTechnicalSheetChanges() {
-    if (!technicalSheetPayload) return;
-    const values: Record<string, TechnicalSheetDraftValue> = {};
-    for (const attribute of technicalSheetPayload.attributes) {
-      values[technicalSheetDraftKey(attribute)] = initialTechnicalSheetDraftValue(attribute);
-    }
-    setTechnicalSheetDraftValues(values);
-    setTechnicalSheetSaveError("");
-    setTechnicalSheetSuccess("");
-  }
-
-  async function saveTechnicalSheet() {
+  async function saveTechnicalSheet(closeAfterSave = false) {
     if (!technicalSheetListing || !technicalSheetPayload) return;
     const changedAttributes = technicalSheetChangedAttributes(technicalSheetPayload, technicalSheetDraftValues);
     const validationError = technicalSheetDraftValidationError(technicalSheetPayload.attributes, technicalSheetDraftValues);
@@ -2315,6 +2374,9 @@ export function MercadoLivreMarketplacePage() {
       }
       setTechnicalSheetPayload(payload);
       setTechnicalSheetSuccess(payload.message ?? "Ficha tecnica salva com sucesso.");
+      if (closeAfterSave) {
+        closeTechnicalSheet();
+      }
     } catch (error) {
       setTechnicalSheetSaveError(error instanceof Error ? error.message : "Nao foi possivel salvar a ficha tecnica.");
     } finally {
@@ -3526,39 +3588,39 @@ export function MercadoLivreMarketplacePage() {
       ) : null}
 
       {technicalSheetListing ? (
-        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-3 md:items-center">
-          <div className="max-h-[92vh] w-full max-w-6xl overflow-y-auto rounded-md border border-matrix-border bg-matrix-panel p-3 shadow-glow md:p-4">
-            <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="fixed inset-0 z-[65] flex items-end justify-center bg-black/80 p-0 sm:p-3 md:items-center">
+          <div className="max-h-[96vh] w-full max-w-7xl overflow-y-auto rounded-t-lg border border-matrix-gold/30 bg-matrix-panel p-4 shadow-glow sm:max-h-[92vh] sm:rounded-lg md:p-5">
+            <div className="mb-4 flex items-start justify-between gap-3">
               <div>
-                <h3 className="text-xl font-bold text-matrix-fg">Ficha Tecnica do Anuncio</h3>
+                <h3 className="text-xl font-bold text-matrix-fg md:text-2xl">Ficha Tecnica do Anuncio</h3>
                 <p className="mt-1 text-sm text-matrix-muted">Atributos da categoria e valores ja preenchidos no anuncio.</p>
               </div>
-              <Button type="button" variant="ghost" onClick={closeTechnicalSheet}>
+              <Button className="shrink-0" type="button" variant="ghost" onClick={closeTechnicalSheet}>
                 <X className="h-4 w-4" />
                 Fechar
               </Button>
             </div>
 
-            <div className="mb-3 rounded-md border border-matrix-gold/20 bg-matrix-panel2/45 p-2.5">
+            <div className="mb-4 rounded-lg border border-matrix-gold/30 bg-black/15 p-3 shadow-inner">
               <div className="flex flex-col gap-3 md:flex-row md:items-center">
                 {listingMainImage(technicalSheetListing) ? (
                   <img
                     alt={technicalSheetListing.title}
-                    className="h-20 w-full rounded-md border border-matrix-border bg-white object-contain md:h-24 md:w-24"
+                    className="h-24 w-full rounded-md border border-matrix-border bg-white object-contain md:w-24"
                     src={listingMainImage(technicalSheetListing) ?? undefined}
                   />
                 ) : (
-                  <div className="grid h-20 w-full place-items-center rounded-md border border-dashed border-matrix-border text-xs text-matrix-muted md:h-24 md:w-24">
+                  <div className="grid h-24 w-full place-items-center rounded-md border border-dashed border-matrix-border text-xs text-matrix-muted md:w-24">
                     <ImageIcon className="h-6 w-6" />
                   </div>
                 )}
 
                 <div className="min-w-0 flex-1">
-                  <p className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">Anuncio</p>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-matrix-goldDark">Anuncio</p>
                   <h4 className="mt-1 line-clamp-2 text-base font-bold leading-5 text-matrix-fg">
                     {technicalSheetListing.title}
                   </h4>
-                  <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-[minmax(70px,0.55fr)_minmax(120px,0.8fr)_minmax(95px,0.65fr)_minmax(220px,2fr)]">
+                  <dl className="mt-4 grid gap-3 text-xs sm:grid-cols-2 lg:grid-cols-[minmax(70px,0.55fr)_minmax(120px,0.8fr)_minmax(95px,0.65fr)_minmax(220px,2fr)]">
                     <div className="min-w-0 border-matrix-border/70 sm:border-r sm:pr-3">
                       <dt className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">SKU</dt>
                       <dd className="mt-1 truncate font-semibold text-matrix-fg">{fieldValue(technicalSheetListing.sku)}</dd>
@@ -3579,6 +3641,7 @@ export function MercadoLivreMarketplacePage() {
                     </div>
                   </dl>
                 </div>
+                <ChevronRight className="hidden h-5 w-5 shrink-0 text-matrix-muted md:block" />
               </div>
             </div>
 
@@ -3597,7 +3660,48 @@ export function MercadoLivreMarketplacePage() {
                 ) : null}
 
                 {technicalSheetPayload ? (
-                  <div className="grid gap-3">
+                  <div className="grid gap-4">
+                    <div className="flex flex-wrap gap-2 border-b border-matrix-gold/20 pb-3">
+                      <button
+                        className={`rounded-md border px-4 py-2.5 text-sm font-bold transition ${
+                          technicalSheetTab === "attributes"
+                            ? "border-matrix-gold bg-matrix-gold text-black shadow-gold"
+                            : "border-matrix-gold/20 bg-black/20 text-matrix-muted hover:border-matrix-gold/55 hover:text-matrix-fg"
+                        }`}
+                        onClick={() => setTechnicalSheetTab("attributes")}
+                        type="button"
+                      >
+                        Atributos do Anuncio
+                      </button>
+                      {technicalSheetHasMeasures ? (
+                        <button
+                          className={`rounded-md border px-4 py-2.5 text-sm font-bold transition ${
+                            technicalSheetTab === "measures"
+                              ? "border-matrix-gold bg-matrix-gold text-black shadow-gold"
+                              : "border-matrix-gold/20 bg-black/20 text-matrix-muted hover:border-matrix-gold/55 hover:text-matrix-fg"
+                          }`}
+                          onClick={() => setTechnicalSheetTab("measures")}
+                          type="button"
+                        >
+                          Tabela de Medidas
+                        </button>
+                      ) : null}
+                    </div>
+
+                    <div className="flex flex-col gap-2 rounded-md border border-matrix-gold/30 bg-matrix-goldSoft/10 px-3 py-2 text-sm text-matrix-fg md:flex-row md:items-center md:justify-between">
+                      <span className="inline-flex items-center gap-2">
+                        <CheckCircle2 className="h-4 w-4 text-matrix-goldDark" />
+                        {technicalSheetCanEdit
+                          ? "Edite os atributos liberados e salve somente apos revisar."
+                          : "A edicao da ficha tecnica ainda nao esta liberada."}
+                      </span>
+                      {technicalSheetCanEdit && technicalSheetChangedCount ? (
+                        <Badge tone="warning">
+                          {technicalSheetChangedCount} alteracao{technicalSheetChangedCount > 1 ? "es" : ""}
+                        </Badge>
+                      ) : null}
+                    </div>
+
                     {technicalSheetPayload.warnings.length ? (
                       <div className="rounded-md border border-orange-500/25 bg-orange-500/10 px-3 py-2 text-sm text-orange-200">
                         {technicalSheetPayload.warnings.map((warning) => (
@@ -3605,33 +3709,6 @@ export function MercadoLivreMarketplacePage() {
                         ))}
                       </div>
                     ) : null}
-
-                    {!technicalSheetCanEdit ? (
-                      <div className="rounded-md border border-matrix-border bg-matrix-panel2/55 px-3 py-2 text-sm text-matrix-muted">
-                        A edicao da ficha tecnica ainda nao esta liberada.
-                      </div>
-                    ) : (
-                      <div className="flex flex-col gap-2 rounded-md border border-matrix-gold/25 bg-matrix-goldSoft/15 px-3 py-2 text-sm text-matrix-fg md:flex-row md:items-center md:justify-between">
-                        <span>
-                          {technicalSheetChangedCount
-                            ? `${technicalSheetChangedCount} alteracao${technicalSheetChangedCount > 1 ? "es" : ""} pronta${technicalSheetChangedCount > 1 ? "s" : ""} para salvar.`
-                            : "Edite os atributos liberados e salve somente apos revisar."}
-                        </span>
-                        <div className="flex flex-wrap gap-2">
-                          <Button disabled={!technicalSheetChangedCount || technicalSheetSaving} onClick={resetTechnicalSheetChanges} type="button" variant="secondary">
-                            Resetar alteracoes
-                          </Button>
-                          <Button
-                            disabled={!technicalSheetChangedCount || Boolean(technicalSheetValidationError) || technicalSheetSaving}
-                            onClick={saveTechnicalSheet}
-                            title={technicalSheetValidationError || "Salvar ficha tecnica"}
-                            type="button"
-                          >
-                            {technicalSheetSaving ? "Salvando..." : "Salvar"}
-                          </Button>
-                        </div>
-                      </div>
-                    )}
 
                     {technicalSheetValidationError ? (
                       <div className="rounded-md border border-orange-500/25 bg-orange-500/10 px-3 py-2 text-sm text-orange-200">
@@ -3651,33 +3728,6 @@ export function MercadoLivreMarketplacePage() {
                       </div>
                     ) : null}
 
-                    <div className="flex flex-wrap gap-2 border-b border-matrix-border pb-2">
-                      <button
-                        className={`rounded-md border px-3 py-2 text-sm font-semibold ${
-                          technicalSheetTab === "attributes"
-                            ? "border-matrix-gold bg-matrix-gold text-black"
-                            : "border-matrix-border bg-matrix-panel2/70 text-matrix-muted"
-                        }`}
-                        onClick={() => setTechnicalSheetTab("attributes")}
-                        type="button"
-                      >
-                        Atributos do Anuncio
-                      </button>
-                      {technicalSheetHasMeasures ? (
-                        <button
-                          className={`rounded-md border px-3 py-2 text-sm font-semibold ${
-                            technicalSheetTab === "measures"
-                              ? "border-matrix-gold bg-matrix-gold text-black"
-                              : "border-matrix-border bg-matrix-panel2/70 text-matrix-muted"
-                          }`}
-                          onClick={() => setTechnicalSheetTab("measures")}
-                          type="button"
-                        >
-                          Tabela de Medidas
-                        </button>
-                      ) : null}
-                    </div>
-
                     <TechnicalSheetMainFields
                       canEdit={technicalSheetCanEdit}
                       drafts={technicalSheetDraftValues}
@@ -3689,7 +3739,7 @@ export function MercadoLivreMarketplacePage() {
                       <div className="grid gap-3">
                         {orderedTechnicalSheetSections.length ? (
                           orderedTechnicalSheetSections.map((section) => (
-                            <DetailSection key={section.name} title={section.name}>
+                            <TechnicalSheetSectionBlock key={section.name} title={section.name}>
                               <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
                                 {section.attributes.map((attribute) => (
                                   <TechnicalAttributeField
@@ -3701,7 +3751,7 @@ export function MercadoLivreMarketplacePage() {
                                   />
                                 ))}
                               </div>
-                            </DetailSection>
+                            </TechnicalSheetSectionBlock>
                           ))
                         ) : (
                           <div className="rounded-md border border-dashed border-matrix-border bg-matrix-panel2/45 px-4 py-8 text-center text-sm text-matrix-muted">
@@ -3710,13 +3760,13 @@ export function MercadoLivreMarketplacePage() {
                         )}
                       </div>
                     ) : (
-                      <DetailSection title="Tabela de Medidas">
+                      <TechnicalSheetSectionBlock title="Tabela de Medidas">
                         <dl className="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
-                          <DetailItem label="Dimensoes brutas" value={dimensionsLabel(technicalSheetPayload.listing as MercadoLivreClientListing)} />
-                          <DetailItem label="Altura" value={fieldValue(technicalSheetPayload.listing.dimensionInfo?.heightCm)} />
-                          <DetailItem label="Largura" value={fieldValue(technicalSheetPayload.listing.dimensionInfo?.widthCm)} />
-                          <DetailItem label="Comprimento" value={fieldValue(technicalSheetPayload.listing.dimensionInfo?.lengthCm)} />
-                          <DetailItem label="Peso" value={fieldValue(technicalSheetPayload.listing.dimensionInfo?.weightG)} />
+                          <TechnicalSheetInfoField label="Dimensoes brutas" value={dimensionsLabel(technicalSheetPayload.listing as MercadoLivreClientListing)} />
+                          <TechnicalSheetInfoField label="Altura" value={fieldValue(technicalSheetPayload.listing.dimensionInfo?.heightCm)} />
+                          <TechnicalSheetInfoField label="Largura" value={fieldValue(technicalSheetPayload.listing.dimensionInfo?.widthCm)} />
+                          <TechnicalSheetInfoField label="Comprimento" value={fieldValue(technicalSheetPayload.listing.dimensionInfo?.lengthCm)} />
+                          <TechnicalSheetInfoField label="Peso" value={fieldValue(technicalSheetPayload.listing.dimensionInfo?.weightG)} />
                         </dl>
                         <div className="mt-3 grid gap-2 md:grid-cols-2 lg:grid-cols-3">
                           {technicalSheetPayload.attributes
@@ -3738,8 +3788,38 @@ export function MercadoLivreMarketplacePage() {
                               />
                             ))}
                         </div>
-                      </DetailSection>
+                      </TechnicalSheetSectionBlock>
                     )}
+
+                    <div className="mt-2 flex flex-col gap-3 border-t border-matrix-gold/20 pt-4 lg:flex-row lg:items-center lg:justify-between">
+                      <TechnicalSheetStatusLegend />
+                      <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                        <Button type="button" variant="secondary" onClick={closeTechnicalSheet}>
+                          Fechar
+                        </Button>
+                        {technicalSheetCanEdit ? (
+                          <>
+                            <Button
+                              disabled={!technicalSheetChangedCount || Boolean(technicalSheetValidationError) || technicalSheetSaving}
+                              onClick={() => void saveTechnicalSheet(true)}
+                              title={technicalSheetValidationError || "Salvar e fechar ficha tecnica"}
+                              type="button"
+                              variant="secondary"
+                            >
+                              {technicalSheetSaving ? "Salvando..." : "Salvar e Fechar"}
+                            </Button>
+                            <Button
+                              disabled={!technicalSheetChangedCount || Boolean(technicalSheetValidationError) || technicalSheetSaving}
+                              onClick={() => void saveTechnicalSheet(false)}
+                              title={technicalSheetValidationError || "Salvar ficha tecnica"}
+                              type="button"
+                            >
+                              {technicalSheetSaving ? "Salvando..." : "Salvar"}
+                            </Button>
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
                   </div>
                 ) : (
                   <div className="rounded-md border border-dashed border-matrix-border bg-matrix-panel2/45 px-4 py-8 text-center text-sm text-matrix-muted">
