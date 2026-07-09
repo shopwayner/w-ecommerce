@@ -227,7 +227,13 @@ type TechnicalSheetAttribute = {
   groupId: string | null;
   groupName: string | null;
   valueType: string | null;
+  valueMaxLength?: number | null;
   currentValue: string | null;
+  currentValueId?: string | null;
+  valueStruct?: {
+    number: number | string | null;
+    unit: string | null;
+  } | null;
   status: TechnicalSheetAttributeStatus;
   filled: boolean;
   required: boolean;
@@ -237,11 +243,20 @@ type TechnicalSheetAttribute = {
     id: string | null;
     name: string;
   }>;
+  allowedUnits?: Array<{
+    id: string;
+    name: string;
+  }>;
+  editable?: boolean;
+  editKind?: "text" | "number" | "select" | "boolean" | "number_unit" | "readonly";
+  readOnlyReason?: string | null;
 };
 
 type TechnicalSheetPayload = {
-  readOnly: true;
-  externalWrite: false;
+  readOnly: boolean;
+  externalWrite: boolean;
+  writeAvailable?: boolean;
+  canEdit?: boolean;
   listing: Pick<
     MercadoLivreClientListing,
     | "externalId"
@@ -282,6 +297,13 @@ type TechnicalSheetPayload = {
     attributes: TechnicalSheetAttribute[];
   }>;
   warnings: string[];
+  message?: string;
+};
+
+type TechnicalSheetDraftValue = {
+  value: string;
+  valueId: string;
+  unit: string;
 };
 
 type TechnicalSheetSection = TechnicalSheetPayload["sections"][number];
@@ -1178,13 +1200,20 @@ function buildLocalTechnicalSheetPayload(listing: MercadoLivreClientListing): Te
       groupId: null,
       groupName: null,
       valueType: null,
+      valueMaxLength: null,
       currentValue,
+      currentValueId: null,
+      valueStruct: null,
       status: currentValue ? "filled" : "optional",
       filled: Boolean(currentValue),
       required: false,
       allowsNotApplicable: false,
       tags: [],
-      allowedValues: []
+      allowedValues: [],
+      allowedUnits: [],
+      editable: false,
+      editKind: "readonly",
+      readOnlyReason: "Atributo carregado somente dos dados da listagem."
     };
   });
 
@@ -1199,6 +1228,8 @@ function buildLocalTechnicalSheetPayload(listing: MercadoLivreClientListing): Te
   return {
     readOnly: true,
     externalWrite: false,
+    writeAvailable: false,
+    canEdit: false,
     listing: {
       externalId: listing.externalId,
       itemId: listing.itemId,
@@ -1234,7 +1265,7 @@ function buildLocalTechnicalSheetPayload(listing: MercadoLivreClientListing): Te
 function isTechnicalSheetPayload(value: unknown): value is TechnicalSheetPayload {
   if (!value || typeof value !== "object") return false;
   const payload = value as Partial<TechnicalSheetPayload>;
-  return payload.readOnly === true && payload.externalWrite === false && Array.isArray(payload.attributes) && Array.isArray(payload.sections);
+  return typeof payload.readOnly === "boolean" && typeof payload.externalWrite === "boolean" && Array.isArray(payload.attributes) && Array.isArray(payload.sections);
 }
 
 function isDimensionsPayload(value: unknown): value is MercadoLivreDimensionsPayload {
@@ -1561,7 +1592,7 @@ function buildTechnicalSheetMainFields(payload: TechnicalSheetPayload | null, li
       key: "sku",
       label: "SKU",
       value: listing?.sku ?? payload?.listing.sku ?? "-",
-      attributeIds: []
+      attributeIds: ["SKU", "SELLER_SKU", "SELLER_CUSTOM_FIELD"]
     },
     {
       key: "gtin",
@@ -1678,10 +1709,150 @@ function technicalSheetSkuCandidates(payload: TechnicalSheetPayload | null) {
   return Array.from(values);
 }
 
-function TechnicalAttributeField({ attribute }: { attribute: TechnicalSheetDisplayAttribute }) {
+function findTechnicalSheetAllowedValue(attribute: TechnicalSheetAttribute, valueId: string, value: string) {
+  return (
+    attribute.allowedValues.find((allowed) => valueId && allowed.id === valueId) ??
+    attribute.allowedValues.find((allowed) => value && allowed.name.toLowerCase() === value.toLowerCase()) ??
+    null
+  );
+}
+
+function initialTechnicalSheetDraftValue(attribute: TechnicalSheetAttribute): TechnicalSheetDraftValue {
+  const currentValue = technicalSheetAttributeDisplayValue(attribute) ?? "";
+  const matchedAllowedValue = findTechnicalSheetAllowedValue(attribute, attribute.currentValueId ?? "", currentValue);
+  return {
+    value: matchedAllowedValue?.name ?? currentValue,
+    valueId: matchedAllowedValue?.id ?? attribute.currentValueId ?? "",
+    unit: attribute.valueStruct?.unit ?? ""
+  };
+}
+
+function technicalSheetDraftKey(attribute: Pick<TechnicalSheetAttribute, "id">) {
+  return attribute.id.toUpperCase();
+}
+
+function technicalSheetDraftDisplayValue(attribute: TechnicalSheetAttribute, draft: TechnicalSheetDraftValue | undefined) {
+  if (!draft) return technicalSheetAttributeDisplayValue(attribute) ?? "";
+  if (attribute.editKind === "select" || attribute.editKind === "boolean") {
+    return findTechnicalSheetAllowedValue(attribute, draft.valueId, draft.value)?.name ?? draft.value;
+  }
+  return draft.value.trim();
+}
+
+function technicalSheetDraftChanged(attribute: TechnicalSheetAttribute, draft: TechnicalSheetDraftValue | undefined) {
+  if (!attribute.editable || !draft) return false;
+  return technicalSheetDraftDisplayValue(attribute, draft) !== (technicalSheetAttributeDisplayValue(attribute) ?? "");
+}
+
+function technicalSheetDraftValidationError(attributes: TechnicalSheetAttribute[], drafts: Record<string, TechnicalSheetDraftValue>) {
+  for (const attribute of attributes) {
+    if (!attribute.editable) continue;
+    const draft = drafts[technicalSheetDraftKey(attribute)];
+    if (!draft || !technicalSheetDraftChanged(attribute, draft)) continue;
+
+    const value = technicalSheetDraftDisplayValue(attribute, draft);
+    if (attribute.required && !value) return `Informe ${friendlyAttributeName(attribute)} antes de salvar.`;
+    if ((attribute.editKind === "select" || attribute.editKind === "boolean") && value && !findTechnicalSheetAllowedValue(attribute, draft.valueId, draft.value)) {
+      return `Revise ${friendlyAttributeName(attribute)} antes de salvar.`;
+    }
+    if (attribute.editKind === "number" && value && !/^-?\d+([.,]\d+)?$/.test(value)) {
+      return `Informe um numero valido para ${friendlyAttributeName(attribute)}.`;
+    }
+    if (attribute.editKind === "number_unit" && value && !/^-?\d+([.,]\d+)?\s*\S+/.test(value)) {
+      return `Informe valor e unidade para ${friendlyAttributeName(attribute)}.`;
+    }
+    if (attribute.valueMaxLength && value.length > attribute.valueMaxLength) {
+      return `${friendlyAttributeName(attribute)} ultrapassa o tamanho permitido.`;
+    }
+  }
+  return "";
+}
+
+function technicalSheetChangedAttributes(payload: TechnicalSheetPayload | null, drafts: Record<string, TechnicalSheetDraftValue>) {
+  if (!payload) return [];
+  return payload.attributes
+    .filter((attribute) => technicalSheetDraftChanged(attribute, drafts[technicalSheetDraftKey(attribute)]))
+    .map((attribute) => {
+      const draft = drafts[technicalSheetDraftKey(attribute)];
+      return {
+        id: attribute.id,
+        value: draft.value,
+        valueId: draft.valueId || null,
+        unit: draft.unit || null
+      };
+    });
+}
+
+function TechnicalSheetEditableControl({
+  attribute,
+  draft,
+  onDraftChange
+}: {
+  attribute: TechnicalSheetDisplayAttribute;
+  draft: TechnicalSheetDraftValue | undefined;
+  onDraftChange?: (attribute: TechnicalSheetDisplayAttribute, draft: TechnicalSheetDraftValue) => void;
+}) {
+  const currentDraft = draft ?? initialTechnicalSheetDraftValue(attribute);
+  const baseClassName =
+    "mt-1 w-full rounded-md border border-matrix-border bg-matrix-panel2 px-2.5 py-2 text-sm font-semibold text-matrix-fg outline-none transition focus:border-matrix-gold";
+
+  if ((attribute.editKind === "select" || attribute.editKind === "boolean") && attribute.allowedValues.length) {
+    return (
+      <select
+        className={baseClassName}
+        onChange={(event) => {
+          const selected = attribute.allowedValues.find((value) => (value.id ?? value.name) === event.target.value);
+          onDraftChange?.(attribute, {
+            value: selected?.name ?? "",
+            valueId: selected?.id ?? "",
+            unit: currentDraft.unit
+          });
+        }}
+        value={currentDraft.valueId || findTechnicalSheetAllowedValue(attribute, "", currentDraft.value)?.id || currentDraft.value}
+      >
+        <option value="">Selecionar</option>
+        {attribute.allowedValues.map((value) => (
+          <option key={`${attribute.id}-${value.id ?? value.name}`} value={value.id ?? value.name}>
+            {value.name}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
+  return (
+    <input
+      className={baseClassName}
+      maxLength={attribute.valueMaxLength ?? undefined}
+      onChange={(event) =>
+        onDraftChange?.(attribute, {
+          value: event.target.value,
+          valueId: currentDraft.valueId,
+          unit: currentDraft.unit
+        })
+      }
+      placeholder={attribute.editKind === "number_unit" && attribute.allowedUnits?.length ? `Ex.: 10 ${attribute.allowedUnits[0]?.name}` : undefined}
+      type={attribute.editKind === "number" ? "number" : "text"}
+      value={currentDraft.value}
+    />
+  );
+}
+
+function TechnicalAttributeField({
+  attribute,
+  canEdit = false,
+  draft,
+  onDraftChange
+}: {
+  attribute: TechnicalSheetDisplayAttribute;
+  canEdit?: boolean;
+  draft?: TechnicalSheetDraftValue;
+  onDraftChange?: (attribute: TechnicalSheetDisplayAttribute, draft: TechnicalSheetDraftValue) => void;
+}) {
   const visibleAllowedValues = attribute.allowedValues.slice(0, 4);
   const hiddenAllowedValues = Math.max(0, attribute.allowedValues.length - visibleAllowedValues.length);
   const displayName = friendlyAttributeName(attribute);
+  const editing = canEdit && Boolean(attribute.editable);
 
   return (
     <article className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel/65 p-2.5">
@@ -1695,15 +1866,20 @@ function TechnicalAttributeField({ attribute }: { attribute: TechnicalSheetDispl
         <Badge tone={technicalSheetStatusTone(attribute)}>{technicalSheetStatusLabel(attribute)}</Badge>
       </div>
       <div className="mt-2 rounded-md border border-matrix-border/70 bg-matrix-panel2/55 px-2.5 py-2">
-        <p className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">Valor atual</p>
-        <p className={`mt-1 min-h-5 break-words text-sm font-semibold text-matrix-fg ${attribute.currentValue ? "" : "text-matrix-muted"}`}>
-          {technicalSheetValue(attribute)}
-        </p>
+        <p className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">{editing ? "Valor" : "Valor atual"}</p>
+        {editing ? (
+          <TechnicalSheetEditableControl attribute={attribute} draft={draft} onDraftChange={onDraftChange} />
+        ) : (
+          <p className={`mt-1 min-h-5 break-words text-sm font-semibold text-matrix-fg ${attribute.currentValue ? "" : "text-matrix-muted"}`}>
+            {technicalSheetValue(attribute)}
+          </p>
+        )}
       </div>
       <div className="mt-2 flex flex-wrap gap-1.5">
         {attribute.required ? <Badge tone="warning">Obrigatorio</Badge> : null}
         {attribute.allowsNotApplicable ? <Badge tone="info">N/A permitido</Badge> : null}
         {attribute.suspectedSkuValue ? <Badge tone="warning">Possivel SKU usado como numero de peca</Badge> : null}
+        {canEdit && !attribute.editable ? <Badge tone="muted">{attribute.readOnlyReason ?? "Somente consulta"}</Badge> : null}
         {attribute.originalSection ? <Badge tone="muted">{attribute.originalSection}</Badge> : null}
         {attribute.groupName && !looksLikeTechnicalCode(attribute.groupName) ? <Badge tone="muted">{attribute.groupName}</Badge> : null}
       </div>
@@ -1728,21 +1904,49 @@ function TechnicalAttributeField({ attribute }: { attribute: TechnicalSheetDispl
   );
 }
 
-function TechnicalSheetMainFields({ fields }: { fields: TechnicalSheetMainField[] }) {
+function TechnicalSheetMainFields({
+  fields,
+  canEdit = false,
+  drafts,
+  onDraftChange
+}: {
+  fields: TechnicalSheetMainField[];
+  canEdit?: boolean;
+  drafts: Record<string, TechnicalSheetDraftValue>;
+  onDraftChange?: (attribute: TechnicalSheetDisplayAttribute, draft: TechnicalSheetDraftValue) => void;
+}) {
   return (
     <DetailSection title="Campos principais">
       <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-        {fields.map((field) => (
-          <div key={field.key} className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel/65 p-2.5">
-            <div className="flex items-start justify-between gap-2">
-              <dt className="text-[11px] font-semibold uppercase tracking-[0.12em] text-matrix-muted">{field.label}</dt>
-              {field.attribute ? <Badge tone={technicalSheetStatusTone(field.attribute)}>{technicalSheetStatusLabel(field.attribute)}</Badge> : null}
+        {fields.map((field) => {
+          const editing = canEdit && Boolean(field.attribute?.editable);
+          return (
+            <div key={field.key} className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel/65 p-2.5">
+              <div className="flex items-start justify-between gap-2">
+                <dt className="text-[11px] font-semibold uppercase tracking-[0.12em] text-matrix-muted">{field.label}</dt>
+                {field.attribute ? <Badge tone={technicalSheetStatusTone(field.attribute)}>{technicalSheetStatusLabel(field.attribute)}</Badge> : null}
+              </div>
+              {editing && field.attribute ? (
+                <dd>
+                  <TechnicalSheetEditableControl
+                    attribute={field.attribute}
+                    draft={drafts[technicalSheetDraftKey(field.attribute)]}
+                    onDraftChange={onDraftChange}
+                  />
+                </dd>
+              ) : (
+                <dd className={`mt-2 min-h-5 break-words text-sm font-semibold text-matrix-fg ${field.value === "-" ? "text-matrix-muted" : ""}`}>
+                  {field.value}
+                </dd>
+              )}
+              {canEdit && field.attribute && !field.attribute.editable ? (
+                <div className="mt-2">
+                  <Badge tone="muted">{field.attribute.readOnlyReason ?? "Somente consulta"}</Badge>
+                </div>
+              ) : null}
             </div>
-            <dd className={`mt-2 min-h-5 break-words text-sm font-semibold text-matrix-fg ${field.value === "-" ? "text-matrix-muted" : ""}`}>
-              {field.value}
-            </dd>
-          </div>
-        ))}
+          );
+        })}
       </dl>
     </DetailSection>
   );
@@ -1810,6 +2014,10 @@ export function MercadoLivreMarketplacePage() {
   const [technicalSheetError, setTechnicalSheetError] = useState("");
   const [technicalSheetLoading, setTechnicalSheetLoading] = useState(false);
   const [technicalSheetTab, setTechnicalSheetTab] = useState<"attributes" | "measures">("attributes");
+  const [technicalSheetDraftValues, setTechnicalSheetDraftValues] = useState<Record<string, TechnicalSheetDraftValue>>({});
+  const [technicalSheetSaving, setTechnicalSheetSaving] = useState(false);
+  const [technicalSheetSaveError, setTechnicalSheetSaveError] = useState("");
+  const [technicalSheetSuccess, setTechnicalSheetSuccess] = useState("");
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
 
   useEffect(() => {
@@ -1868,6 +2076,21 @@ export function MercadoLivreMarketplacePage() {
     setPictureUploadPreview(previewUrl);
     return () => URL.revokeObjectURL(previewUrl);
   }, [pictureUploadFile]);
+
+  useEffect(() => {
+    if (!technicalSheetPayload) {
+      setTechnicalSheetDraftValues({});
+      return;
+    }
+
+    const values: Record<string, TechnicalSheetDraftValue> = {};
+    for (const attribute of technicalSheetPayload.attributes) {
+      values[technicalSheetDraftKey(attribute)] = initialTechnicalSheetDraftValue(attribute);
+    }
+    setTechnicalSheetDraftValues(values);
+    setTechnicalSheetSaveError("");
+    setTechnicalSheetSuccess("");
+  }, [technicalSheetPayload]);
 
   const hasClientConnection = Boolean(account?.connected && account.status === "ACTIVE");
   const normalizedQuery = normalizedSearchQuery(query);
@@ -1989,6 +2212,9 @@ export function MercadoLivreMarketplacePage() {
     setTechnicalSheetListing(listing);
     setTechnicalSheetPayload(localPayload);
     setTechnicalSheetError("");
+    setTechnicalSheetSaveError("");
+    setTechnicalSheetSuccess("");
+    setTechnicalSheetSaving(false);
     setTechnicalSheetLoading(true);
     setTechnicalSheetTab("attributes");
 
@@ -2008,6 +2234,7 @@ export function MercadoLivreMarketplacePage() {
 
       setTechnicalSheetPayload(payload);
       setTechnicalSheetError("");
+      setTechnicalSheetSuccess(payload.message ?? "");
     } catch {
       setTechnicalSheetPayload((current) => current ?? localPayload);
       setTechnicalSheetError("Nao foi possivel carregar a ficha tecnica completa. Exibindo dados carregados da listagem.");
@@ -2022,6 +2249,77 @@ export function MercadoLivreMarketplacePage() {
     setTechnicalSheetError("");
     setTechnicalSheetLoading(false);
     setTechnicalSheetTab("attributes");
+    setTechnicalSheetDraftValues({});
+    setTechnicalSheetSaving(false);
+    setTechnicalSheetSaveError("");
+    setTechnicalSheetSuccess("");
+  }
+
+  function updateTechnicalSheetDraft(attribute: TechnicalSheetDisplayAttribute, draft: TechnicalSheetDraftValue) {
+    setTechnicalSheetDraftValues((current) => ({
+      ...current,
+      [technicalSheetDraftKey(attribute)]: draft
+    }));
+    setTechnicalSheetSaveError("");
+    setTechnicalSheetSuccess("");
+  }
+
+  function resetTechnicalSheetChanges() {
+    if (!technicalSheetPayload) return;
+    const values: Record<string, TechnicalSheetDraftValue> = {};
+    for (const attribute of technicalSheetPayload.attributes) {
+      values[technicalSheetDraftKey(attribute)] = initialTechnicalSheetDraftValue(attribute);
+    }
+    setTechnicalSheetDraftValues(values);
+    setTechnicalSheetSaveError("");
+    setTechnicalSheetSuccess("");
+  }
+
+  async function saveTechnicalSheet() {
+    if (!technicalSheetListing || !technicalSheetPayload) return;
+    const changedAttributes = technicalSheetChangedAttributes(technicalSheetPayload, technicalSheetDraftValues);
+    const validationError = technicalSheetDraftValidationError(technicalSheetPayload.attributes, technicalSheetDraftValues);
+    if (validationError) {
+      setTechnicalSheetSaveError(validationError);
+      return;
+    }
+    if (!changedAttributes.length) {
+      setTechnicalSheetSaveError("Nenhuma alteracao para salvar.");
+      return;
+    }
+
+    const confirmed = window.confirm("Essa acao ira atualizar a ficha tecnica deste anuncio no Mercado Livre. Deseja continuar?");
+    if (!confirmed) return;
+
+    setTechnicalSheetSaving(true);
+    setTechnicalSheetSaveError("");
+    setTechnicalSheetSuccess("");
+    try {
+      const response = await fetch(`/api/marketplaces/mercado-livre/client/listings/${encodeURIComponent(technicalSheetListing.externalId)}/technical-sheet`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          confirmed: true,
+          attributes: changedAttributes
+        })
+      });
+      const payload = (await response.json().catch(() => null)) as unknown;
+      if (!response.ok || !isTechnicalSheetPayload(payload)) {
+        const errorMessage =
+          payload && typeof payload === "object" && "error" in payload && typeof (payload as { error?: unknown }).error === "string"
+            ? (payload as { error: string }).error
+            : "Nao foi possivel salvar a ficha tecnica.";
+        throw new Error(errorMessage);
+      }
+      setTechnicalSheetPayload(payload);
+      setTechnicalSheetSuccess(payload.message ?? "Ficha tecnica salva com sucesso.");
+    } catch (error) {
+      setTechnicalSheetSaveError(error instanceof Error ? error.message : "Nao foi possivel salvar a ficha tecnica.");
+    } finally {
+      setTechnicalSheetSaving(false);
+    }
   }
 
   function updateListingPicturesFromPayload(listing: MercadoLivreClientListing, payload: MercadoLivrePicturesPayload): MercadoLivreClientListing {
@@ -2746,6 +3044,15 @@ export function MercadoLivreMarketplacePage() {
     () => orderTechnicalSheetSections(technicalSheetPayload?.sections ?? [], technicalSheetSkuValues, technicalSheetMainAttributeIds),
     [technicalSheetPayload?.sections, technicalSheetSkuValues, technicalSheetMainAttributeIds]
   );
+  const technicalSheetCanEdit = Boolean(technicalSheetPayload?.writeAvailable && technicalSheetPayload.externalWrite && technicalSheetPayload.canEdit);
+  const technicalSheetChangedCount = useMemo(
+    () => technicalSheetChangedAttributes(technicalSheetPayload, technicalSheetDraftValues).length,
+    [technicalSheetPayload, technicalSheetDraftValues]
+  );
+  const technicalSheetValidationError = useMemo(
+    () => technicalSheetDraftValidationError(technicalSheetPayload?.attributes ?? [], technicalSheetDraftValues),
+    [technicalSheetPayload?.attributes, technicalSheetDraftValues]
+  );
 
   function clearListingFilters() {
     setQuery("");
@@ -3299,6 +3606,51 @@ export function MercadoLivreMarketplacePage() {
                       </div>
                     ) : null}
 
+                    {!technicalSheetCanEdit ? (
+                      <div className="rounded-md border border-matrix-border bg-matrix-panel2/55 px-3 py-2 text-sm text-matrix-muted">
+                        A edicao da ficha tecnica ainda nao esta liberada.
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-2 rounded-md border border-matrix-gold/25 bg-matrix-goldSoft/15 px-3 py-2 text-sm text-matrix-fg md:flex-row md:items-center md:justify-between">
+                        <span>
+                          {technicalSheetChangedCount
+                            ? `${technicalSheetChangedCount} alteracao${technicalSheetChangedCount > 1 ? "es" : ""} pronta${technicalSheetChangedCount > 1 ? "s" : ""} para salvar.`
+                            : "Edite os atributos liberados e salve somente apos revisar."}
+                        </span>
+                        <div className="flex flex-wrap gap-2">
+                          <Button disabled={!technicalSheetChangedCount || technicalSheetSaving} onClick={resetTechnicalSheetChanges} type="button" variant="secondary">
+                            Resetar alteracoes
+                          </Button>
+                          <Button
+                            disabled={!technicalSheetChangedCount || Boolean(technicalSheetValidationError) || technicalSheetSaving}
+                            onClick={saveTechnicalSheet}
+                            title={technicalSheetValidationError || "Salvar ficha tecnica"}
+                            type="button"
+                          >
+                            {technicalSheetSaving ? "Salvando..." : "Salvar"}
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+
+                    {technicalSheetValidationError ? (
+                      <div className="rounded-md border border-orange-500/25 bg-orange-500/10 px-3 py-2 text-sm text-orange-200">
+                        {technicalSheetValidationError}
+                      </div>
+                    ) : null}
+
+                    {technicalSheetSaveError ? (
+                      <div className="rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                        {technicalSheetSaveError}
+                      </div>
+                    ) : null}
+
+                    {technicalSheetSuccess ? (
+                      <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
+                        {technicalSheetSuccess}
+                      </div>
+                    ) : null}
+
                     <div className="flex flex-wrap gap-2 border-b border-matrix-border pb-2">
                       <button
                         className={`rounded-md border px-3 py-2 text-sm font-semibold ${
@@ -3326,7 +3678,12 @@ export function MercadoLivreMarketplacePage() {
                       ) : null}
                     </div>
 
-                    <TechnicalSheetMainFields fields={technicalSheetMainFields} />
+                    <TechnicalSheetMainFields
+                      canEdit={technicalSheetCanEdit}
+                      drafts={technicalSheetDraftValues}
+                      fields={technicalSheetMainFields}
+                      onDraftChange={updateTechnicalSheetDraft}
+                    />
 
                     {technicalSheetTab === "attributes" ? (
                       <div className="grid gap-3">
@@ -3335,7 +3692,13 @@ export function MercadoLivreMarketplacePage() {
                             <DetailSection key={section.name} title={section.name}>
                               <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
                                 {section.attributes.map((attribute) => (
-                                  <TechnicalAttributeField key={attribute.id} attribute={attribute} />
+                                  <TechnicalAttributeField
+                                    key={attribute.id}
+                                    attribute={attribute}
+                                    canEdit={technicalSheetCanEdit}
+                                    draft={technicalSheetDraftValues[technicalSheetDraftKey(attribute)]}
+                                    onDraftChange={updateTechnicalSheetDraft}
+                                  />
                                 ))}
                               </div>
                             </DetailSection>
@@ -3366,7 +3729,13 @@ export function MercadoLivreMarketplacePage() {
                               return name.includes("medida") || name.includes("tamanho") || name.includes("altura") || name.includes("largura") || name.includes("comprimento") || name.includes("peso");
                             })
                             .map((attribute) => (
-                              <TechnicalAttributeField key={attribute.id} attribute={attribute} />
+                              <TechnicalAttributeField
+                                key={attribute.id}
+                                attribute={attribute}
+                                canEdit={technicalSheetCanEdit}
+                                draft={technicalSheetDraftValues[technicalSheetDraftKey(attribute)]}
+                                onDraftChange={updateTechnicalSheetDraft}
+                              />
                             ))}
                         </div>
                       </DetailSection>
