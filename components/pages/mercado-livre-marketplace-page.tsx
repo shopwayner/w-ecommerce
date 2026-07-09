@@ -397,6 +397,27 @@ type WholesalePriceFormRow = {
   minQuantity: string;
 };
 
+type MercadoLivreDescriptionPayload = {
+  externalWrite: boolean;
+  canEdit: boolean;
+  writeAvailable: boolean;
+  writeUnavailableReason?: string;
+  changedFields?: string[];
+  message?: string;
+  listing: {
+    externalId: string;
+    itemId: string;
+    title: string;
+    thumbnail: string | null;
+    sellerSku: string | null;
+    sku: string | null;
+    price: number | null;
+    currencyId: string | null;
+    categoryId: string | null;
+  };
+  description: string;
+};
+
 type QuickFilterValue = "all" | "active" | "paused" | "under_review" | "error" | "without_stock" | "premium" | "classico";
 
 const quickFilters: Array<{ value: QuickFilterValue; label: string }> = [
@@ -462,7 +483,8 @@ const mercadoLivreExternalWriteActions = new Set([
   "addPicture",
   "deletePicture",
   "saveDimensions",
-  "saveWholesalePrices"
+  "saveWholesalePrices",
+  "saveDescription"
 ]);
 
 const mercadoLivreTechnicalFields = new Set([
@@ -969,6 +991,46 @@ function validateWholesaleRows(rows: WholesalePriceFormRow[], currentPrice: numb
     }
   }
 
+  return "";
+}
+
+function localDescriptionPayloadFromListing(listing: MercadoLivreClientListing): MercadoLivreDescriptionPayload {
+  return {
+    externalWrite: false,
+    canEdit: false,
+    writeAvailable: false,
+    writeUnavailableReason: "A edição da descrição ainda não está liberada.",
+    listing: {
+      externalId: listing.externalId,
+      itemId: listing.itemId,
+      title: listing.title,
+      thumbnail: listingMainImage(listing),
+      sellerSku: listing.sellerSku,
+      sku: listing.sku,
+      price: listing.price,
+      currencyId: listing.currencyId,
+      categoryId: listing.categoryId
+    },
+    description: ""
+  };
+}
+
+function isDescriptionPayload(value: unknown): value is MercadoLivreDescriptionPayload {
+  if (!value || typeof value !== "object") return false;
+  const payload = value as Partial<MercadoLivreDescriptionPayload>;
+  return Boolean(
+    payload.listing &&
+      typeof payload.listing === "object" &&
+      typeof payload.description === "string" &&
+      typeof payload.externalWrite === "boolean" &&
+      typeof payload.canEdit === "boolean"
+  );
+}
+
+function validateDescriptionText(value: string) {
+  const text = value.trim();
+  if (!text) return "Informe a descrição antes de salvar.";
+  if (/<\s*script\b/i.test(value)) return "Remova conteúdo não permitido antes de salvar.";
   return "";
 }
 
@@ -1736,6 +1798,13 @@ export function MercadoLivreMarketplacePage() {
   const [wholesaleSaving, setWholesaleSaving] = useState(false);
   const [wholesaleError, setWholesaleError] = useState("");
   const [wholesaleSuccess, setWholesaleSuccess] = useState("");
+  const [descriptionListing, setDescriptionListing] = useState<MercadoLivreClientListing | null>(null);
+  const [descriptionPayload, setDescriptionPayload] = useState<MercadoLivreDescriptionPayload | null>(null);
+  const [descriptionText, setDescriptionText] = useState("");
+  const [descriptionLoading, setDescriptionLoading] = useState(false);
+  const [descriptionSaving, setDescriptionSaving] = useState(false);
+  const [descriptionError, setDescriptionError] = useState("");
+  const [descriptionSuccess, setDescriptionSuccess] = useState("");
   const [technicalSheetListing, setTechnicalSheetListing] = useState<MercadoLivreClientListing | null>(null);
   const [technicalSheetPayload, setTechnicalSheetPayload] = useState<TechnicalSheetPayload | null>(null);
   const [technicalSheetError, setTechnicalSheetError] = useState("");
@@ -2402,6 +2471,111 @@ export function MercadoLivreMarketplacePage() {
     })();
   }
 
+  async function fetchDescriptionPayload(externalId: string) {
+    const response = await fetch(`/api/marketplaces/mercado-livre/client/listings/${encodeURIComponent(externalId)}/description`, {
+      cache: "no-store"
+    });
+    const payload = (await response.json().catch(() => null)) as unknown;
+
+    if (!response.ok || !isDescriptionPayload(payload)) {
+      const errorMessage =
+        payload && typeof payload === "object" && "error" in payload && typeof (payload as { error?: unknown }).error === "string"
+          ? (payload as { error: string }).error
+          : "Não foi possível carregar a descrição. Tente novamente.";
+      throw new Error(errorMessage);
+    }
+
+    return payload;
+  }
+
+  async function openDescriptionEditor(listing: MercadoLivreClientListing) {
+    const fallbackPayload = localDescriptionPayloadFromListing(listing);
+    setDescriptionListing(listing);
+    setDescriptionPayload(fallbackPayload);
+    setDescriptionText(fallbackPayload.description);
+    setDescriptionError("");
+    setDescriptionSuccess("");
+    setDescriptionLoading(true);
+
+    try {
+      const payload = await fetchDescriptionPayload(listing.externalId);
+      setDescriptionPayload(payload);
+      setDescriptionText(payload.description);
+      setDescriptionError("");
+      setDescriptionSuccess(payload.message ?? "Descrição disponível para consulta.");
+    } catch {
+      setDescriptionPayload((current) => current ?? fallbackPayload);
+      setDescriptionText((current) => current || fallbackPayload.description);
+      setDescriptionError("Não foi possível carregar a descrição. Tente novamente.");
+    } finally {
+      setDescriptionLoading(false);
+    }
+  }
+
+  function closeDescriptionEditor() {
+    setDescriptionListing(null);
+    setDescriptionPayload(null);
+    setDescriptionText("");
+    setDescriptionLoading(false);
+    setDescriptionSaving(false);
+    setDescriptionError("");
+    setDescriptionSuccess("");
+  }
+
+  function saveDescription() {
+    if (!descriptionListing || !descriptionPayload?.writeAvailable || !descriptionPayload.externalWrite || !descriptionPayload.canEdit) {
+      setDescriptionError("A edição da descrição ainda não está liberada.");
+      setDescriptionSuccess("");
+      return;
+    }
+
+    const validationError = validateDescriptionText(descriptionText);
+    if (validationError) {
+      setDescriptionError(validationError);
+      setDescriptionSuccess("");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Essa ação irá atualizar a descrição deste anúncio no Mercado Livre. Deseja continuar?"
+    );
+    if (!confirmed) return;
+
+    setDescriptionSaving(true);
+    setDescriptionError("");
+    setDescriptionSuccess("");
+
+    void (async () => {
+      try {
+        const response = await fetch(`/api/marketplaces/mercado-livre/client/listings/${encodeURIComponent(descriptionListing.externalId)}/description`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            confirmed: true,
+            description: descriptionText
+          })
+        });
+        const payload = (await response.json().catch(() => null)) as unknown;
+
+        if (!response.ok || !isDescriptionPayload(payload)) {
+          const errorMessage =
+            payload && typeof payload === "object" && "error" in payload && typeof (payload as { error?: unknown }).error === "string"
+              ? (payload as { error: string }).error
+              : "Não foi possível salvar a descrição. Tente novamente.";
+          throw new Error(errorMessage);
+        }
+
+        setDescriptionPayload(payload);
+        setDescriptionText(payload.description);
+        setDescriptionSuccess(payload.message ?? "Descrição salva com sucesso.");
+      } catch (error) {
+        setDescriptionError(error instanceof Error ? error.message : "Não foi possível salvar a descrição. Tente novamente.");
+      } finally {
+        setDescriptionSaving(false);
+      }
+    })();
+  }
+
   function toggleSelected(id: string) {
     setSelectedIds((current) => {
       const next = new Set(current);
@@ -2550,6 +2724,8 @@ export function MercadoLivreMarketplacePage() {
     wholesalePayload?.maxPrices ?? 5
   );
   const wholesaleAvailableSimulations = wholesalePayload?.simulations.filter((simulation) => simulation.available && typeof simulation.price === "number") ?? [];
+  const descriptionCanEdit = Boolean(descriptionPayload?.writeAvailable && descriptionPayload.externalWrite && descriptionPayload.canEdit);
+  const descriptionValidationError = validateDescriptionText(descriptionText);
   const picturesCanEdit = Boolean(pictureGalleryPayload?.externalWrite && pictureGalleryPayload.canEdit);
   const pictureUploadValidationError = validatePictureUploadFile(pictureUploadFile);
   const selectedPictureCanBeRemoved = Boolean(
@@ -2898,7 +3074,7 @@ export function MercadoLivreMarketplacePage() {
                       </dl>
                       <div className="mt-3 flex flex-wrap gap-2">
                         <ListingInfoChip icon={SlidersHorizontal} label="F. Tecnica" muted={!listing.categoryId} onClick={canOpenTechnicalSheet ? () => void openTechnicalSheet(listing) : undefined} title="Abrir ficha tecnica" />
-                        <ListingInfoChip icon={FileText} label="Descricao" onClick={canOpenDescription ? () => setSelectedListing(listing) : undefined} title="Abrir detalhes do anuncio" />
+                        <ListingInfoChip icon={FileText} label="Descricao" onClick={canOpenDescription ? () => void openDescriptionEditor(listing) : undefined} title="Abrir descricao do anuncio" />
                         <ListingInfoChip
                           icon={Ruler}
                           label={dimensionsChipLabel(listing)}
@@ -3201,6 +3377,108 @@ export function MercadoLivreMarketplacePage() {
                     Ficha tecnica nao disponivel nos dados carregados.
                   </div>
                 )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {descriptionListing ? (
+        <div className="fixed inset-0 z-[65] flex items-end justify-center bg-black/75 p-3 md:items-center">
+          <div className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-md border border-matrix-border bg-matrix-panel p-4 shadow-glow">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-xl font-bold text-matrix-fg">Editar Descrição do Anúncio</h3>
+                <p className="mt-1 text-sm text-matrix-muted">Descrição atual do anúncio Mercado Livre.</p>
+              </div>
+              <Button aria-label="Fechar descrição do anúncio" type="button" variant="ghost" onClick={closeDescriptionEditor}>
+                <X className="h-4 w-4" />
+                Fechar
+              </Button>
+            </div>
+
+            <div className="mb-4 flex flex-col gap-3 rounded-md border border-matrix-border bg-matrix-panel2/55 p-3 md:flex-row md:items-center">
+              {listingMainImage(descriptionListing) || descriptionPayload?.listing.thumbnail ? (
+                <img
+                  alt={descriptionListing.title}
+                  className="h-16 w-16 shrink-0 rounded-md border border-matrix-border bg-white object-contain"
+                  src={listingMainImage(descriptionListing) ?? descriptionPayload?.listing.thumbnail ?? undefined}
+                />
+              ) : (
+                <div className="grid h-16 w-16 shrink-0 place-items-center rounded-md border border-dashed border-matrix-border text-matrix-muted">
+                  <ImageIcon className="h-5 w-5" />
+                </div>
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] uppercase tracking-[0.14em] text-matrix-muted">Anúncio</p>
+                <h4 className="mt-1 text-base font-semibold leading-6 text-matrix-fg">{descriptionListing.title}</h4>
+                <dl className="mt-2 grid gap-2 text-sm sm:grid-cols-3">
+                  <DetailItem label="SKU" value={fieldValue(descriptionListing.sku)} />
+                  <DetailItem label="ID ML" value={descriptionListing.externalId} mono />
+                  <DetailItem label="Preço atual" value={formatPrice(descriptionListing.price, descriptionListing.currencyId)} />
+                </dl>
+              </div>
+            </div>
+
+            <div className="grid gap-4">
+              {descriptionLoading ? (
+                <div className="inline-flex items-center gap-2 rounded-md border border-matrix-gold/25 bg-matrix-gold/10 px-3 py-2 text-sm text-matrix-fg">
+                  <RefreshCw className="h-4 w-4 animate-spin text-matrix-gold" />
+                  Carregando descrição...
+                </div>
+              ) : null}
+
+              {descriptionError ? (
+                <div className="rounded-md border border-red-500/25 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+                  {descriptionError}
+                </div>
+              ) : null}
+
+              {descriptionSuccess ? (
+                <div className="rounded-md border border-green-500/25 bg-green-500/10 px-3 py-2 text-sm text-green-200">
+                  {descriptionSuccess}
+                </div>
+              ) : null}
+
+              {!descriptionCanEdit ? (
+                <div className="rounded-md border border-matrix-border bg-matrix-panel2/45 px-3 py-2 text-sm text-matrix-muted">
+                  A edição da descrição ainda não está liberada.
+                </div>
+              ) : null}
+
+              <label className="grid gap-2 text-sm text-matrix-muted">
+                <span className="font-medium text-matrix-fg">Descrição</span>
+                <textarea
+                  className="min-h-[320px] w-full resize-y rounded-md border border-matrix-border bg-matrix-panel px-3 py-3 text-sm leading-5 text-matrix-fg outline-none read-only:text-matrix-muted"
+                  onChange={(event) => {
+                    setDescriptionText(event.target.value);
+                    setDescriptionError("");
+                    setDescriptionSuccess("");
+                  }}
+                  placeholder="Nenhuma descrição encontrada para este anúncio."
+                  readOnly={!descriptionCanEdit || descriptionSaving || descriptionLoading}
+                  value={descriptionText}
+                />
+              </label>
+
+              {descriptionCanEdit && descriptionValidationError ? (
+                <p className="text-sm text-red-200">{descriptionValidationError}</p>
+              ) : null}
+
+              <div className="flex flex-wrap justify-end gap-2 border-t border-matrix-border pt-4">
+                <Button onClick={closeDescriptionEditor} type="button" variant="secondary">
+                  Fechar
+                </Button>
+                {descriptionCanEdit ? (
+                  <Button
+                    disabled={Boolean(descriptionValidationError) || descriptionSaving || descriptionLoading}
+                    onClick={saveDescription}
+                    title="Salvar descrição"
+                    type="button"
+                  >
+                    {descriptionSaving ? "Salvando..." : "Salvar"}
+                  </Button>
+                ) : null}
+              </div>
             </div>
           </div>
         </div>
