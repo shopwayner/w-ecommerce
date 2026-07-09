@@ -1051,23 +1051,35 @@ function ListingInfoChip({
   label,
   muted = false,
   onClick,
-  title
+  title,
+  tone = "default"
 }: {
   icon: typeof FileText;
   label: string;
   muted?: boolean;
   onClick?: () => void;
   title?: string;
+  tone?: "default" | "success";
 }) {
+  const activeClasses =
+    tone === "success"
+      ? "border-emerald-500/35 bg-emerald-500/12 text-emerald-200"
+      : "border-matrix-gold/20 bg-matrix-goldSoft/18 text-matrix-fg";
+  const hoverClasses = onClick
+    ? tone === "success"
+      ? "hover:border-emerald-400/65 hover:bg-emerald-500/18"
+      : "hover:border-matrix-gold/60 hover:bg-matrix-goldSoft/35"
+    : "";
+  const iconClasses = tone === "success" && !muted ? "text-emerald-300" : "text-matrix-goldDark";
   const className = `inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-semibold transition ${
     muted
       ? "border-matrix-border bg-matrix-panel2/55 text-matrix-muted"
-      : "border-matrix-gold/20 bg-matrix-goldSoft/18 text-matrix-fg"
-  } ${onClick ? "hover:border-matrix-gold/60 hover:bg-matrix-goldSoft/35" : ""}`;
+      : activeClasses
+  } ${hoverClasses}`;
 
   const content = (
     <>
-      <Icon className="h-3.5 w-3.5 text-matrix-goldDark" />
+      <Icon className={`h-3.5 w-3.5 ${iconClasses}`} />
       {label}
     </>
   );
@@ -2565,6 +2577,7 @@ export function MercadoLivreMarketplacePage() {
                           icon={Ruler}
                           label={dimensionsChipLabel(listing)}
                           muted={!hasCompleteListingDimensions(listing)}
+                          tone={hasCompleteListingDimensions(listing) ? "success" : "default"}
                           onClick={canOpenDimensions ? () => void openDimensionsEditor(listing) : undefined}
                           title="Abrir dimensoes do anuncio"
                         />
