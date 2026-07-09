@@ -2241,6 +2241,23 @@ export function MercadoLivreMarketplacePage() {
     }
   }
 
+  async function fetchWholesalePricesPayload(externalId: string) {
+    const response = await fetch(`/api/marketplaces/mercado-livre/client/listings/${encodeURIComponent(externalId)}/wholesale-prices`, {
+      cache: "no-store"
+    });
+    const payload = (await response.json().catch(() => null)) as unknown;
+
+    if (!response.ok || !isWholesalePricesPayload(payload)) {
+      const errorMessage =
+        payload && typeof payload === "object" && "error" in payload && typeof (payload as { error?: unknown }).error === "string"
+          ? (payload as { error: string }).error
+          : "Nao foi possivel carregar precos de atacado.";
+      throw new Error(errorMessage);
+    }
+
+    return payload;
+  }
+
   async function openWholesalePrices(listing: MercadoLivreClientListing) {
     const fallbackPayload = localWholesalePayloadFromListing(listing);
     setWholesaleListing(listing);
@@ -2251,19 +2268,7 @@ export function MercadoLivreMarketplacePage() {
     setWholesaleLoading(true);
 
     try {
-      const response = await fetch(`/api/marketplaces/mercado-livre/client/listings/${encodeURIComponent(listing.externalId)}/wholesale-prices`, {
-        cache: "no-store"
-      });
-      const payload = (await response.json().catch(() => null)) as unknown;
-
-      if (!response.ok || !isWholesalePricesPayload(payload)) {
-        const errorMessage =
-          payload && typeof payload === "object" && "error" in payload && typeof (payload as { error?: unknown }).error === "string"
-            ? (payload as { error: string }).error
-            : "Nao foi possivel carregar precos de atacado.";
-        throw new Error(errorMessage);
-      }
-
+      const payload = await fetchWholesalePricesPayload(listing.externalId);
       setWholesalePayload(payload);
       setWholesaleRows(wholesaleRowsFromPayload(payload));
       setWholesaleError("");
@@ -2379,9 +2384,16 @@ export function MercadoLivreMarketplacePage() {
           throw new Error(errorMessage);
         }
 
-        setWholesalePayload(payload);
-        setWholesaleRows(wholesaleRowsFromPayload(payload));
-        setWholesaleSuccess(payload.message ?? "Precos de atacado atualizados com sucesso.");
+        try {
+          const confirmedPayload = await fetchWholesalePricesPayload(wholesaleListing.externalId);
+          setWholesalePayload(confirmedPayload);
+          setWholesaleRows(wholesaleRowsFromPayload(confirmedPayload));
+          setWholesaleSuccess("Preço atacado salvo com sucesso. A faixa foi confirmada pelo Mercado Livre.");
+        } catch {
+          setWholesalePayload(payload);
+          setWholesaleRows(wholesaleRowsFromPayload(payload));
+          setWholesaleSuccess(payload.message ?? "Precos de atacado atualizados com sucesso.");
+        }
       } catch (error) {
         setWholesaleError(error instanceof Error ? error.message : "Nao foi possivel salvar os precos de atacado.");
       } finally {
