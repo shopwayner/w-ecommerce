@@ -109,6 +109,10 @@ function isLinkedMercadoLivreStatus(status: string | null | undefined) {
   return !normalized || !["closed", "deleted", "inactive"].includes(normalized);
 }
 
+function hasConfirmedMercadoLivreMapping(mappings: ProductListRecord["marketplaceCategoryMappings"]) {
+  return mappings.some((mapping) => mapping.status?.trim().toUpperCase() === "CONFIRMED");
+}
+
 function toNumber(value: unknown) {
   if (value === null || value === undefined) return 0;
   const numeric = typeof value === "number" ? value : Number(value.toString());
@@ -323,7 +327,7 @@ function serializeProduct(product: ProductListRecord) {
       }))
     })),
     marketplaceStores: {
-      mercadoLivre: false
+      mercadoLivre: hasConfirmedMercadoLivreMapping(product.marketplaceCategoryMappings)
     },
     blingStatus: getStringAttribute(attributes, "blingStatus"),
     confidenceScore: product.confidenceScore,
@@ -382,7 +386,7 @@ async function attachMarketplaceStores(organizationId: string, products: Seriali
       ...product,
       marketplaceStores: {
         ...product.marketplaceStores,
-        mercadoLivre: hasMercadoLivreListing
+        mercadoLivre: Boolean(product.marketplaceStores.mercadoLivre || hasMercadoLivreListing)
       }
     };
   });
