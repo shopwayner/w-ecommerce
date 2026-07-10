@@ -16,10 +16,23 @@ import {
 } from "@/lib/intelligent-product-compatibility";
 
 const SAVE_CONFIRMATION = "APLICAR_SUGESTAO_MERCADO_LIVRE_LOCALMENTE";
+const AMAZON_LOGO_SRC = "/marketplaces/amazon.png";
 const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre.png";
 const MERCADO_LIVRE_DETAIL_CONCURRENCY = 4;
 const MERCADO_LIVRE_DETAIL_TIMEOUT_MS = 15000;
 const MERCADO_LIVRE_OFFER_PAGE_MAX_CATALOGS = 80;
+
+function AmazonLogo({ size = 18, className = "" }: { size?: number; className?: string }) {
+  return (
+    <Image
+      alt="Amazon"
+      className={`shrink-0 object-contain ${className}`}
+      height={size}
+      src={AMAZON_LOGO_SRC}
+      width={size}
+    />
+  );
+}
 
 function MercadoLivreLogo({ size = 18, className = "" }: { size?: number; className?: string }) {
   return (
@@ -1174,7 +1187,7 @@ export function IntelligentProductRegistrationPage() {
   const [selectedProductName, setSelectedProductName] = useState<string | null>(null);
   const [selectedProductGtin, setSelectedProductGtin] = useState<string | null>(null);
   const [selectedProductBrand, setSelectedProductBrand] = useState<string | null>(null);
-  const [mercadoLivreLoading, setMercadoLivreLoading] = useState(true);
+  const [, setMercadoLivreLoading] = useState(true);
   const [mercadoLivreConfigured, setMercadoLivreConfigured] = useState(false);
   const [mercadoLivreAccounts, setMercadoLivreAccounts] = useState<MercadoLivreAccount[]>([]);
   const [mercadoLivreSearchLoading, setMercadoLivreSearchLoading] = useState(false);
@@ -1230,7 +1243,6 @@ export function IntelligentProductRegistrationPage() {
   const suggestions = lookup?.fieldSuggestions ?? [];
   const mercadoLivreAccount = mercadoLivreAccounts.find((account) => account.status === "ACTIVE") ?? null;
   const mercadoLivreConnected = Boolean(mercadoLivreAccount);
-  const mercadoLivreAccountName = mercadoLivreAccount?.sellerNickname || mercadoLivreAccount?.name || "Mercado Livre";
   const mercadoLivreSearchUnavailable = isMercadoLivreSearchUnavailable(mercadoLivreSearch);
   const mercadoLivreNotice = mercadoLivrePrimaryNotice(mercadoLivreSearch);
   const mercadoLivreGtinCatalogEmpty = isMercadoLivreGtinCatalogEmpty(mercadoLivreSearch);
@@ -3108,24 +3120,7 @@ export function IntelligentProductRegistrationPage() {
           <div className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="flex items-center gap-2 font-semibold text-matrix-fg">
-                  <MercadoLivreLogo size={18} />
-                  Mercado Livre
-                </p>
-                <p className="mt-1 text-xs text-matrix-muted">
-                  {mercadoLivreLoading
-                    ? "Verificando conexao..."
-                    : mercadoLivreConnected
-                      ? `Busca Mercado Livre ativa: ${mercadoLivreAccountName}`
-                      : mercadoLivreConfigured
-                        ? "App do sistema ativo. Conecte uma conta para autorizar buscas read-only."
-                        : "Configuracao pendente no servidor."}
-                </p>
-                {mercadoLivreConnected ? (
-                  <p className="mt-2 text-xs text-matrix-muted">
-                    Busque referencias reais por GTIN/EAN ou titulo. Resultados sao sugestoes read-only e nao salvam nada automaticamente.
-                  </p>
-                ) : null}
+                <p className="font-semibold text-matrix-fg">Cadastro Automático</p>
               </div>
               <Badge tone={mercadoLivreConnected ? "success" : mercadoLivreConfigured ? "warning" : "muted"}>
                 {mercadoLivreConnected ? "Busca ativa" : mercadoLivreConfigured ? "Conectar" : "Pendente"}
@@ -3140,7 +3135,7 @@ export function IntelligentProductRegistrationPage() {
             {mercadoLivreConnected ? (
               <div className="mt-3 space-y-2">
                 <Button className="w-full justify-center" disabled={mercadoLivreSearchLoading || !selectedProductGtin} onClick={() => searchMercadoLivreReadOnly("gtin")} type="button" variant="secondary">
-                  <MercadoLivreLogo size={18} />
+                  <AmazonLogo size={18} />
                   GTIN
                 </Button>
                 <Button className="w-full justify-center" disabled={mercadoLivreSearchLoading || (!selectedProductName && !query.trim())} onClick={() => searchMercadoLivreReadOnly("title")} type="button" variant="secondary">
