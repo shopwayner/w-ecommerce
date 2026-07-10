@@ -99,6 +99,16 @@ function hasRealSku(value: string | null | undefined) {
   return Boolean(sku && !sku.toUpperCase().startsWith("BLING-"));
 }
 
+function normalizeMarketplaceKey(value: string | null | undefined) {
+  const text = value?.trim();
+  return text ? text.toUpperCase() : null;
+}
+
+function isLinkedMercadoLivreStatus(status: string | null | undefined) {
+  const normalized = status?.trim().toLowerCase();
+  return !normalized || !["closed", "deleted", "inactive"].includes(normalized);
+}
+
 function toNumber(value: unknown) {
   if (value === null || value === undefined) return 0;
   const numeric = typeof value === "number" ? value : Number(value.toString());
@@ -312,6 +322,9 @@ function serializeProduct(product: ProductListRecord) {
         status: value.status
       }))
     })),
+    marketplaceStores: {
+      mercadoLivre: false
+    },
     blingStatus: getStringAttribute(attributes, "blingStatus"),
     confidenceScore: product.confidenceScore,
     weight: product.weight?.toString() ?? null,
@@ -329,6 +342,50 @@ function serializeProduct(product: ProductListRecord) {
       : metadata.stockOverride ?? 0,
     updatedAt: product.updatedAt
   };
+}
+
+async function attachMarketplaceStores(organizationId: string, products: SerializedProduct[]) {
+  if (!products.length) return products;
+
+  const listingRows = await prisma.mercadoLivreListingCache.findMany({
+    where: { organizationId },
+    select: {
+      sku: true,
+      gtin: true,
+      status: true
+    }
+  });
+
+  if (!listingRows.length) return products;
+
+  const mercadoLivreSkus = new Set<string>();
+  const mercadoLivreGtins = new Set<string>();
+
+  for (const listing of listingRows) {
+    if (!isLinkedMercadoLivreStatus(listing.status)) continue;
+
+    const sku = normalizeMarketplaceKey(listing.sku);
+    if (sku) mercadoLivreSkus.add(sku);
+
+    const gtin = listing.gtin ? normalizeGtin(listing.gtin) ?? normalizeMarketplaceKey(listing.gtin) : null;
+    if (gtin) mercadoLivreGtins.add(gtin);
+  }
+
+  return products.map((product) => {
+    const sku = normalizeMarketplaceKey(product.sku);
+    const gtin = product.ean ? normalizeGtin(product.ean) ?? normalizeMarketplaceKey(product.ean) : null;
+    const hasMercadoLivreListing =
+      Boolean(sku && mercadoLivreSkus.has(sku)) ||
+      Boolean(gtin && mercadoLivreGtins.has(gtin));
+
+    return {
+      ...product,
+      marketplaceStores: {
+        ...product.marketplaceStores,
+        mercadoLivre: hasMercadoLivreListing
+      }
+    };
+  });
 }
 
 export async function GET(request: Request) {
@@ -404,7 +461,7 @@ export async function GET(request: Request) {
     orderBy: { createdAt: "desc" }
   });
 
-  const serialized = products.map(serializeProduct);
+  const serialized = await attachMarketplaceStores(auth.context.organizationId, products.map(serializeProduct));
   const filtered = serialized.filter((product) => {
     const searchable = `${product.name} ${product.sku ?? ""} ${product.ean ?? ""}`.toLowerCase();
     const score = getQualityScore(product);

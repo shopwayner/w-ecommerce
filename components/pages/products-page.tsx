@@ -38,6 +38,8 @@ import { AppShell } from "@/components/app-shell";
 import { ProductCopyButton } from "@/components/product-copy-button";
 import { Badge, Button, Card, DataTable, KpiCard, PageHeader } from "@/components/ui";
 
+const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre.png";
+
 type ProductListItem = {
   id: string;
   name: string;
@@ -63,6 +65,9 @@ type ProductListItem = {
   hasEnrichmentDraft: boolean;
   externalProductId?: string | null;
   blingStatus?: string | null;
+  marketplaceStores?: {
+    mercadoLivre?: boolean;
+  };
   blingAccount: {
     blingAccountId: string;
     blingAccountName: string | null;
@@ -170,6 +175,25 @@ function formatCurrencyDisplay(value: string | null | undefined) {
 
 function getBlingDisplayName(product: ProductListItem) {
   return product.blingAccount?.displayName ?? product.blingAccount?.blingAccountName ?? null;
+}
+
+function ProductStoresCell({ product }: { product: ProductListItem }) {
+  if (!product.marketplaceStores?.mercadoLivre) {
+    return <span aria-hidden="true" className="block h-6 min-w-10" />;
+  }
+
+  return (
+    <div className="flex min-w-10 items-center justify-start">
+      <Image
+        alt="Mercado Livre"
+        className="h-6 w-6 object-contain"
+        height={24}
+        src={MERCADO_LIVRE_LOGO_SRC}
+        title="Mercado Livre"
+        width={24}
+      />
+    </div>
+  );
 }
 
 function displayText(value: string | number | null | undefined) {
@@ -676,7 +700,7 @@ export function ProductsPage() {
             "Categoria",
             "Custo",
             "Preco venda",
-            "Margem",
+            "Lojas",
             "Estoque",
             "Acoes"
           ]}
@@ -719,7 +743,7 @@ export function ProductsPage() {
             product.category ?? "-",
             formatCurrencyDisplay(product.costPriceDisplay ?? product.displayValue) ?? "-",
             formatCurrencyDisplay(product.salePriceDisplay) ?? "0,00",
-            <span key={`${product.id}-margin`} className="text-xs text-matrix-muted">Aguardando marketplace</span>,
+            <ProductStoresCell key={`${product.id}-stores`} product={product} />,
             product.stock,
             <Button key={`${product.id}-actions`} variant="ghost" onClick={() => setViewingProduct(product)}>Ver</Button>
           ])}
