@@ -109,10 +109,6 @@ function isLinkedMercadoLivreStatus(status: string | null | undefined) {
   return !normalized || !["closed", "deleted", "inactive"].includes(normalized);
 }
 
-function hasConfirmedMercadoLivreMapping(mappings: ProductListRecord["marketplaceCategoryMappings"]) {
-  return mappings.some((mapping) => mapping.status?.trim().toUpperCase() === "CONFIRMED");
-}
-
 function toNumber(value: unknown) {
   if (value === null || value === undefined) return 0;
   const numeric = typeof value === "number" ? value : Number(value.toString());
@@ -327,7 +323,7 @@ function serializeProduct(product: ProductListRecord) {
       }))
     })),
     marketplaceStores: {
-      mercadoLivre: hasConfirmedMercadoLivreMapping(product.marketplaceCategoryMappings)
+      mercadoLivre: false
     },
     blingStatus: getStringAttribute(attributes, "blingStatus"),
     confidenceScore: product.confidenceScore,
@@ -355,7 +351,6 @@ async function attachMarketplaceStores(organizationId: string, products: Seriali
     where: { organizationId },
     select: {
       sku: true,
-      gtin: true,
       status: true
     }
   });
@@ -363,30 +358,23 @@ async function attachMarketplaceStores(organizationId: string, products: Seriali
   if (!listingRows.length) return products;
 
   const mercadoLivreSkus = new Set<string>();
-  const mercadoLivreGtins = new Set<string>();
 
   for (const listing of listingRows) {
     if (!isLinkedMercadoLivreStatus(listing.status)) continue;
 
     const sku = normalizeMarketplaceKey(listing.sku);
     if (sku) mercadoLivreSkus.add(sku);
-
-    const gtin = listing.gtin ? normalizeGtin(listing.gtin) ?? normalizeMarketplaceKey(listing.gtin) : null;
-    if (gtin) mercadoLivreGtins.add(gtin);
   }
 
   return products.map((product) => {
     const sku = normalizeMarketplaceKey(product.sku);
-    const gtin = product.ean ? normalizeGtin(product.ean) ?? normalizeMarketplaceKey(product.ean) : null;
-    const hasMercadoLivreListing =
-      Boolean(sku && mercadoLivreSkus.has(sku)) ||
-      Boolean(gtin && mercadoLivreGtins.has(gtin));
+    const hasMercadoLivreListing = Boolean(sku && mercadoLivreSkus.has(sku));
 
     return {
       ...product,
       marketplaceStores: {
         ...product.marketplaceStores,
-        mercadoLivre: Boolean(product.marketplaceStores.mercadoLivre || hasMercadoLivreListing)
+        mercadoLivre: hasMercadoLivreListing
       }
     };
   });
