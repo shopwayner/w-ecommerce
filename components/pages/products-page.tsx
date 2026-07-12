@@ -38,7 +38,7 @@ import { AppShell } from "@/components/app-shell";
 import { ProductCopyButton } from "@/components/product-copy-button";
 import { Badge, Button, Card, DataTable, KpiCard, PageHeader } from "@/components/ui";
 
-const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre-handshake.svg";
+const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre-oval.jpg";
 
 type ProductListItem = {
   id: string;
@@ -183,14 +183,14 @@ function ProductStoresCell({ product }: { product: ProductListItem }) {
   }
 
   return (
-    <div className="flex min-w-10 items-center justify-start">
+    <div className="flex min-w-10 items-center justify-center">
       <Image
         alt="Mercado Livre"
-        className="h-6 w-6 object-contain"
-        height={24}
+        className="h-auto w-7 object-contain"
+        height={17}
         src={MERCADO_LIVRE_LOGO_SRC}
         title="Mercado Livre"
-        width={24}
+        width={28}
       />
     </div>
   );
