@@ -1358,6 +1358,7 @@ function listingMatchesSearchTerm(listing: MercadoLivreClientListing, searchTerm
 }
 
 function nativeStatusFilter(value: ListingFilterStatus): ListingStatusFilter | undefined {
+  if (value === "under_review") return undefined;
   return listingStatuses.includes(value as ListingStatusFilter) ? (value as ListingStatusFilter) : undefined;
 }
 
