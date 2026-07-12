@@ -38,7 +38,7 @@ import { AppShell } from "@/components/app-shell";
 import { ProductCopyButton } from "@/components/product-copy-button";
 import { Badge, Button, Card, DataTable, KpiCard, PageHeader } from "@/components/ui";
 
-const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre.png";
+const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre-handshake.svg";
 
 type ProductListItem = {
   id: string;
