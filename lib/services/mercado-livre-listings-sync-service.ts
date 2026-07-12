@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { decryptSecret } from "@/lib/security/encryption";
 import { normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import {
   findLocalProductForMercadoLivreSearch,
@@ -53,6 +54,7 @@ type MercadoLivreItemBody = {
   id?: string;
   title?: string;
   price?: number;
+  available_quantity?: number | null;
   currency_id?: string;
   status?: string;
   permalink?: string;
@@ -101,6 +103,7 @@ type NormalizedListing = {
   brand: string | null;
   partNumber: string | null;
   categoryId: string | null;
+  availableQuantity: number | null;
   price: number | null;
   currencyId: string | null;
   status: string | null;
@@ -187,6 +190,7 @@ function normalizeListing(item: MercadoLivreItemBody): NormalizedListing | null 
     pickAttribute(attributes, ["SELLER_SKU", "SKU"]);
   const rawGtin = pickAttribute(attributes, ["GTIN", "EAN", "UPC", "UNIVERSAL_PRODUCT_CODE"]);
   const normalizedGtin = rawGtin ? normalizeGtin(rawGtin) : null;
+  const availableQuantity = typeof item.available_quantity === "number" && Number.isFinite(item.available_quantity) ? item.available_quantity : null;
 
   return {
     externalItemId,
@@ -196,12 +200,14 @@ function normalizeListing(item: MercadoLivreItemBody): NormalizedListing | null 
     brand: pickAttribute(attributes, ["BRAND", "MARCA"]),
     partNumber: pickAttribute(attributes, ["PART_NUMBER", "MANUFACTURER_PART_NUMBER", "MPN", "OEM"]),
     categoryId: typeof item.category_id === "string" ? item.category_id : null,
+    availableQuantity,
     price: typeof item.price === "number" && Number.isFinite(item.price) ? item.price : null,
     currencyId: typeof item.currency_id === "string" ? item.currency_id : null,
     status: typeof item.status === "string" ? item.status : null,
     permalink: typeof item.permalink === "string" ? item.permalink : null,
     thumbnail: typeof item.secure_thumbnail === "string" ? item.secure_thumbnail : typeof item.thumbnail === "string" ? item.thumbnail : null,
     rawAttributesJson: {
+      availableQuantity,
       attributes: attributes.map((attribute) => ({
         id: attribute.id ?? null,
         name: attribute.name ?? null,
@@ -317,12 +323,28 @@ export class MercadoLivreListingsSyncService {
     return token;
   }
 
-  async fetchConnectedUserReadOnly(input: { organizationId: string; connectionId: string; accessToken: string; expectedExternalUserId: string }) {
+  async getActiveMercadoLivreConnectionForCacheRefresh(organizationId: string) {
+    const connection = await mercadoLivreOAuthService.findActiveConnection(organizationId);
+    if (!connection) throw new Error("Conecte uma conta Mercado Livre antes de atualizar os vinculos locais.");
+    if (!connection.externalUserId) throw new Error("Conexao Mercado Livre sem seller identificado. Reconecte a conta.");
+    if (!connection.accessTokenEncrypted || !connection.expiresAt) throw new Error("Conta Mercado Livre precisa ser reconectada para atualizar os vinculos locais.");
+    if (connection.expiresAt <= new Date()) {
+      throw new Error("Conta Mercado Livre precisa ser reconectada para atualizar os vinculos locais.");
+    }
+
+    return {
+      connection,
+      accessToken: decryptSecret(connection.accessTokenEncrypted)
+    };
+  }
+
+  async fetchConnectedUserReadOnly(input: { organizationId: string; connectionId: string; accessToken: string; expectedExternalUserId: string; retryOnUnauthorized?: boolean }) {
     const response = await fetchMercadoLivreJson<MercadoLivreUserMePayload>({
       organizationId: input.organizationId,
       connectionId: input.connectionId,
       accessToken: input.accessToken,
-      path: "/users/me"
+      path: "/users/me",
+      retryOnUnauthorized: input.retryOnUnauthorized
     });
 
     if (!response.ok) {
@@ -356,7 +378,7 @@ export class MercadoLivreListingsSyncService {
     };
   }
 
-  async fetchSellerItemsReadOnly(input: { organizationId: string; connectionId: string; accessToken: string; externalUserId: string; maxItems?: number; maxPages?: number }) {
+  async fetchSellerItemsReadOnly(input: { organizationId: string; connectionId: string; accessToken: string; externalUserId: string; maxItems?: number; maxPages?: number; retryOnUnauthorized?: boolean }) {
     const maxItems = Math.max(1, Math.min(input.maxItems ?? defaultMaxItems, 1000));
     const maxPages = Math.max(1, Math.min(input.maxPages ?? defaultMaxPages, 50));
     const seenIds = new Set<string>();
@@ -379,7 +401,8 @@ export class MercadoLivreListingsSyncService {
           organizationId: input.organizationId,
           connectionId: input.connectionId,
           accessToken: input.accessToken,
-          path
+          path,
+          retryOnUnauthorized: input.retryOnUnauthorized
         });
         const pageIds = response.ok ? (response.data.results ?? []).map(normalizeMercadoLivreId).filter(Boolean) as string[] : [];
         statusTotal = response.ok && typeof response.data.paging?.total === "number" ? response.data.paging.total : statusTotal;
@@ -440,7 +463,7 @@ export class MercadoLivreListingsSyncService {
   }
 
 
-  async fetchItemsDetailsReadOnly(input: { organizationId: string; connectionId: string; accessToken: string; itemIds: string[] }) {
+  async fetchItemsDetailsReadOnly(input: { organizationId: string; connectionId: string; accessToken: string; itemIds: string[]; retryOnUnauthorized?: boolean }) {
     const listings: NormalizedListing[] = [];
     const warnings: string[] = [];
     const endpoints: Array<Record<string, unknown>> = [];
@@ -451,7 +474,8 @@ export class MercadoLivreListingsSyncService {
         organizationId: input.organizationId,
         connectionId: input.connectionId,
         accessToken: input.accessToken,
-        path
+        path,
+        retryOnUnauthorized: input.retryOnUnauthorized
       });
       endpoints.push({
         endpoint: response.endpoint,
@@ -540,6 +564,112 @@ export class MercadoLivreListingsSyncService {
     }
 
     return { upserted, lastSyncedAt: now };
+  }
+
+  async refreshListingCacheOnly(input: { authContext: ListingSyncAuthContext; maxItems?: number; maxPages?: number }) {
+    const { connection, accessToken } = await this.getActiveMercadoLivreConnectionForCacheRefresh(input.authContext.organizationId);
+    const syncStartedAt = new Date();
+    const accountProbe = await this.fetchConnectedUserReadOnly({
+      organizationId: input.authContext.organizationId,
+      connectionId: connection.id,
+      accessToken,
+      expectedExternalUserId: connection.externalUserId ?? "",
+      retryOnUnauthorized: false
+    });
+
+    if (!accountProbe.ok) {
+      return {
+        status: "ERROR",
+        connection: toSafeMercadoLivreAccount(connection),
+        accountProbe,
+        foundItemIds: 0,
+        detailsFetched: 0,
+        upserted: 0,
+        cacheTotal: await prisma.mercadoLivreListingCache.count({ where: { organizationId: input.authContext.organizationId, mercadoLivreConnectionId: connection.id } }),
+        warnings: ["Nao foi possivel validar a conta Mercado Livre conectada. Nenhum anuncio foi salvo no cache."],
+        externalWrite: false
+      };
+    }
+
+    if (!accountProbe.matchesConnection) {
+      return {
+        status: "ERROR",
+        connection: toSafeMercadoLivreAccount(connection),
+        accountProbe,
+        foundItemIds: 0,
+        detailsFetched: 0,
+        upserted: 0,
+        cacheTotal: await prisma.mercadoLivreListingCache.count({ where: { organizationId: input.authContext.organizationId, mercadoLivreConnectionId: connection.id } }),
+        warnings: ["A conta retornada pelo Mercado Livre nao corresponde a conexao salva. Nenhum anuncio foi salvo no cache."],
+        externalWrite: false
+      };
+    }
+
+    const itemSearch = await this.fetchSellerItemsReadOnly({
+      organizationId: input.authContext.organizationId,
+      connectionId: connection.id,
+      accessToken,
+      externalUserId: connection.externalUserId ?? "",
+      maxItems: input.maxItems,
+      maxPages: input.maxPages,
+      retryOnUnauthorized: false
+    });
+
+    if (!itemSearch.ok) {
+      return {
+        status: "ERROR",
+        connection: toSafeMercadoLivreAccount(connection),
+        accountProbe,
+        foundItemIds: itemSearch.ids.length,
+        statusSummary: itemSearch.statusSummary,
+        externalReadCalls: itemSearch.endpoints.length,
+        detailsFetched: 0,
+        upserted: 0,
+        cacheTotal: await prisma.mercadoLivreListingCache.count({ where: { organizationId: input.authContext.organizationId, mercadoLivreConnectionId: connection.id } }),
+        warnings: ["Mercado Livre recusou a consulta de anuncios. Nenhum anuncio foi salvo no cache."],
+        externalWrite: false
+      };
+    }
+
+    const details = await this.fetchItemsDetailsReadOnly({
+      organizationId: input.authContext.organizationId,
+      connectionId: connection.id,
+      accessToken,
+      itemIds: itemSearch.ids,
+      retryOnUnauthorized: false
+    });
+    const cache = await this.upsertListingCache({
+      organizationId: input.authContext.organizationId,
+      connectionId: connection.id,
+      listings: details.listings
+    });
+    const cacheTotal = await prisma.mercadoLivreListingCache.count({
+      where: { organizationId: input.authContext.organizationId, mercadoLivreConnectionId: connection.id }
+    });
+    const warnings = [
+      ...(itemSearch.errors.length ? ["Algumas consultas por status retornaram erro sanitizado, mas as demais foram processadas."] : []),
+      ...details.warnings
+    ];
+    if (!itemSearch.ids.length) {
+      warnings.push("A conta Mercado Livre conectada nao retornou anuncios para atualizar o cache local.");
+    }
+
+    return {
+      status: warnings.length ? "PARTIAL" : "SUCCESS",
+      connection: toSafeMercadoLivreAccount(connection),
+      accountProbe,
+      foundItemIds: itemSearch.ids.length,
+      totalAvailable: itemSearch.total,
+      statusSummary: itemSearch.statusSummary,
+      externalReadCalls: itemSearch.endpoints.length + details.endpoints.length,
+      detailsFetched: details.listings.length,
+      upserted: cache.upserted,
+      cacheTotal,
+      lastSyncedAt: cache.lastSyncedAt,
+      startedAt: syncStartedAt,
+      warnings,
+      externalWrite: false
+    };
   }
 
   async startListingsSync(input: { authContext: ListingSyncAuthContext; maxItems?: number; maxPages?: number }) {
