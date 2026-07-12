@@ -16,6 +16,9 @@ const shippingEstimateConcurrency = 6;
 const shippingEstimateTimeoutMs = 5000;
 const listingStatuses = ["active", "paused", "closed", "under_review"] as const;
 const cacheRefreshStatusFilters = [undefined, ...listingStatuses] as const;
+const listingStatusFilters = ["all", "active", "paused", "closed", "under_review", "error"] as const;
+const listingTypeFilters = ["all", "premium", "classico", "other"] as const;
+const stockFilters = ["all", "with_stock", "without_stock"] as const;
 
 type ClientAuthContext = {
   organizationId: string;
@@ -25,6 +28,9 @@ type ClientAuthContext = {
 };
 
 type ListingStatusFilter = (typeof listingStatuses)[number];
+type ListingFilterStatus = (typeof listingStatusFilters)[number];
+type ListingTypeFilter = (typeof listingTypeFilters)[number];
+type StockFilter = (typeof stockFilters)[number];
 
 type MercadoLivreItemSearchPayload = {
   results?: unknown[];
@@ -1351,6 +1357,43 @@ function listingMatchesSearchTerm(listing: MercadoLivreClientListing, searchTerm
   return fields.some((field) => field?.toLowerCase().includes(searchTerm));
 }
 
+function nativeStatusFilter(value: ListingFilterStatus): ListingStatusFilter | undefined {
+  return listingStatuses.includes(value as ListingStatusFilter) ? (value as ListingStatusFilter) : undefined;
+}
+
+function listingMatchesStatusFilter(listing: MercadoLivreClientListing, filter: ListingFilterStatus) {
+  if (filter === "all") return true;
+  if (filter === "error") return listing.status === "under_review" || listing.status === "inactive";
+  return listing.status === filter;
+}
+
+function listingMatchesTypeFilter(listing: MercadoLivreClientListing, filter: ListingTypeFilter) {
+  if (filter === "all") return true;
+  const listingTypeId = listing.listingTypeId?.toLowerCase() ?? "";
+  if (filter === "premium") return listingTypeId === "gold_pro";
+  if (filter === "classico") return listingTypeId === "gold_special";
+  return listingTypeId !== "gold_pro" && listingTypeId !== "gold_special";
+}
+
+function listingMatchesStockFilter(listing: MercadoLivreClientListing, filter: StockFilter) {
+  if (filter === "all") return true;
+  const quantity = listing.availableQuantity ?? 0;
+  if (filter === "without_stock") return quantity <= 0;
+  return quantity > 0;
+}
+
+function listingMatchesFilters(
+  listing: MercadoLivreClientListing,
+  filters: { query: string; status: ListingFilterStatus; listingType: ListingTypeFilter; stock: StockFilter }
+) {
+  return (
+    listingMatchesSearchTerm(listing, filters.query) &&
+    listingMatchesStatusFilter(listing, filters.status) &&
+    listingMatchesTypeFilter(listing, filters.listingType) &&
+    listingMatchesStockFilter(listing, filters.stock)
+  );
+}
+
 function uniqueListingsByMercadoLivreId(listings: MercadoLivreClientListing[]) {
   const byId = new Map<string, MercadoLivreClientListing>();
   for (const listing of listings) {
@@ -1486,6 +1529,220 @@ export class MercadoLivreClientListingsService {
       totalAvailable: cached?.totalAvailable ?? null,
       paging: cached?.paging ?? buildPaging({ limit: defaultLimit, offset: 0, totalAvailable: cached?.totalAvailable ?? null }),
       cache: cached ? "memory" : "empty",
+      readOnly: true,
+      externalWrite: false
+    };
+  }
+
+  async filterListings(input: {
+    authContext: ClientAuthContext;
+    query?: string;
+    status?: string;
+    listingType?: string;
+    stock?: string;
+    limit?: number;
+    offset?: number;
+    maxListings?: number;
+  }) {
+    const requestedLimit = Math.max(1, Math.min(input.limit ?? defaultLimit, maxLimit));
+    const requestedOffset = Math.max(0, input.offset ?? 0);
+    const requestedMaxListings = Math.max(requestedLimit, Math.min(input.maxListings ?? globalSearchMaxListings, globalSearchMaxListings));
+    const searchTerm = normalizeListingSearchTerm(input.query ?? "");
+    const status =
+      input.status && listingStatusFilters.includes(input.status as ListingFilterStatus)
+        ? (input.status as ListingFilterStatus)
+        : "all";
+    const listingType =
+      input.listingType && listingTypeFilters.includes(input.listingType as ListingTypeFilter)
+        ? (input.listingType as ListingTypeFilter)
+        : "all";
+    const stock =
+      input.stock && stockFilters.includes(input.stock as StockFilter)
+        ? (input.stock as StockFilter)
+        : "all";
+    const statusForSearch = nativeStatusFilter(status);
+    const canUseNativeStatusPage =
+      Boolean(statusForSearch) && !searchTerm && listingType === "all" && stock === "all";
+
+    const { connection, accessToken: initialAccessToken } = await mercadoLivreClientOAuthService.getAccessTokenForActiveConnection(input.authContext.organizationId);
+    const sellerId = connection.sellerId ?? connection.externalAccountId;
+    if (!sellerId) throw new Error("Conta Mercado Livre conectada sem seller identificado. Reconecte a conta.");
+
+    let accessToken = initialAccessToken;
+    const warnings: string[] = [];
+    const endpointDiagnostics: Array<Record<string, unknown>> = [];
+    const syncedAt = new Date();
+    let sourceTotalAvailable: number | null = null;
+    let foundItemIds = 0;
+    let matchedItemIds = 0;
+    let pageListings: MercadoLivreClientListing[] = [];
+    let filteredTotalAvailable: number | null = null;
+
+    if (canUseNativeStatusPage && statusForSearch) {
+      const response = await fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
+        organizationId: input.authContext.organizationId,
+        connectionId: connection.id,
+        accessToken,
+        path: sellerItemsPath({ sellerId, offset: requestedOffset, limit: requestedLimit, status: statusForSearch })
+      });
+      accessToken = response.accessToken;
+      endpointDiagnostics.push({
+        endpoint: response.endpoint,
+        status: response.status,
+        listingStatus: statusForSearch,
+        requestId: response.requestId,
+        correlationId: response.correlationId,
+        returnedIds: response.ok ? response.data.results?.length ?? 0 : 0,
+        total: response.ok ? response.data.paging?.total ?? null : null,
+        offset: requestedOffset,
+        limit: requestedLimit,
+        filterMode: "native_status_before_pagination",
+        errorCode: response.ok ? null : response.error.error,
+        errorMessage: response.ok ? null : response.error.message
+      });
+
+      if (!response.ok) {
+        warnings.push(`Mercado Livre retornou HTTP ${response.status} ao buscar anuncios filtrados.`);
+      } else {
+        sourceTotalAvailable = typeof response.data.paging?.total === "number" ? response.data.paging.total : null;
+        filteredTotalAvailable = sourceTotalAvailable;
+      }
+
+      const itemIds = response.ok
+        ? (response.data.results ?? [])
+            .map((id) => normalizeMercadoLivreId(id))
+            .filter((id): id is string => Boolean(id))
+            .slice(0, requestedLimit)
+        : [];
+      foundItemIds = itemIds.length;
+      matchedItemIds = itemIds.length;
+
+      const detailResult = await fetchListingDetailsReadOnly({
+        organizationId: input.authContext.organizationId,
+        connectionId: connection.id,
+        accessToken,
+        itemIds,
+        syncedAt,
+        warnings,
+        endpointDiagnostics
+      });
+      accessToken = detailResult.accessToken;
+      pageListings = uniqueListingsByMercadoLivreId(detailResult.listings).filter((listing) =>
+        listingMatchesFilters(listing, { query: searchTerm, status, listingType, stock })
+      );
+    } else {
+      let sourceOffset = 0;
+      const matchedListings: MercadoLivreClientListing[] = [];
+
+      while (sourceOffset < requestedMaxListings) {
+        const limit = Math.min(maxLimit, requestedMaxListings - sourceOffset);
+        const response = await fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
+          organizationId: input.authContext.organizationId,
+          connectionId: connection.id,
+          accessToken,
+          path: sellerItemsPath({ sellerId, offset: sourceOffset, limit, status: statusForSearch })
+        });
+        accessToken = response.accessToken;
+        const returnedIds = response.ok ? response.data.results?.length ?? 0 : 0;
+        endpointDiagnostics.push({
+          endpoint: response.endpoint,
+          status: response.status,
+          listingStatus: statusForSearch ?? "all",
+          requestId: response.requestId,
+          correlationId: response.correlationId,
+          returnedIds,
+          total: response.ok ? response.data.paging?.total ?? null : null,
+          offset: sourceOffset,
+          limit,
+          filterMode: "filtered_before_pagination",
+          errorCode: response.ok ? null : response.error.error,
+          errorMessage: response.ok ? null : response.error.message
+        });
+
+        if (!response.ok) {
+          warnings.push(`Mercado Livre retornou HTTP ${response.status} ao buscar anuncios filtrados.`);
+          break;
+        }
+
+        if (typeof response.data.paging?.total === "number") {
+          sourceTotalAvailable = response.data.paging.total;
+        }
+
+        const itemIds = (response.data.results ?? [])
+          .map((id) => normalizeMercadoLivreId(id))
+          .filter((id): id is string => Boolean(id));
+        foundItemIds += itemIds.length;
+
+        const detailResult = await fetchListingDetailsReadOnly({
+          organizationId: input.authContext.organizationId,
+          connectionId: connection.id,
+          accessToken,
+          itemIds,
+          syncedAt,
+          warnings,
+          endpointDiagnostics
+        });
+        accessToken = detailResult.accessToken;
+
+        matchedListings.push(
+          ...uniqueListingsByMercadoLivreId(detailResult.listings).filter((listing) =>
+            listingMatchesFilters(listing, { query: searchTerm, status, listingType, stock })
+          )
+        );
+
+        if (returnedIds < limit) break;
+        sourceOffset += limit;
+        if (typeof sourceTotalAvailable === "number" && sourceOffset >= sourceTotalAvailable) break;
+      }
+
+      const uniqueMatchedListings = uniqueListingsByMercadoLivreId(matchedListings);
+      matchedItemIds = uniqueMatchedListings.length;
+      filteredTotalAvailable = matchedItemIds;
+      pageListings = uniqueMatchedListings.slice(requestedOffset, requestedOffset + requestedLimit);
+
+      if (typeof sourceTotalAvailable === "number" && sourceTotalAvailable > requestedMaxListings) {
+        warnings.push("A busca filtrada analisou o limite de anuncios carregados. Refine os filtros para resultados mais precisos.");
+      }
+    }
+
+    const feeEnrichedListings = await enrichListingFeesReadOnly({
+      accessToken,
+      siteId: connection.siteId ?? "MLB",
+      listings: pageListings
+    });
+    const shippingEnrichedListings = await enrichListingShippingCostsReadOnly({
+      accessToken,
+      sellerId,
+      listings: feeEnrichedListings
+    });
+    const enrichedListings = await enrichListingsReadOnly(input.authContext.organizationId, shippingEnrichedListings);
+
+    return {
+      connected: true,
+      account: safeAccount(connection),
+      listings: enrichedListings,
+      kpis: buildKpis(enrichedListings),
+      foundItemIds,
+      detailsFetched: enrichedListings.length,
+      totalAvailable: filteredTotalAvailable,
+      paging: buildPaging({ limit: requestedLimit, offset: requestedOffset, totalAvailable: filteredTotalAvailable }),
+      lastSyncedAt: connection.lastSyncAt?.toISOString() ?? null,
+      warnings,
+      endpointDiagnostics,
+      search: {
+        mode: "filtered_before_pagination",
+        query: input.query ?? "",
+        scannedItemIds: foundItemIds,
+        matchedItemIds,
+        maxListings: requestedMaxListings,
+        sourceTotalAvailable,
+        uniqueKey: "externalId",
+        filters: {
+          status,
+          listingType,
+          stock
+        }
+      },
       readOnly: true,
       externalWrite: false
     };

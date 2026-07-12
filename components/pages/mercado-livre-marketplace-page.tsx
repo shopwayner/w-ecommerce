@@ -2212,6 +2212,7 @@ export function MercadoLivreMarketplacePage() {
     const timer = window.setTimeout(async () => {
       setFilteredListingsLoading(true);
       setFilteredListingsError("");
+      setFilteredListingsPayload(null);
       try {
         const params = new URLSearchParams();
         if (normalizedQuery) params.set("query", normalizedQuery);
