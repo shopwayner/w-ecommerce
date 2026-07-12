@@ -1,26 +1,23 @@
-import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
+import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
-import { mercadoLivreListingsSyncService } from "@/lib/services/mercado-livre-listings-sync-service";
+import { mercadoLivreClientListingsService } from "@/lib/services/marketplaces/mercado-livre-client-listings-service";
 
-const bodySchema = z
-  .object({
-    maxItems: z.number().int().min(1).max(1000).optional(),
-    maxPages: z.number().int().min(1).max(50).optional()
-  })
-  .optional();
+function numberParam(value: unknown, fallback: number) {
+  if (typeof value !== "number" && typeof value !== "string") return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
 
-export async function POST(request: NextRequest) {
+export async function POST(request: Request) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
 
   try {
-    const json = await request.json().catch(() => undefined);
-    const body = bodySchema.parse(json);
-    const result = await mercadoLivreListingsSyncService.refreshListingCacheOnly({
+    const body = await request.json().catch(() => ({}));
+    const refreshOptions = body as { maxListings?: unknown; maxItems?: unknown };
+    const result = await mercadoLivreClientListingsService.refreshListingCache({
       authContext: auth.context,
-      maxItems: body?.maxItems,
-      maxPages: body?.maxPages
+      maxListings: numberParam(refreshOptions.maxListings ?? refreshOptions.maxItems, 500)
     });
 
     return NextResponse.json(result);

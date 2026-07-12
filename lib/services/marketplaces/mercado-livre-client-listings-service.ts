@@ -15,6 +15,7 @@ const feeEstimateTimeoutMs = 5000;
 const shippingEstimateConcurrency = 6;
 const shippingEstimateTimeoutMs = 5000;
 const listingStatuses = ["active", "paused", "closed", "under_review"] as const;
+const cacheRefreshStatusFilters = [undefined, ...listingStatuses] as const;
 
 type ClientAuthContext = {
   organizationId: string;
@@ -1408,6 +1409,21 @@ async function fetchListingDetailsReadOnly(input: {
   return { accessToken, listings };
 }
 
+function listingCacheRawAttributes(listing: MercadoLivreClientListing): Prisma.InputJsonValue {
+  return {
+    source: "MERCADO_LIVRE_CLIENT_LISTINGS_READ_ONLY",
+    availableQuantity: listing.availableQuantity,
+    soldQuantity: listing.soldQuantity,
+    listingTypeId: listing.listingTypeId,
+    dimensions: listing.dimensionInfo,
+    attributes: listing.attributes.map((attribute) => ({
+      id: attribute.id,
+      name: attribute.name,
+      value: attribute.value
+    }))
+  };
+}
+
 function buildKpis(listings: MercadoLivreClientListing[]) {
   return {
     active: listings.filter((listing) => listing.status === "active").length,
@@ -1587,6 +1603,198 @@ export class MercadoLivreClientListingsService {
         maxListings: requestedMaxListings,
         uniqueKey: "externalId"
       },
+      readOnly: true,
+      externalWrite: false
+    };
+  }
+
+  async refreshListingCache(input: { authContext: ClientAuthContext; maxListings?: number }) {
+    const requestedMaxListings = Math.max(1, Math.min(input.maxListings ?? globalSearchMaxListings, 1000));
+    const { connection, accessToken: initialAccessToken } = await mercadoLivreClientOAuthService.getAccessTokenForActiveConnection(input.authContext.organizationId);
+    const sellerId = normalizeMercadoLivreId(connection.sellerId ?? connection.externalAccountId);
+    if (!sellerId) throw new Error("Conta Mercado Livre conectada sem seller identificado. Reconecte a conta.");
+
+    const cacheConnection = await prisma.mercadoLivreConnection.findFirst({
+      where: { organizationId: input.authContext.organizationId },
+      orderBy: [{ isDefault: "desc" }, { updatedAt: "desc" }],
+      select: { id: true }
+    });
+    if (!cacheConnection) {
+      throw new Error("Cache Mercado Livre sem conexao local legada para referencia. Verifique a conexao antes de atualizar os vinculos.");
+    }
+
+    let accessToken = initialAccessToken;
+    const warnings: string[] = [];
+    const endpointDiagnostics: Array<Record<string, unknown>> = [];
+    const itemIdsByMercadoLivreId = new Map<string, string>();
+    let totalAvailable: number | null = null;
+
+    const accountProbe = await fetchMercadoLivreJson<MercadoLivreUserMePayload>({
+      organizationId: input.authContext.organizationId,
+      connectionId: connection.id,
+      accessToken,
+      path: "/users/me"
+    });
+    accessToken = accountProbe.accessToken;
+    endpointDiagnostics.push({
+      endpoint: accountProbe.endpoint,
+      status: accountProbe.status,
+      requestId: accountProbe.requestId,
+      correlationId: accountProbe.correlationId,
+      errorCode: accountProbe.ok ? null : accountProbe.error.error,
+      errorMessage: accountProbe.ok ? null : accountProbe.error.message
+    });
+    if (!accountProbe.ok) {
+      warnings.push("Nao foi possivel validar /users/me antes de atualizar os vinculos locais.");
+    } else {
+      const returnedSellerId = normalizeMercadoLivreId(accountProbe.data.id);
+      if (returnedSellerId && returnedSellerId !== sellerId) {
+        warnings.push("O seller retornado por /users/me nao corresponde ao seller salvo na conexao.");
+      }
+    }
+
+    for (const listingStatus of cacheRefreshStatusFilters) {
+      let offset = 0;
+
+      while (itemIdsByMercadoLivreId.size < requestedMaxListings) {
+        const limit = Math.min(maxLimit, requestedMaxListings - itemIdsByMercadoLivreId.size);
+        const response = await fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
+          organizationId: input.authContext.organizationId,
+          connectionId: connection.id,
+          accessToken,
+          path: sellerItemsPath({ sellerId, offset, limit, status: listingStatus })
+        });
+        accessToken = response.accessToken;
+        const returnedIds = response.ok ? response.data.results?.length ?? 0 : 0;
+        endpointDiagnostics.push({
+          endpoint: response.endpoint,
+          status: response.status,
+          listingStatus: listingStatus ?? "all",
+          requestId: response.requestId,
+          correlationId: response.correlationId,
+          returnedIds,
+          total: response.ok ? response.data.paging?.total ?? null : null,
+          offset,
+          limit,
+          errorCode: response.ok ? null : response.error.error,
+          errorMessage: response.ok ? null : response.error.message
+        });
+
+        if (!response.ok) {
+          warnings.push(`Mercado Livre retornou HTTP ${response.status} ao buscar anuncios para o cache local.`);
+          break;
+        }
+
+        if (typeof response.data.paging?.total === "number") {
+          totalAvailable = Math.max(totalAvailable ?? 0, response.data.paging.total);
+        }
+
+        for (const id of response.data.results ?? []) {
+          const normalizedId = normalizeMercadoLivreId(id);
+          if (normalizedId && !itemIdsByMercadoLivreId.has(normalizedId)) {
+            itemIdsByMercadoLivreId.set(normalizedId, normalizedId);
+          }
+        }
+
+        if (returnedIds < limit) break;
+        offset += limit;
+      }
+
+      if (itemIdsByMercadoLivreId.size >= requestedMaxListings) break;
+    }
+
+    const syncedAt = new Date();
+    const detailResult = await fetchListingDetailsReadOnly({
+      organizationId: input.authContext.organizationId,
+      connectionId: connection.id,
+      accessToken,
+      itemIds: Array.from(itemIdsByMercadoLivreId.values()),
+      syncedAt,
+      warnings,
+      endpointDiagnostics
+    });
+    accessToken = detailResult.accessToken;
+    void accessToken;
+
+    const listings = uniqueListingsByMercadoLivreId(detailResult.listings);
+    const listingsWithLocalCategory = await enrichListingsReadOnly(input.authContext.organizationId, listings);
+    let upserted = 0;
+
+    for (const listing of listingsWithLocalCategory) {
+      await prisma.mercadoLivreListingCache.upsert({
+        where: {
+          mercadoLivreConnectionId_externalItemId: {
+            mercadoLivreConnectionId: cacheConnection.id,
+            externalItemId: listing.externalId
+          }
+        },
+        create: {
+          organizationId: input.authContext.organizationId,
+          mercadoLivreConnectionId: cacheConnection.id,
+          externalItemId: listing.externalId,
+          title: listing.title,
+          sku: listing.sku,
+          gtin: listing.gtin,
+          brand: listing.attributes.find((attribute) => attribute.id?.toUpperCase() === "BRAND")?.value ?? null,
+          partNumber:
+            listing.attributes.find((attribute) => ["PART_NUMBER", "MANUFACTURER_PART_NUMBER", "MPN", "OEM"].includes(attribute.id?.toUpperCase() ?? ""))?.value ??
+            null,
+          categoryId: listing.categoryId,
+          categoryName: listing.categoryName,
+          price: listing.price,
+          currencyId: listing.currencyId,
+          status: listing.status,
+          permalink: listing.permalink,
+          thumbnail: listing.thumbnail,
+          rawAttributesJson: listingCacheRawAttributes(listing),
+          lastSyncedAt: syncedAt
+        },
+        update: {
+          title: listing.title,
+          sku: listing.sku,
+          gtin: listing.gtin,
+          brand: listing.attributes.find((attribute) => attribute.id?.toUpperCase() === "BRAND")?.value ?? null,
+          partNumber:
+            listing.attributes.find((attribute) => ["PART_NUMBER", "MANUFACTURER_PART_NUMBER", "MPN", "OEM"].includes(attribute.id?.toUpperCase() ?? ""))?.value ??
+            null,
+          categoryId: listing.categoryId,
+          categoryName: listing.categoryName,
+          price: listing.price,
+          currencyId: listing.currencyId,
+          status: listing.status,
+          permalink: listing.permalink,
+          thumbnail: listing.thumbnail,
+          rawAttributesJson: listingCacheRawAttributes(listing),
+          lastSyncedAt: syncedAt
+        }
+      });
+      upserted += 1;
+    }
+
+    const cacheTotal = await prisma.mercadoLivreListingCache.count({
+      where: { organizationId: input.authContext.organizationId }
+    });
+    const statusSummary = listingsWithLocalCategory.reduce<Record<string, number>>((summary, listing) => {
+      const key = listing.status ?? "unknown";
+      summary[key] = (summary[key] ?? 0) + 1;
+      return summary;
+    }, {});
+
+    return {
+      source: "mercado_livre_client_listings_service",
+      connectionModel: "MarketplaceConnection",
+      cacheModel: "MercadoLivreListingCache",
+      foundItemIds: itemIdsByMercadoLivreId.size,
+      totalAvailable,
+      detailsFetched: listings.length,
+      upserted,
+      cacheTotal,
+      lastSyncedAt: syncedAt.toISOString(),
+      statusSummary,
+      warnings,
+      endpointDiagnostics,
+      skuSourceOrder: ["item.seller_custom_field", "variation.seller_custom_field", "attributes.SELLER_SKU", "attributes.SKU"],
+      skuLinkRule: "sku_exato_do_anuncio",
       readOnly: true,
       externalWrite: false
     };
