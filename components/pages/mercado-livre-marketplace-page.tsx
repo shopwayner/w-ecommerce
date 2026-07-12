@@ -2249,6 +2249,33 @@ export function MercadoLivreMarketplacePage() {
 
   const filteredListings = listings;
 
+  async function loadListingsPage(options?: { offset?: number; limit?: number }) {
+    const targetLimit = options?.limit ?? pageSize;
+    const targetOffset = options?.offset ?? pageOffset;
+    setFilteredListingsLoading(true);
+    setLoadError("");
+    try {
+      const params = new URLSearchParams();
+      params.set("offset", String(targetOffset));
+      params.set("limit", String(targetLimit));
+      const response = await fetch(`/api/marketplaces/mercado-livre/client/listings?${params.toString()}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Nao foi possivel carregar anuncios Mercado Livre.");
+      }
+      const typedPayload = payload as MercadoLivreListingsPayload;
+      setListingsPayload(typedPayload);
+      setAccount(typedPayload.account);
+      setPageSize(typedPayload.paging?.pageSize ?? targetLimit);
+      setPageOffset(typedPayload.paging?.offset ?? targetOffset);
+      setSelectedIds(new Set());
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "Nao foi possivel carregar anuncios Mercado Livre.");
+    } finally {
+      setFilteredListingsLoading(false);
+    }
+  }
+
   async function syncListings(options?: { offset?: number; limit?: number }) {
     const targetLimit = options?.limit ?? pageSize;
     const targetOffset = options?.offset ?? pageOffset;
@@ -2950,7 +2977,7 @@ export function MercadoLivreMarketplacePage() {
     setPageSize(nextPageSize);
     setPageOffset(0);
     if (!hasActiveFilters) {
-      void syncListings({ offset: 0, limit: nextPageSize });
+      void loadListingsPage({ offset: 0, limit: nextPageSize });
     }
   }
 
@@ -2961,6 +2988,7 @@ export function MercadoLivreMarketplacePage() {
       setStatusFilter("all");
       setTypeFilter("all");
       setStockFilter("all");
+      void loadListingsPage({ offset: 0, limit: pageSize });
       return;
     }
     if (nextFilter === "active" || nextFilter === "paused" || nextFilter === "under_review" || nextFilter === "error") {
@@ -3013,7 +3041,7 @@ export function MercadoLivreMarketplacePage() {
       setPageOffset(nextOffset);
       return;
     }
-    void syncListings({ offset: nextOffset, limit: pageSize });
+    void loadListingsPage({ offset: nextOffset, limit: pageSize });
   }
 
   function goToNextPage() {
@@ -3022,7 +3050,7 @@ export function MercadoLivreMarketplacePage() {
       setPageOffset(nextOffset);
       return;
     }
-    void syncListings({ offset: nextOffset, limit: pageSize });
+    void loadListingsPage({ offset: nextOffset, limit: pageSize });
   }
 
   const pictureGalleryPictures = useMemo(
@@ -3124,6 +3152,7 @@ export function MercadoLivreMarketplacePage() {
     setTypeFilter("all");
     setStockFilter("all");
     setPageOffset(0);
+    void loadListingsPage({ offset: 0, limit: pageSize });
   }
 
   return (

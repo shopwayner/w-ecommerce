@@ -31,21 +31,16 @@ export async function GET(request: NextRequest) {
       normalizedListingType !== "all" ||
       normalizedStock !== "all";
 
-    if (hasFilters) {
-      const result = await mercadoLivreClientListingsService.filterListings({
-        authContext: auth.context,
-        query,
-        status: normalizedStatus,
-        listingType: normalizedListingType,
-        stock: normalizedStock,
-        offset: numberParam(searchParams.get("offset"), 0),
-        limit: numberParam(searchParams.get("limit"), 50),
-        maxListings: numberParam(searchParams.get("maxListings"), 500)
-      });
-      return NextResponse.json(result);
-    }
-
-    const result = await mercadoLivreClientListingsService.getListings(auth.context);
+    const result = await mercadoLivreClientListingsService.filterListings({
+      authContext: auth.context,
+      query,
+      status: hasFilters ? normalizedStatus : "all",
+      listingType: hasFilters ? normalizedListingType : "all",
+      stock: hasFilters ? normalizedStock : "all",
+      offset: numberParam(searchParams.get("offset"), 0),
+      limit: numberParam(searchParams.get("limit"), 50),
+      maxListings: numberParam(searchParams.get("maxListings"), 500)
+    });
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Nao foi possivel carregar anuncios Mercado Livre.";

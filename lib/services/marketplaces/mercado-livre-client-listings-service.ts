@@ -1561,8 +1561,8 @@ export class MercadoLivreClientListingsService {
         ? (input.stock as StockFilter)
         : "all";
     const statusForSearch = nativeStatusFilter(status);
-    const canUseNativeStatusPage =
-      Boolean(statusForSearch) && !searchTerm && listingType === "all" && stock === "all";
+    const canUseNativeMercadoLivrePage =
+      !searchTerm && listingType === "all" && stock === "all" && (status === "all" || Boolean(statusForSearch));
 
     const { connection, accessToken: initialAccessToken } = await mercadoLivreClientOAuthService.getAccessTokenForActiveConnection(input.authContext.organizationId);
     const sellerId = connection.sellerId ?? connection.externalAccountId;
@@ -1578,7 +1578,7 @@ export class MercadoLivreClientListingsService {
     let pageListings: MercadoLivreClientListing[] = [];
     let filteredTotalAvailable: number | null = null;
 
-    if (canUseNativeStatusPage && statusForSearch) {
+    if (canUseNativeMercadoLivrePage) {
       const response = await fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
         organizationId: input.authContext.organizationId,
         connectionId: connection.id,
