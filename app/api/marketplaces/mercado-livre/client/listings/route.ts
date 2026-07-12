@@ -6,10 +6,19 @@ import { mercadoLivreClientListingsService } from "@/lib/services/marketplaces/m
 const statusFilters = new Set(["all", "active", "paused", "closed", "under_review", "error"]);
 const listingTypeFilters = new Set(["all", "premium", "classico", "other"]);
 const stockFilters = new Set(["all", "with_stock", "without_stock"]);
+const listingPageLimits = [25, 50, 100] as const;
 
 function numberParam(value: string | null, fallback: number) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function listingLimitParam(value: string | null, fallback: number) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed <= listingPageLimits[0]) return listingPageLimits[0];
+  if (parsed <= listingPageLimits[1]) return listingPageLimits[1];
+  return listingPageLimits[2];
 }
 
 export async function GET(request: NextRequest) {
@@ -38,7 +47,7 @@ export async function GET(request: NextRequest) {
       listingType: hasFilters ? normalizedListingType : "all",
       stock: hasFilters ? normalizedStock : "all",
       offset: numberParam(searchParams.get("offset"), 0),
-      limit: numberParam(searchParams.get("limit"), 50),
+      limit: listingLimitParam(searchParams.get("limit"), 50),
       maxListings: numberParam(searchParams.get("maxListings"), 500)
     });
     return NextResponse.json(result);

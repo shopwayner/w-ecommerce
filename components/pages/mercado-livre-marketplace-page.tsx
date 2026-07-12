@@ -476,6 +476,14 @@ const stockOptions = [
 ];
 
 const pageSizeOptions = [25, 50, 100];
+const defaultPageSize = 50;
+
+function normalizeListingPageSize(value: number | null | undefined, fallback = defaultPageSize) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  if (value <= pageSizeOptions[0]) return pageSizeOptions[0];
+  if (value <= pageSizeOptions[1]) return pageSizeOptions[1];
+  return pageSizeOptions[2];
+}
 // Visual-only tax rate for Bling - 262 Moto until account-level fiscal config exists.
 const profitMarginTaxRate = 0.085;
 const allowedPictureUploadMimeTypes = new Set(["image/jpeg", "image/png"]);
@@ -2109,7 +2117,7 @@ export function MercadoLivreMarketplacePage() {
           if (payload) {
             setListingsPayload(payload);
             setAccount(payload.account);
-            setPageSize(payload.paging?.pageSize ?? 50);
+            setPageSize(normalizeListingPageSize(payload.paging?.pageSize));
             setPageOffset(payload.paging?.offset ?? 0);
           }
         }
@@ -2174,13 +2182,16 @@ export function MercadoLivreMarketplacePage() {
   const listings = useMemo(() => activeListingsPayload?.listings ?? [], [activeListingsPayload?.listings]);
   const kpis = activeListingsPayload?.kpis ?? { active: 0, paused: 0, errors: 0, withoutStock: 0, sales: 0, visits: 0 };
   const paging = activeListingsPayload?.paging;
+  const selectedPageSize = normalizeListingPageSize(pageSize);
+  const activePageSize = normalizeListingPageSize(paging?.pageSize, selectedPageSize);
+  const activePageOffset = typeof paging?.offset === "number" ? Math.max(0, paging.offset) : pageOffset;
   const totalAvailable = filteredModeActive
     ? (paging?.total ?? activeListingsPayload?.totalAvailable ?? null)
     : (activeListingsPayload?.totalAvailable ?? paging?.total ?? listingsPayload?.totalAvailable ?? null);
-  const currentPage = paging?.page ?? Math.floor(pageOffset / pageSize) + 1;
-  const totalPages = typeof totalAvailable === "number" ? Math.max(1, Math.ceil(totalAvailable / pageSize)) : currentPage;
-  const hasPreviousPage = paging?.hasPrevious ?? pageOffset > 0;
-  const hasNextPage = paging?.hasNext ?? (typeof totalAvailable === "number" ? pageOffset + pageSize < totalAvailable : false);
+  const currentPage = paging?.page ?? Math.floor(activePageOffset / activePageSize) + 1;
+  const totalPages = typeof totalAvailable === "number" ? Math.max(1, Math.ceil(totalAvailable / activePageSize)) : currentPage;
+  const hasPreviousPage = paging?.hasPrevious ?? activePageOffset > 0;
+  const hasNextPage = paging?.hasNext ?? (typeof totalAvailable === "number" ? activePageOffset + activePageSize < totalAvailable : false);
   const counterSubject = filteredCounterSubject({ status: statusFilter, type: typeFilter, stock: stockFilter, query });
   const kpiScopeHint = filteredModeActive ? "No filtro atual" : "Na pagina carregada";
 
@@ -2198,7 +2209,7 @@ export function MercadoLivreMarketplacePage() {
       listingType: typeFilter,
       stock: stockFilter,
       offset: pageOffset,
-      limit: pageSize
+      limit: selectedPageSize
     });
     const cachedPayload = filteredListingsCacheRef.current.get(cacheKey);
     if (cachedPayload) {
@@ -2220,7 +2231,7 @@ export function MercadoLivreMarketplacePage() {
         if (typeFilter !== "all") params.set("listingType", typeFilter);
         if (stockFilter !== "all") params.set("stock", stockFilter);
         params.set("offset", String(pageOffset));
-        params.set("limit", String(pageSize));
+        params.set("limit", String(selectedPageSize));
         params.set("maxListings", "500");
         const response = await fetch(`/api/marketplaces/mercado-livre/client/listings?${params.toString()}`, { cache: "no-store", signal: controller.signal });
         const payload = await response.json();
@@ -2245,12 +2256,12 @@ export function MercadoLivreMarketplacePage() {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [filteredModeActive, hasClientConnection, normalizedQuery, pageOffset, pageSize, statusFilter, stockFilter, typeFilter]);
+  }, [filteredModeActive, hasClientConnection, normalizedQuery, pageOffset, selectedPageSize, statusFilter, stockFilter, typeFilter]);
 
   const filteredListings = listings;
 
   async function loadListingsPage(options?: { offset?: number; limit?: number }) {
-    const targetLimit = options?.limit ?? pageSize;
+    const targetLimit = normalizeListingPageSize(options?.limit ?? pageSize);
     const targetOffset = options?.offset ?? pageOffset;
     setFilteredListingsLoading(true);
     setLoadError("");
@@ -2266,7 +2277,7 @@ export function MercadoLivreMarketplacePage() {
       const typedPayload = payload as MercadoLivreListingsPayload;
       setListingsPayload(typedPayload);
       setAccount(typedPayload.account);
-      setPageSize(typedPayload.paging?.pageSize ?? targetLimit);
+      setPageSize(normalizeListingPageSize(typedPayload.paging?.pageSize, targetLimit));
       setPageOffset(typedPayload.paging?.offset ?? targetOffset);
       setSelectedIds(new Set());
     } catch (error) {
@@ -2277,7 +2288,7 @@ export function MercadoLivreMarketplacePage() {
   }
 
   async function syncListings(options?: { offset?: number; limit?: number }) {
-    const targetLimit = options?.limit ?? pageSize;
+    const targetLimit = normalizeListingPageSize(options?.limit ?? pageSize);
     const targetOffset = options?.offset ?? pageOffset;
     setSyncing(true);
     setLoadError("");
@@ -2294,7 +2305,7 @@ export function MercadoLivreMarketplacePage() {
       const typedPayload = payload as MercadoLivreListingsPayload;
       setListingsPayload(typedPayload);
       setAccount(typedPayload.account);
-      setPageSize(typedPayload.paging?.pageSize ?? targetLimit);
+      setPageSize(normalizeListingPageSize(typedPayload.paging?.pageSize, targetLimit));
       setPageOffset(typedPayload.paging?.offset ?? targetOffset);
       filteredListingsCacheRef.current.clear();
       setSelectedIds(new Set());
@@ -2974,10 +2985,11 @@ export function MercadoLivreMarketplacePage() {
   }
 
   function changePageSize(nextPageSize: number) {
-    setPageSize(nextPageSize);
+    const normalizedPageSize = normalizeListingPageSize(nextPageSize);
+    setPageSize(normalizedPageSize);
     setPageOffset(0);
     if (!hasActiveFilters) {
-      void loadListingsPage({ offset: 0, limit: nextPageSize });
+      void loadListingsPage({ offset: 0, limit: normalizedPageSize });
     }
   }
 
@@ -2988,7 +3000,7 @@ export function MercadoLivreMarketplacePage() {
       setStatusFilter("all");
       setTypeFilter("all");
       setStockFilter("all");
-      void loadListingsPage({ offset: 0, limit: pageSize });
+      void loadListingsPage({ offset: 0, limit: selectedPageSize });
       return;
     }
     if (nextFilter === "active" || nextFilter === "paused" || nextFilter === "under_review" || nextFilter === "error") {
@@ -3036,21 +3048,21 @@ export function MercadoLivreMarketplacePage() {
   }
 
   function goToPreviousPage() {
-    const nextOffset = Math.max(0, pageOffset - pageSize);
+    const nextOffset = Math.max(0, pageOffset - selectedPageSize);
     if (hasActiveFilters) {
       setPageOffset(nextOffset);
       return;
     }
-    void loadListingsPage({ offset: nextOffset, limit: pageSize });
+    void loadListingsPage({ offset: nextOffset, limit: selectedPageSize });
   }
 
   function goToNextPage() {
-    const nextOffset = pageOffset + pageSize;
+    const nextOffset = pageOffset + selectedPageSize;
     if (hasActiveFilters) {
       setPageOffset(nextOffset);
       return;
     }
-    void loadListingsPage({ offset: nextOffset, limit: pageSize });
+    void loadListingsPage({ offset: nextOffset, limit: selectedPageSize });
   }
 
   const pictureGalleryPictures = useMemo(
@@ -3152,7 +3164,7 @@ export function MercadoLivreMarketplacePage() {
     setTypeFilter("all");
     setStockFilter("all");
     setPageOffset(0);
-    void loadListingsPage({ offset: 0, limit: pageSize });
+    void loadListingsPage({ offset: 0, limit: selectedPageSize });
   }
 
   return (
@@ -3227,7 +3239,7 @@ export function MercadoLivreMarketplacePage() {
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Button type="button" variant="secondary" onClick={() => void syncListings({ offset: 0, limit: pageSize })} disabled={syncing}>
+                <Button type="button" variant="secondary" onClick={() => void syncListings({ offset: 0, limit: selectedPageSize })} disabled={syncing}>
                   <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
                   {syncing ? "Sincronizando..." : "Sincronizar anuncios"}
                 </Button>
@@ -3384,7 +3396,7 @@ export function MercadoLivreMarketplacePage() {
                   className="rounded-md border border-matrix-border bg-matrix-panel px-2 py-1.5 text-matrix-fg outline-none"
                   disabled={!canUsePagination || syncing || filteredListingsLoading}
                   onChange={(event) => changePageSize(Number(event.target.value))}
-                  value={pageSize}
+                  value={selectedPageSize}
                 >
                   {pageSizeOptions.map((option) => (
                     <option key={option} value={option}>
@@ -3601,7 +3613,7 @@ export function MercadoLivreMarketplacePage() {
                 </span>
               ) : (
                 <span>
-                  {filteredListings.length} visiveis nesta pagina · offset {paging?.offset ?? pageOffset} · {pageSize} por pagina
+                  {filteredListings.length} visiveis nesta pagina · offset {activePageOffset} · {activePageSize} por pagina
                 </span>
               )}
               </div>
