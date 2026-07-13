@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "crypto";
-import type { Prisma } from "@prisma/client";
-import type { ConnectionRole } from "@prisma/client";
+import { Prisma, type ConnectionRole } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { encryptSecret, decryptSecret } from "@/lib/security/encryption";
 import { sanitizeLogPayload } from "@/lib/utils";
@@ -25,6 +24,13 @@ type OAuthStateInput = {
   connectionRole: ConnectionRole;
 };
 
+export class BlingAccountAlreadyConnectedError extends Error {
+  constructor() {
+    super("Esta conta Bling já está conectada à sua organização.");
+    this.name = "BlingAccountAlreadyConnectedError";
+  }
+}
+
 function hashState(state: string) {
   return createHash("sha256").update(state).digest("hex");
 }
@@ -43,6 +49,66 @@ function getBlingCredentials() {
 
 function basicAuth(clientId: string, clientSecret: string) {
   return Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+}
+
+export function extractBlingCompanyIdFromJwt(accessToken: string) {
+  const parts = accessToken.split(".");
+  if (parts.length !== 3) {
+    throw new Error("Não foi possível identificar a conta Bling autorizada.");
+  }
+
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as { company_id?: unknown };
+    const rawCompanyId = payload.company_id;
+    const companyId = typeof rawCompanyId === "number" && Number.isSafeInteger(rawCompanyId)
+      ? String(rawCompanyId)
+      : typeof rawCompanyId === "string"
+        ? rawCompanyId.trim()
+        : "";
+
+    if (!/^[1-9]\d{0,31}$/.test(companyId)) {
+      throw new Error("invalid_company_id");
+    }
+
+    return companyId;
+  } catch {
+    throw new Error("Não foi possível identificar a conta Bling autorizada.");
+  }
+}
+
+function encryptedTokenData(connectionId: string, organizationId: string, tokenResponse: TokenResponse) {
+  const expiresAt = new Date(Date.now() + Math.max(0, tokenResponse.expires_in - 60) * 1000);
+  const refreshExpiresAt = tokenResponse.refresh_expires_in ? new Date(Date.now() + tokenResponse.refresh_expires_in * 1000) : null;
+
+  return {
+    organizationId,
+    blingConnectionId: connectionId,
+    accessTokenEncrypted: encryptSecret(tokenResponse.access_token),
+    refreshTokenEncrypted: encryptSecret(tokenResponse.refresh_token),
+    tokenType: tokenResponse.token_type ?? "Bearer",
+    scope: tokenResponse.scope,
+    expiresAt,
+    refreshExpiresAt
+  };
+}
+
+function storedConnectionMatchesCompany(
+  connection: { externalCompanyId: string | null; tokens: Array<{ accessTokenEncrypted: string }> },
+  companyId: string
+) {
+  if (connection.externalCompanyId === companyId) return true;
+  const encryptedAccessToken = connection.tokens[0]?.accessTokenEncrypted;
+  if (!encryptedAccessToken) return false;
+
+  try {
+    return extractBlingCompanyIdFromJwt(decryptSecret(encryptedAccessToken)) === companyId;
+  } catch {
+    return false;
+  }
+}
+
+function isSerializationConflict(error: unknown) {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034";
 }
 
 async function audit(organizationId: string, userId: string | null, action: string, metadata: Record<string, unknown>) {
@@ -160,21 +226,81 @@ export class BlingOAuthService {
   }
 
   async saveToken(connectionId: string, organizationId: string, tokenResponse: TokenResponse) {
-    const expiresAt = new Date(Date.now() + Math.max(0, tokenResponse.expires_in - 60) * 1000);
-    const refreshExpiresAt = tokenResponse.refresh_expires_in ? new Date(Date.now() + tokenResponse.refresh_expires_in * 1000) : null;
-
     return prisma.blingToken.create({
-      data: {
-        organizationId,
-        blingConnectionId: connectionId,
-        accessTokenEncrypted: encryptSecret(tokenResponse.access_token),
-        refreshTokenEncrypted: encryptSecret(tokenResponse.refresh_token),
-        tokenType: tokenResponse.token_type ?? "Bearer",
-        scope: tokenResponse.scope,
-        expiresAt,
-        refreshExpiresAt
-      }
+      data: encryptedTokenData(connectionId, organizationId, tokenResponse)
     });
+  }
+
+  private async createConnectionWithToken(stateRecord: Awaited<ReturnType<BlingOAuthService["validateOAuthState"]>>, tokenResponse: TokenResponse, companyId: string) {
+    if (!stateRecord) throw new Error("State OAuth invalido ou expirado.");
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await prisma.$transaction(async (transaction) => {
+          const existingConnections = await transaction.blingConnection.findMany({
+            where: {
+              organizationId: stateRecord.organizationId,
+              status: { not: "DISCONNECTED" }
+            },
+            select: {
+              externalCompanyId: true,
+              tokens: {
+                orderBy: { updatedAt: "desc" },
+                take: 1,
+                select: { accessTokenEncrypted: true }
+              }
+            }
+          });
+
+          if (existingConnections.some((connection) => storedConnectionMatchesCompany(connection, companyId))) {
+            throw new BlingAccountAlreadyConnectedError();
+          }
+
+          const connection = await transaction.blingConnection.create({
+            data: {
+              organizationId: stateRecord.organizationId,
+              name: stateRecord.connectionName,
+              role: stateRecord.connectionRole,
+              status: "ACTIVE",
+              scopes: tokenResponse.scope,
+              externalCompanyId: companyId
+            }
+          });
+
+          await transaction.blingToken.create({
+            data: encryptedTokenData(connection.id, stateRecord.organizationId, tokenResponse)
+          });
+
+          await transaction.auditLog.create({
+            data: {
+              organizationId: stateRecord.organizationId,
+              userId: stateRecord.userId,
+              action: "BLING_OAUTH_CALLBACK_SUCCESS",
+              entity: "BlingConnection",
+              metadata: sanitizeLogPayload({ connectionId: connection.id, status: "success" }) as Prisma.InputJsonObject
+            }
+          });
+
+          return connection;
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      } catch (error) {
+        if (error instanceof BlingAccountAlreadyConnectedError) throw error;
+        if (!isSerializationConflict(error)) throw error;
+
+        const concurrentDuplicate = await prisma.blingConnection.findFirst({
+          where: {
+            organizationId: stateRecord.organizationId,
+            externalCompanyId: companyId,
+            status: { not: "DISCONNECTED" }
+          },
+          select: { id: true }
+        });
+        if (concurrentDuplicate) throw new BlingAccountAlreadyConnectedError();
+        if (attempt === 1) throw new Error("Não foi possível concluir a conexão Bling.");
+      }
+    }
+
+    throw new Error("Não foi possível concluir a conexão Bling.");
   }
 
   async completeCallback(code: string, state: string) {
@@ -185,20 +311,8 @@ export class BlingOAuthService {
 
     await prisma.oAuthState.update({ where: { id: stateRecord.id }, data: { usedAt: new Date() } });
     const tokenResponse = await this.exchangeCodeForToken(code);
-
-    const connection = await prisma.blingConnection.create({
-      data: {
-        organizationId: stateRecord.organizationId,
-        name: stateRecord.connectionName,
-        role: stateRecord.connectionRole,
-        status: "ACTIVE",
-        scopes: tokenResponse.scope
-      }
-    });
-
-    await this.saveToken(connection.id, stateRecord.organizationId, tokenResponse);
-    await audit(stateRecord.organizationId, stateRecord.userId, "BLING_OAUTH_CALLBACK_SUCCESS", { connectionId: connection.id, status: "success" });
-    return connection;
+    const companyId = extractBlingCompanyIdFromJwt(tokenResponse.access_token);
+    return this.createConnectionWithToken(stateRecord, tokenResponse, companyId);
   }
 
   async revokeLocalConnection(connectionId: string, organizationId: string, userId?: string) {

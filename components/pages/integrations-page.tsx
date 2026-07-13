@@ -16,7 +16,7 @@ type Connection = {
   createdAt: string;
 };
 
-type Limit = { allowed: boolean; current: number; limit: number };
+type Limit = { allowed: boolean; current: number; limit: number | null; unlimited: boolean };
 type MercadoLivreConnection = {
   id: string;
   siteId: string;
@@ -36,7 +36,7 @@ const statusLabels = { ACTIVE: "Ativa", EXPIRED: "Expirada", ERROR: "Erro", DISC
 
 export function IntegrationsPage() {
   const [connections, setConnections] = useState<Connection[]>([]);
-  const [limit, setLimit] = useState<Limit>({ allowed: false, current: 0, limit: 0 });
+  const [limit, setLimit] = useState<Limit>({ allowed: false, current: 0, limit: 0, unlimited: false });
   const [mercadoLivre, setMercadoLivre] = useState<MercadoLivreStatus>({ configured: false, data: null });
   const [modalOpen, setModalOpen] = useState(false);
   const [name, setName] = useState("Bling");
@@ -51,7 +51,7 @@ export function IntegrationsPage() {
     if (response.ok) {
       const payload = await response.json();
       setConnections(payload.data ?? []);
-      setLimit(payload.limit ?? { allowed: false, current: 0, limit: 0 });
+      setLimit(payload.limit ?? { allowed: false, current: 0, limit: 0, unlimited: false });
     }
     if (mercadoLivreResponse.ok) {
       const payload = (await mercadoLivreResponse.json()) as MercadoLivreStatus;
@@ -136,7 +136,7 @@ export function IntegrationsPage() {
         <Card>
           <div className="mb-4 flex items-center justify-between gap-3">
             <h3 className="font-semibold text-white">Conexoes Bling</h3>
-            <Badge tone={limit.allowed ? "success" : "warning"}>{limit.current}/{limit.limit}</Badge>
+            <Badge tone={limit.allowed ? "success" : "warning"}>{limit.unlimited ? `${limit.current} / Ilimitado` : `${limit.current}/${limit.limit}`}</Badge>
           </div>
           {connections.length ? (
             <DataTable

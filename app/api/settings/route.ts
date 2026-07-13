@@ -37,6 +37,7 @@ export async function GET() {
       subscription: organization.subscription,
       usage: {
         blingConnections: usage.blingConnections,
+        blingConnectionLimit: usage.blingConnectionLimit,
         operations: usage.operations
       },
       users: users.map((membership) => ({

@@ -24,6 +24,12 @@ type SettingsData = {
   } | null;
   usage: {
     blingConnections: number;
+    blingConnectionLimit: {
+      allowed: boolean;
+      current: number;
+      limit: number | null;
+      unlimited: boolean;
+    };
     operations: number;
   };
   users: Array<{
@@ -38,7 +44,7 @@ type SettingsData = {
 const fallback: SettingsData = {
   organization: { name: "Wayner Commerce Master", document: null, status: "ACTIVE" },
   subscription: null,
-  usage: { blingConnections: 0, operations: 0 },
+  usage: { blingConnections: 0, blingConnectionLimit: { allowed: false, current: 0, limit: 0, unlimited: false }, operations: 0 },
   users: []
 };
 
@@ -110,7 +116,11 @@ export function SettingsPage() {
               <Badge tone="purple">{plan?.name ?? "Sem plano"}</Badge>
             </div>
             <div className="mt-5 grid gap-3 md:grid-cols-3">
-              <Info icon={<CreditCard className="h-5 w-5" />} title="Blings" detail={`${data.usage.blingConnections}/${plan?.maxBlingConnections ?? 0}`} />
+              <Info
+                icon={<CreditCard className="h-5 w-5" />}
+                title="Blings"
+                detail={data.usage.blingConnectionLimit.unlimited ? `${data.usage.blingConnections} / Ilimitado` : `${data.usage.blingConnections}/${data.usage.blingConnectionLimit.limit ?? 0}`}
+              />
               <Info icon={<Shield className="h-5 w-5" />} title="Operacoes" detail={`${data.usage.operations}/${operationLimit}`} />
               <Info icon={<Users className="h-5 w-5" />} title="Usuarios" detail={`${data.users.length}/${plan?.maxUsers ?? 0}`} />
             </div>

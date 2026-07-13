@@ -1,10 +1,28 @@
 import { prisma } from "@/lib/prisma";
 
+const masterOrganizationSlugs = new Set(["wayner-master", "w-ecommerce-master"]);
+
+export type BlingConnectionLimit = {
+  allowed: boolean;
+  current: number;
+  limit: number | null;
+  unlimited: boolean;
+};
+
 function currentMonthPeriod() {
   const now = new Date();
   const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0));
   const periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0, 23, 59, 59, 999));
   return { periodStart, periodEnd };
+}
+
+export async function isMasterOrganization(organizationId: string) {
+  const organization = await prisma.organization.findUnique({
+    where: { id: organizationId },
+    select: { slug: true }
+  });
+
+  return Boolean(organization?.slug && masterOrganizationSlugs.has(organization.slug));
 }
 
 export class PlanLimitService {
@@ -17,14 +35,22 @@ export class PlanLimitService {
     return subscription;
   }
 
-  async checkBlingConnectionLimit(organizationId: string) {
-    const subscription = await this.getCurrentPlan(organizationId);
-    if (!subscription) return { allowed: false, current: 0, limit: 0 };
+  async checkBlingConnectionLimit(organizationId: string): Promise<BlingConnectionLimit> {
+    const [isMaster, subscription, current] = await Promise.all([
+      isMasterOrganization(organizationId),
+      this.getCurrentPlan(organizationId),
+      prisma.blingConnection.count({ where: { organizationId, status: { not: "DISCONNECTED" } } })
+    ]);
 
-    const current = await prisma.blingConnection.count({ where: { organizationId, status: { not: "DISCONNECTED" } } });
+    if (isMaster) {
+      return { allowed: true, current, limit: null, unlimited: true };
+    }
+
+    if (!subscription) return { allowed: false, current, limit: 0, unlimited: false };
+
     const limit = subscription.plan.code === "ENTERPRISE" ? subscription.enterpriseLimit ?? subscription.plan.maxBlingConnections : subscription.plan.maxBlingConnections;
 
-    return { allowed: current < limit, current, limit };
+    return { allowed: current < limit, current, limit, unlimited: false };
   }
 
   async checkOperationLimit(organizationId: string, operationKey: string) {
@@ -66,14 +92,18 @@ export class PlanLimitService {
   }
 
   async getUsageSummary(organizationId: string) {
-    const subscription = await this.getCurrentPlan(organizationId);
-    const blingConnections = await prisma.blingConnection.count({ where: { organizationId } });
-    const usage = await prisma.usageCounter.findMany({ where: { organizationId } });
+    const [subscription, blingConnections, blingConnectionLimit, usage] = await Promise.all([
+      this.getCurrentPlan(organizationId),
+      prisma.blingConnection.count({ where: { organizationId } }),
+      this.checkBlingConnectionLimit(organizationId),
+      prisma.usageCounter.findMany({ where: { organizationId } })
+    ]);
     const operations = usage.reduce((total, item) => total + item.value, 0);
 
     return {
       subscription,
       blingConnections,
+      blingConnectionLimit,
       operations
     };
   }

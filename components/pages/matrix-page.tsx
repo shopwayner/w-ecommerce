@@ -7,13 +7,14 @@ import { Badge, Button, Card, PageHeader } from "@/components/ui";
 
 type Connection = { id: string; name: string; role: "MATRIX" | "BRANCH" | "OTHER"; status: string; lastSyncAt: string | null; lastTestAt: string | null };
 type Rule = { id: string; productsEnabled: boolean; pricesEnabled: boolean; inventoryEnabled: boolean; ordersEnabled: boolean };
+type Limit = { current: number; limit: number | null; unlimited: boolean };
 
 const roleLabels = { MATRIX: "Matriz", BRANCH: "Filial", OTHER: "Outra" };
 
 export function MatrixPage() {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
-  const [limit, setLimit] = useState({ current: 0, limit: 0 });
+  const [limit, setLimit] = useState<Limit>({ current: 0, limit: 0, unlimited: false });
 
   useEffect(() => {
     fetch("/api/matrix")
@@ -21,7 +22,7 @@ export function MatrixPage() {
       .then((payload) => {
         setConnections(payload?.connections ?? []);
         setRules(payload?.syncRules ?? []);
-        setLimit(payload?.limit ?? { current: 0, limit: 0 });
+        setLimit(payload?.limit ?? { current: 0, limit: 0, unlimited: false });
       })
       .catch(() => undefined);
   }, []);
@@ -34,7 +35,7 @@ export function MatrixPage() {
         actions={<><Button onClick={() => window.location.assign("/integrations")}><Cable className="h-4 w-4" /> Conectar Bling</Button><Button variant="secondary"><RefreshCw className="h-4 w-4" /> Sincronizar agora</Button></>}
       />
       <div className="mb-4 rounded-md border border-matrix-border bg-white/[0.03] px-4 py-3 text-sm text-slate-300">
-        Blings usados no plano: {limit.current}/{limit.limit}. Produtos, pedidos e estoque ainda nao sincronizam nesta etapa.
+        Blings usados no plano: {limit.unlimited ? `${limit.current} / Ilimitado` : `${limit.current}/${limit.limit}`}. Produtos, pedidos e estoque ainda nao sincronizam nesta etapa.
       </div>
       {connections.length ? (
         <div className="grid gap-4 xl:grid-cols-3">

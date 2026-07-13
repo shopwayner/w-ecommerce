@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { blingOAuthService } from "@/lib/services/bling-oauth-service";
+import { BlingAccountAlreadyConnectedError, blingOAuthService } from "@/lib/services/bling-oauth-service";
 import { sanitizeLogPayload } from "@/lib/utils";
 
 export async function GET(request: NextRequest) {
@@ -12,17 +12,20 @@ export async function GET(request: NextRequest) {
 
   if (error || !code || !state) {
     await safeCallbackAudit(state, "BLING_OAUTH_CALLBACK_ERROR", { reason: error ? "provider_error" : "missing_code_or_state" });
-    return NextResponse.redirect(new URL("/integrations?bling=error", request.url));
+    return NextResponse.redirect(new URL("/erps?bling=error", request.url));
   }
 
   try {
     await blingOAuthService.completeCallback(code, state);
-    return NextResponse.redirect(new URL("/integrations?bling=success", request.url));
+    return NextResponse.redirect(new URL("/erps?bling=connected", request.url));
   } catch (callbackError) {
+    if (callbackError instanceof BlingAccountAlreadyConnectedError) {
+      return NextResponse.redirect(new URL("/erps?bling=already-connected", request.url));
+    }
     await safeCallbackAudit(state, "BLING_OAUTH_CALLBACK_ERROR", {
-      reason: callbackError instanceof Error ? callbackError.message : "callback_error"
+      reason: "callback_error"
     });
-    return NextResponse.redirect(new URL("/integrations?bling=error", request.url));
+    return NextResponse.redirect(new URL("/erps?bling=error", request.url));
   }
 }
 

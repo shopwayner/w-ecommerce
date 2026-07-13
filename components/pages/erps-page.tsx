@@ -229,6 +229,20 @@ export function ERPsPage() {
     setForm(createForm(selectedConnection, selected));
   }, [selected, selectedConnection, modalMode]);
 
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const blingResult = url.searchParams.get("bling");
+    if (!blingResult) return;
+
+    if (blingResult === "connected") setMessage("Conta Bling conectada com sucesso.");
+    else if (blingResult === "already-connected") setMessage("Esta conta Bling já está conectada.");
+    else if (blingResult === "error") setMessage("Não foi possível concluir a conexão Bling.");
+    else return;
+
+    url.searchParams.delete("bling");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  }, []);
+
   function closeModal() {
     setSelected(null);
     setModalMode(null);
