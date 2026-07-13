@@ -393,6 +393,33 @@ type GtinSearchPayload = {
   error?: string;
 };
 
+type AmazonCatalogIdentifier = {
+  type: string;
+  value: string;
+};
+
+type AmazonCatalogItem = {
+  asin: string;
+  title: string | null;
+  brand: string | null;
+  imageUrl: string | null;
+  identifiers: AmazonCatalogIdentifier[];
+  productType: string | null;
+  attributes: Record<string, string | string[]>;
+};
+
+type AmazonCatalogResponse = {
+  success: boolean;
+  data?: {
+    source: "AMAZON";
+    environment: "sandbox";
+    items: AmazonCatalogItem[];
+  };
+  error?: string;
+};
+
+type AmazonCatalogState = "idle" | "loading" | "success" | "empty" | "unavailable" | "error";
+
 type InternalGtinDiagnostic = {
   selectedProductSku: string | null;
   selectedProductGtin: string | null;
@@ -1187,6 +1214,11 @@ export function IntelligentProductRegistrationPage() {
   const [selectedProductName, setSelectedProductName] = useState<string | null>(null);
   const [selectedProductGtin, setSelectedProductGtin] = useState<string | null>(null);
   const [selectedProductBrand, setSelectedProductBrand] = useState<string | null>(null);
+  const [amazonGtinInput, setAmazonGtinInput] = useState("");
+  const [amazonCatalogState, setAmazonCatalogState] = useState<AmazonCatalogState>("idle");
+  const [amazonCatalogItems, setAmazonCatalogItems] = useState<AmazonCatalogItem[]>([]);
+  const [amazonCatalogMessage, setAmazonCatalogMessage] = useState<string | null>(null);
+  const [selectedAmazonReferenceAsin, setSelectedAmazonReferenceAsin] = useState<string | null>(null);
   const [, setMercadoLivreLoading] = useState(true);
   const [mercadoLivreConfigured, setMercadoLivreConfigured] = useState(false);
   const [mercadoLivreAccounts, setMercadoLivreAccounts] = useState<MercadoLivreAccount[]>([]);
@@ -1249,7 +1281,6 @@ export function IntelligentProductRegistrationPage() {
   const mercadoLivreEffectiveSearchType = effectiveMercadoLivreSearchType(mercadoLivreSearch);
   const mercadoLivreEffectiveSearchValue = effectiveMercadoLivreSearchValue(mercadoLivreSearch);
   const mercadoLivreManualSearchUrl = mercadoLivrePublicSearchUrl(mercadoLivreEffectiveSearchValue);
-  const productGtinManualSearchUrl = mercadoLivrePublicSearchUrl(selectedProductGtin);
   const mercadoLivreCopyGtinValue = mercadoLivreSearch?.localProduct?.gtin || (mercadoLivreEffectiveSearchType === "GTIN" ? mercadoLivreEffectiveSearchValue : null);
   const mercadoLivreGtinManualSearchUrl = mercadoLivrePublicSearchUrl(mercadoLivreCopyGtinValue);
   const mercadoLivreGtinSearchBlocked =
@@ -1508,6 +1539,72 @@ export function IntelligentProductRegistrationPage() {
       ]
     : [];
 
+  async function searchAmazonCatalog() {
+    const gtin = amazonGtinInput.trim();
+    const fallbackTitle = selectedProductName?.trim() || query.trim();
+    if (!gtin && !fallbackTitle) {
+      setAmazonCatalogState("error");
+      setAmazonCatalogItems([]);
+      setAmazonCatalogMessage("Selecione um produto com GTIN ou titulo para buscar uma referencia.");
+      return;
+    }
+
+    setAmazonCatalogState("loading");
+    setAmazonCatalogItems([]);
+    setAmazonCatalogMessage("Buscando referencia na Amazon...");
+    setSelectedAmazonReferenceAsin(null);
+
+    const params = new URLSearchParams();
+    if (gtin) params.set("gtin", gtin);
+    else params.set("title", fallbackTitle);
+    if (selectedProductSku) params.set("sku", selectedProductSku);
+
+    try {
+      const response = await fetch(`/api/integrations/amazon/catalog/search?${params.toString()}`, {
+        cache: "no-store"
+      });
+      const payload = (await response.json().catch(() => null)) as AmazonCatalogResponse | null;
+
+      if (!response.ok || !payload?.success) {
+        const unavailable = response.status === 409;
+        setAmazonCatalogState(unavailable ? "unavailable" : "error");
+        setAmazonCatalogMessage(
+          unavailable
+            ? "A conexao Amazon ainda nao esta disponivel."
+            : response.status === 400
+              ? payload?.error ?? "Confira o GTIN informado e tente novamente."
+              : "Nao foi possivel consultar a Amazon agora."
+        );
+        return;
+      }
+
+      const items = payload.data?.items ?? [];
+      setAmazonCatalogItems(items);
+      if (!items.length) {
+        setAmazonCatalogState("empty");
+        setAmazonCatalogMessage(
+          gtin
+            ? "Nenhuma referencia encontrada na Amazon para este GTIN."
+            : "Nenhuma referencia encontrada na Amazon para este titulo."
+        );
+        return;
+      }
+
+      setAmazonCatalogState("success");
+      setAmazonCatalogMessage(`${items.length} referencia(s) encontrada(s) para revisao.`);
+    } catch {
+      setAmazonCatalogState("error");
+      setAmazonCatalogItems([]);
+      setAmazonCatalogMessage("Nao foi possivel consultar a Amazon agora.");
+    }
+  }
+
+  function selectAmazonReference(item: AmazonCatalogItem) {
+    setSelectedAmazonReferenceAsin(item.asin);
+    setAmazonCatalogMessage("Referencia Amazon selecionada.");
+    setMessage("Referencia Amazon selecionada apenas nesta tela. Nenhum dado foi salvo.");
+  }
+
   async function loadMercadoLivreAccounts(options?: { silent?: boolean }) {
     if (!options?.silent) setMercadoLivreLoading(true);
     try {
@@ -1613,11 +1710,17 @@ export function IntelligentProductRegistrationPage() {
   }
 
   function updateSelectedProductState(nextProduct: SafeProduct | null) {
+    const nextGtin = normalizeGtinInput(nextProduct?.gtin);
     setSelectedProduct(nextProduct);
     setSelectedProductSku(nextProduct?.sku ?? null);
     setSelectedProductName(nextProduct?.name ?? null);
-    setSelectedProductGtin(normalizeGtinInput(nextProduct?.gtin) || null);
+    setSelectedProductGtin(nextGtin || null);
     setSelectedProductBrand(nextProduct?.brand ?? null);
+    setAmazonGtinInput(nextGtin);
+    setAmazonCatalogState("idle");
+    setAmazonCatalogItems([]);
+    setAmazonCatalogMessage(null);
+    setSelectedAmazonReferenceAsin(null);
   }
 
   async function consultInternalGtinCatalog() {
@@ -3122,42 +3225,60 @@ export function IntelligentProductRegistrationPage() {
               <div>
                 <p className="font-semibold text-matrix-fg">Cadastro Automático</p>
               </div>
-              <Badge tone={mercadoLivreConnected ? "success" : mercadoLivreConfigured ? "warning" : "muted"}>
-                {mercadoLivreConnected ? "Busca ativa" : mercadoLivreConfigured ? "Conectar" : "Pendente"}
-              </Badge>
+              <Badge tone="muted">Referencias</Badge>
+            </div>
+            <div className="mt-3 space-y-2">
+              <label className="flex items-center gap-2 text-xs font-semibold text-matrix-fg" htmlFor="amazon-catalog-gtin">
+                <AmazonLogo size={18} />
+                GTIN
+              </label>
+              <input
+                autoComplete="off"
+                className="w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm text-matrix-fg outline-none focus:border-matrix-gold/60"
+                id="amazon-catalog-gtin"
+                inputMode="numeric"
+                onChange={(event) => {
+                  setAmazonGtinInput(event.target.value);
+                  setAmazonCatalogState("idle");
+                  setAmazonCatalogItems([]);
+                  setAmazonCatalogMessage(null);
+                  setSelectedAmazonReferenceAsin(null);
+                }}
+                placeholder="GTIN/EAN do produto"
+                value={amazonGtinInput}
+              />
+              <Button
+                className="w-full justify-center"
+                disabled={amazonCatalogState === "loading" || (!amazonGtinInput.trim() && !selectedProductName?.trim() && !query.trim())}
+                onClick={searchAmazonCatalog}
+                type="button"
+                variant="secondary"
+              >
+                <AmazonLogo size={18} />
+                {amazonCatalogState === "loading" ? "Buscando referencia na Amazon..." : "Buscar na Amazon"}
+              </Button>
+              {amazonCatalogMessage && amazonCatalogState !== "success" ? (
+                <p className="rounded-md border border-matrix-border bg-matrix-panel/70 p-2 text-xs text-matrix-muted">
+                  {amazonCatalogMessage}
+                </p>
+              ) : null}
             </div>
             {!mercadoLivreConnected && mercadoLivreConfigured ? (
-              <Button className="mt-3 w-full justify-center" onClick={connectMercadoLivre} type="button">
+              <Button className="mt-3 w-full justify-center" onClick={connectMercadoLivre} type="button" variant="secondary">
                 <MercadoLivreLogo size={18} />
                 Conectar Mercado Livre
               </Button>
             ) : null}
             {mercadoLivreConnected ? (
-              <div className="mt-3 space-y-2">
-                <Button className="w-full justify-center" disabled={mercadoLivreSearchLoading || !selectedProductGtin} onClick={() => searchMercadoLivreReadOnly("gtin")} type="button" variant="secondary">
-                  <AmazonLogo size={18} />
-                  GTIN
-                </Button>
+              <div className="mt-3 space-y-2 border-t border-matrix-border pt-3">
                 <Button className="w-full justify-center" disabled={mercadoLivreSearchLoading || (!selectedProductName && !query.trim())} onClick={() => searchMercadoLivreReadOnly("title")} type="button" variant="secondary">
                   <MercadoLivreLogo size={18} />
                   Título
                 </Button>
-                {productGtinManualSearchUrl ? (
-                  <a
-                    className="inline-flex min-h-9 w-full items-center justify-center gap-2 rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 py-2 text-sm font-semibold text-matrix-fg transition hover:border-matrix-gold/50 hover:bg-matrix-goldSoft/40"
-                    href={productGtinManualSearchUrl}
-                    rel="noopener noreferrer"
-                    target="_blank"
-                  >
-                    <MercadoLivreLogo size={18} />
-                    Abrir busca por GTIN
-                  </a>
-                ) : null}
                 <Button className="w-full justify-center" onClick={() => setReferenceImportOpen(true)} type="button">
                   <MercadoLivreLogo size={18} />
                   Importar anuncio por link/ID
                 </Button>
-                <p className="text-xs text-matrix-muted">Importar por link/ID continua como fallback secundario. O fluxo principal e busca por GTIN ou titulo.</p>
               </div>
             ) : null}
           </div>
@@ -3172,10 +3293,10 @@ export function IntelligentProductRegistrationPage() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h3 className="flex items-center gap-2 font-semibold text-matrix-fg">
-                  <MercadoLivreLogo size={18} />
-                  Mercado Livre
+                  <PackageSearch className="h-4 w-4 text-matrix-goldDark" />
+                  Referencias de cadastro
                 </h3>
-                <p className="text-sm text-matrix-muted">Resultados e detalhes do anuncio selecionado. Dados auxiliares ficam nos botoes ao lado.</p>
+                <p className="text-sm text-matrix-muted">Resultados Amazon e Mercado Livre para revisao antes de qualquer uso local.</p>
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button onClick={() => setActivePanel("product")} type="button" variant="secondary">
@@ -3195,7 +3316,77 @@ export function IntelligentProductRegistrationPage() {
           </div>
 
           <div className="space-y-4 overflow-visible p-4">
-            {!mercadoLivreSearch && !referenceImport ? (
+            {amazonCatalogState !== "idle" ? (
+              <section className="rounded-lg border border-matrix-gold/35 bg-matrix-goldSoft/18">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-matrix-border px-4 py-3">
+                  <div>
+                    <h4 className="flex items-center gap-2 font-semibold text-matrix-fg">
+                      <AmazonLogo size={18} />
+                      Referencias Amazon
+                    </h4>
+                    <p className="text-sm text-matrix-muted">
+                      {amazonCatalogMessage ?? "Consulte referencias para revisar os dados do produto."}
+                    </p>
+                  </div>
+                  {selectedAmazonReferenceAsin ? <Badge tone="success">Referencia selecionada</Badge> : null}
+                </div>
+
+                {amazonCatalogState === "loading" ? (
+                  <div className="grid min-h-36 place-items-center p-6 text-center">
+                    <div>
+                      <Search className="mx-auto h-8 w-8 text-matrix-goldDark" />
+                      <p className="mt-3 text-sm font-semibold text-matrix-fg">Buscando referencia na Amazon...</p>
+                    </div>
+                  </div>
+                ) : null}
+
+                {amazonCatalogState === "empty" || amazonCatalogState === "unavailable" || amazonCatalogState === "error" ? (
+                  <div className="p-4">
+                    <p className="rounded-md border border-matrix-border bg-matrix-panel/70 p-3 text-sm text-matrix-muted">
+                      {amazonCatalogMessage}
+                    </p>
+                  </div>
+                ) : null}
+
+                {amazonCatalogState === "success" && amazonCatalogItems.length ? (
+                  <div className="grid gap-3 p-4 md:grid-cols-2">
+                    {amazonCatalogItems.map((item) => {
+                      const selected = selectedAmazonReferenceAsin === item.asin;
+                      const identifiers = item.identifiers.map((identifier) => `${identifier.type}: ${identifier.value}`).join(" | ");
+                      return (
+                        <article
+                          className={`rounded-lg border p-3 ${selected ? "border-matrix-gold bg-matrix-goldSoft/30" : "border-matrix-border bg-matrix-panel/72"}`}
+                          key={item.asin}
+                        >
+                          <div className="flex gap-3">
+                            <ProductImage alt={item.title ?? "Referencia Amazon"} size="sm" src={item.imageUrl} />
+                            <div className="min-w-0 flex-1">
+                              <p className="line-clamp-2 font-semibold text-matrix-fg">{formatValue(item.title)}</p>
+                              <div className="mt-2 space-y-1 text-xs text-matrix-muted">
+                                <p>ASIN: {item.asin}</p>
+                                <p>Marca: {formatValue(item.brand)}</p>
+                                <p className="break-words">{identifiers || "GTIN/EAN/UPC: -"}</p>
+                                <p>Tipo do produto: {formatValue(item.productType)}</p>
+                              </div>
+                            </div>
+                          </div>
+                          <Button
+                            className="mt-3 w-full justify-center"
+                            onClick={() => selectAmazonReference(item)}
+                            type="button"
+                            variant={selected ? "secondary" : "primary"}
+                          >
+                            {selected ? "Referencia selecionada" : "Usar como referencia"}
+                          </Button>
+                        </article>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
+
+            {!mercadoLivreSearch && !referenceImport && amazonCatalogState === "idle" ? (
               <section className="grid min-h-[260px] place-items-center rounded-lg border border-matrix-border bg-matrix-panel2/45 p-8 text-center">
                 <div>
                   <Search className="mx-auto h-10 w-10 text-matrix-goldDark" />
