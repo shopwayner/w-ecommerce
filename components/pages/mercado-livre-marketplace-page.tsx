@@ -36,7 +36,11 @@ import {
   calculateMercadoLivreProfitMargin,
   MERCADO_LIVRE_MARGIN_TAX_RATE
 } from "@/lib/marketplaces/mercado-livre-profit-margin";
-import { MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE } from "@/lib/services/marketplaces/mercado-livre-shipping-cost";
+import {
+  isUsableStaleSellerShippingCost,
+  MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE,
+  usableSellerShippingCostAmount
+} from "@/lib/services/marketplaces/mercado-livre-shipping-cost";
 
 type MercadoLivreClientAccount = {
   connected: boolean;
@@ -696,37 +700,47 @@ function feePercentLabel(listing: MercadoLivreClientListing) {
 }
 
 function shippingCostAmount(listing: MercadoLivreClientListing) {
-  if (listing.shipping?.costStale) return null;
-  if (listing.shipping?.costSource !== MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE) return null;
-  return typeof listing.shipping?.costAmount === "number" ? listing.shipping.costAmount : null;
+  return usableSellerShippingCostAmount({
+    costAmount: listing.shipping?.costAmount,
+    source: listing.shipping?.costSource
+  });
+}
+
+function hasStaleShippingCost(listing: MercadoLivreClientListing) {
+  return isUsableStaleSellerShippingCost({
+    costAmount: listing.shipping?.costAmount,
+    source: listing.shipping?.costSource,
+    stale: listing.shipping?.costStale
+  });
 }
 
 function staleShippingCostLabel(listing: MercadoLivreClientListing) {
   const shipping = listing.shipping;
   if (
-    !shipping?.costStale ||
+    !shipping ||
+    !hasStaleShippingCost(listing) ||
     shipping.costSource !== MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE ||
     typeof shipping.costAmount !== "number"
   ) {
     return null;
   }
-  const updatedAt = shipping.costLastUpdatedAt ? ` Atualizado em ${formatDate(shipping.costLastUpdatedAt)}.` : "";
-  return `Atualização não concluída. Último custo disponível: ${formatPrice(shipping.costAmount, shipping.currencyId ?? listing.currencyId)}.${updatedAt}`;
+  const quotedAt = shipping.costLastUpdatedAt ? ` Cotado em: ${formatDate(shipping.costLastUpdatedAt)}.` : "";
+  return `Ultimo custo disponivel: ${formatPrice(shipping.costAmount, shipping.currencyId ?? listing.currencyId)}. Atualizacao pendente.${quotedAt}`;
 }
 
 function shippingCostLabel(listing: MercadoLivreClientListing) {
-  const amount = shippingCostAmount(listing);
-  if (typeof amount === "number") return formatPrice(amount, listing.shipping?.currencyId ?? listing.currencyId);
   const staleLabel = staleShippingCostLabel(listing);
   if (staleLabel) return staleLabel;
+  const amount = shippingCostAmount(listing);
+  if (typeof amount === "number") return formatPrice(amount, listing.shipping?.currencyId ?? listing.currencyId);
   return "Custo de envio ainda não disponível";
 }
 
 function shippingCostCardLabel(listing: MercadoLivreClientListing) {
-  const amount = shippingCostAmount(listing);
-  if (typeof amount === "number") return `Custo considerado: ${formatPrice(amount, listing.shipping?.currencyId ?? listing.currencyId)}`;
   const staleLabel = staleShippingCostLabel(listing);
   if (staleLabel) return staleLabel;
+  const amount = shippingCostAmount(listing);
+  if (typeof amount === "number") return `Custo considerado: ${formatPrice(amount, listing.shipping?.currencyId ?? listing.currencyId)}`;
   return "Custo de envio ainda não disponível";
 }
 
@@ -765,14 +779,16 @@ function buildProfitMargin(listing: MercadoLivreClientListing, priceOverride?: n
 }
 
 function profitMarginStatusLabel(listing: MercadoLivreClientListing) {
-  return buildProfitMargin(listing).status === "complete" ? "Completa" : "Parcial";
+  if (buildProfitMargin(listing).status !== "complete") return "Parcial";
+  return hasStaleShippingCost(listing) ? "Completa - frete desatualizado" : "Completa";
 }
 
 function profitMarginLabel(listing: MercadoLivreClientListing) {
   const margin = buildProfitMargin(listing);
   if (typeof margin.profit !== "number") return margin.status === "complete" ? "Completa" : "Parcial";
   if (margin.status === "complete" && typeof margin.percent === "number") {
-    return `Completa ${formatPrice(margin.profit, listing.currencyId)} (${margin.percent.toFixed(2)}%)`;
+    const status = hasStaleShippingCost(listing) ? "Completa - frete desatualizado" : "Completa";
+    return `${status} ${formatPrice(margin.profit, listing.currencyId)} (${margin.percent.toFixed(2)}%)`;
   }
   return `Parcial ${formatPrice(margin.profit, listing.currencyId)}`;
 }

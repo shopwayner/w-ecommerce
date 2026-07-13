@@ -5,14 +5,17 @@ import { normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { mercadoLivreClientOAuthService } from "@/lib/services/marketplaces/mercado-livre-client-oauth-service";
 import {
   buildPersistedSellerShippingCost,
+  MERCADO_LIVRE_SELLER_SHIPPING_COST_CACHE_TTL_MS,
+  MERCADO_LIVRE_SELLER_SHIPPING_COST_CONCURRENCY,
   MERCADO_LIVRE_SELLER_SHIPPING_COST_CACHE_VERSION,
   MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE,
-  normalizeSellerShippingCost,
   readCompatiblePersistedSellerShippingCost,
+  requestSellerShippingCostWithRetry,
   sellerShippingCostCacheKey,
   sellerShippingCostPath,
   sellerShippingCostUnavailable,
   type MercadoLivreSellerShippingCost,
+  type MercadoLivreSellerShippingCostFailureKind,
   type MercadoLivreSellerShippingCostQuery
 } from "@/lib/services/marketplaces/mercado-livre-shipping-cost";
 import { sanitizeLogPayload } from "@/lib/utils";
@@ -24,9 +27,7 @@ const globalSearchMaxListings = 500;
 const detailsChunkSize = 20;
 const feeEstimateConcurrency = 6;
 const feeEstimateTimeoutMs = 5000;
-const shippingEstimateConcurrency = 6;
 const shippingEstimateTimeoutMs = 5000;
-const shippingEstimateCacheTtlMs = 15 * 60 * 1000;
 const shippingEstimateUnavailableCacheTtlMs = 30 * 1000;
 const listingStatuses = ["active", "paused", "closed", "under_review"] as const;
 const cacheRefreshStatusFilters = [undefined, ...listingStatuses] as const;
@@ -177,11 +178,20 @@ type ListingFeeEstimate = {
 type ListingShippingCostEstimate = MercadoLivreSellerShippingCost & {
   fetchedAt: string | null;
   stale: boolean;
+  attempts: number;
+  rateLimitResponses: number;
+  failureKind: MercadoLivreSellerShippingCostFailureKind;
 };
 
 type CachedShippingCostEstimate = {
   estimate: ListingShippingCostEstimate;
   expiresAt: number;
+};
+
+export type MercadoLivreShippingCacheBackfillQuote = {
+  externalItemId: string;
+  query: MercadoLivreSellerShippingCostQuery | null;
+  shippingCost: ListingShippingCostEstimate | null;
 };
 
 type MercadoLivreMultiGetEntry = {
@@ -967,7 +977,10 @@ function shippingCostEstimateUnavailable(reason = "Frete nao retornado pela API 
   return {
     ...sellerShippingCostUnavailable(reason),
     fetchedAt: null,
-    stale: false
+    stale: false,
+    attempts: 0,
+    rateLimitResponses: 0,
+    failureKind: null
   };
 }
 
@@ -979,7 +992,14 @@ function preserveStaleShippingCost(candidates: Array<ListingShippingCostEstimate
       typeof candidate.fetchedAt === "string"
   );
   if (!previous) return unavailable;
-  return { ...previous, stale: true, unavailableReason: unavailable.unavailableReason };
+  return {
+    ...previous,
+    stale: true,
+    unavailableReason: unavailable.unavailableReason,
+    attempts: unavailable.attempts,
+    rateLimitResponses: unavailable.rateLimitResponses,
+    failureKind: unavailable.failureKind
+  };
 }
 
 function listingShippingCostQuery(input: {
@@ -1013,41 +1033,48 @@ async function getListingShippingCostEstimate(input: {
   const cached = shippingEstimateCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.estimate;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), shippingEstimateTimeoutMs);
-
   try {
     const path = sellerShippingCostPath(query);
-    const response = await fetch(`${apiBaseUrl}${path}`, {
-      headers: {
-        Authorization: `Bearer ${input.accessToken}`,
-        Accept: "application/json"
-      },
-      signal: controller.signal
+    const retryResult = await requestSellerShippingCostWithRetry({
+      fallbackCurrencyId: query.currencyId,
+      request: async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), shippingEstimateTimeoutMs);
+        try {
+          const response = await fetch(`${apiBaseUrl}${path}`, {
+            headers: {
+              Authorization: `Bearer ${input.accessToken}`,
+              Accept: "application/json"
+            },
+            signal: controller.signal
+          });
+          if (!response.ok) {
+            return { ok: false as const, status: response.status, retryAfter: response.headers.get("retry-after") };
+          }
+          return { ok: true as const, payload: await response.json() };
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
     });
-
-    if (!response.ok) {
-      const reason = response.status === 429 ? "Custo temporariamente indisponivel." : "Custo ainda nao disponivel.";
-      const unavailable = preserveStaleShippingCost([cached?.estimate, input.persistedEstimate], shippingCostEstimateUnavailable(reason));
-      shippingEstimateCache.set(cacheKey, {
-        estimate: unavailable,
-        expiresAt: Date.now() + shippingEstimateUnavailableCacheTtlMs
-      });
-      return unavailable;
-    }
-
-    const normalized = normalizeSellerShippingCost(await response.json(), query.currencyId);
     const now = new Date().toISOString();
     const estimate: ListingShippingCostEstimate = {
-      ...normalized,
-      fetchedAt: typeof normalized.costAmount === "number" ? now : null,
-      stale: false
+      ...retryResult.shippingCost,
+      fetchedAt: typeof retryResult.shippingCost.costAmount === "number" ? now : null,
+      stale: false,
+      attempts: retryResult.attempts,
+      rateLimitResponses: retryResult.rateLimitResponses,
+      failureKind: retryResult.failureKind
     };
     const resolved =
       typeof estimate.costAmount === "number" ? estimate : preserveStaleShippingCost([cached?.estimate, input.persistedEstimate], estimate);
     shippingEstimateCache.set(cacheKey, {
       estimate: resolved,
-      expiresAt: Date.now() + (typeof resolved.costAmount === "number" && !resolved.stale ? shippingEstimateCacheTtlMs : shippingEstimateUnavailableCacheTtlMs)
+      expiresAt:
+        Date.now() +
+        (typeof resolved.costAmount === "number" && !resolved.stale
+          ? MERCADO_LIVRE_SELLER_SHIPPING_COST_CACHE_TTL_MS
+          : shippingEstimateUnavailableCacheTtlMs)
     });
     return resolved;
   } catch {
@@ -1060,8 +1087,6 @@ async function getListingShippingCostEstimate(input: {
       expiresAt: Date.now() + shippingEstimateUnavailableCacheTtlMs
     });
     return unavailable;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
@@ -1103,7 +1128,10 @@ async function loadPersistedShippingCostEstimates(input: {
       source: persisted.source,
       unavailableReason: persisted.unavailableReason,
       fetchedAt: persisted.lastUpdatedAt,
-      stale: true
+      stale: true,
+      attempts: 0,
+      rateLimitResponses: 0,
+      failureKind: null
     });
   }
 
@@ -1169,7 +1197,7 @@ async function enrichListingShippingCostsReadOnly(input: {
   if (!input.listings.length) return input.listings;
   const persistedEstimates = await loadPersistedShippingCostEstimates(input);
 
-  return mapWithConcurrency(input.listings, shippingEstimateConcurrency, async (listing) => {
+  return mapWithConcurrency(input.listings, MERCADO_LIVRE_SELLER_SHIPPING_COST_CONCURRENCY, async (listing) => {
     if (!listing.shipping) return listing;
     if (typeof listing.shipping.freeShipping !== "boolean") {
       return {
@@ -1466,6 +1494,7 @@ async function fetchListingDetailsReadOnly(input: {
   syncedAt: Date;
   warnings: string[];
   endpointDiagnostics: Array<Record<string, unknown>>;
+  retryOnUnauthorized?: boolean;
 }) {
   let accessToken = input.accessToken;
   const listings: MercadoLivreClientListing[] = [];
@@ -1475,7 +1504,8 @@ async function fetchListingDetailsReadOnly(input: {
       organizationId: input.organizationId,
       connectionId: input.connectionId,
       accessToken,
-      path: `/items?ids=${ids.map(encodeURIComponent).join(",")}`
+      path: `/items?ids=${ids.map(encodeURIComponent).join(",")}`,
+      retryOnUnauthorized: input.retryOnUnauthorized
     });
     accessToken = response.accessToken;
     input.endpointDiagnostics.push({
@@ -1629,6 +1659,65 @@ function safeAccount(connection: Awaited<ReturnType<typeof prisma.marketplaceCon
 }
 
 export class MercadoLivreClientListingsService {
+  async getShippingCostsForCacheBackfill(input: { organizationId: string; itemIds: string[] }) {
+    const itemIds = Array.from(
+      new Set(
+        input.itemIds
+          .map((itemId) => normalizeMercadoLivreId(itemId)?.toUpperCase() ?? null)
+          .filter((itemId): itemId is string => Boolean(itemId && /^ML[A-Z]\d+$/.test(itemId)))
+      )
+    );
+    const { connection, accessToken: initialAccessToken } =
+      await mercadoLivreClientOAuthService.getUnexpiredAccessTokenForActiveConnectionReadOnly(input.organizationId);
+    const sellerId = connection.sellerId ?? connection.externalAccountId;
+    if (!sellerId) throw new Error("Conta Mercado Livre conectada sem seller identificado. Reconecte a conta.");
+
+    if (!itemIds.length) {
+      return { connectionId: connection.id, sellerId, quotes: [] as MercadoLivreShippingCacheBackfillQuote[] };
+    }
+
+    const warnings: string[] = [];
+    const endpointDiagnostics: Array<Record<string, unknown>> = [];
+    const detailResult = await fetchListingDetailsReadOnly({
+      organizationId: input.organizationId,
+      connectionId: connection.id,
+      accessToken: initialAccessToken,
+      itemIds,
+      syncedAt: new Date(),
+      warnings,
+      endpointDiagnostics,
+      retryOnUnauthorized: false
+    });
+    const listings = uniqueListingsByMercadoLivreId(detailResult.listings);
+    const persistedEstimates = await loadPersistedShippingCostEstimates({
+      organizationId: input.organizationId,
+      connectionId: connection.id,
+      sellerId,
+      listings
+    });
+    const quotes = await mapWithConcurrency(
+      listings,
+      MERCADO_LIVRE_SELLER_SHIPPING_COST_CONCURRENCY,
+      async (listing): Promise<MercadoLivreShippingCacheBackfillQuote> => {
+        const query = listingShippingCostQuery({ organizationId: input.organizationId, connectionId: connection.id, sellerId, listing });
+        const shippingCost = query
+          ? await getListingShippingCostEstimate({
+              accessToken: detailResult.accessToken,
+              query,
+              persistedEstimate: persistedEstimates.get(listing.externalId)
+            })
+          : null;
+        return { externalItemId: listing.externalId, query, shippingCost };
+      }
+    );
+
+    return {
+      connectionId: connection.id,
+      sellerId,
+      quotes
+    };
+  }
+
   async getListings(authContext: ClientAuthContext) {
     const connection = await prisma.marketplaceConnection.findUnique({
       where: {

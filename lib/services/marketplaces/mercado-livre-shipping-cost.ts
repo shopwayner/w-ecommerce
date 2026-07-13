@@ -1,5 +1,11 @@
 export const MERCADO_LIVRE_SELLER_SHIPPING_COST_CACHE_VERSION = 2;
 export const MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE = "shipping_options_free_all_country_list_cost";
+export const MERCADO_LIVRE_SELLER_SHIPPING_COST_CACHE_TTL_MS = 15 * 60 * 1000;
+export const MERCADO_LIVRE_SELLER_SHIPPING_COST_CONCURRENCY = 6;
+export const MERCADO_LIVRE_SELLER_SHIPPING_COST_MAX_RATE_LIMIT_RETRIES = 2;
+export const MERCADO_LIVRE_SELLER_SHIPPING_COST_MAX_RETRY_AFTER_MS = 2000;
+
+export type MercadoLivreSellerShippingCostFailureKind = "rate_limit" | "http_error" | "temporary_error" | "invalid_response" | null;
 
 export type MercadoLivreSellerShippingCost = {
   costAmount: number | null;
@@ -39,6 +45,17 @@ export type MercadoLivrePersistedSellerShippingCost = MercadoLivreSellerShipping
   stale: boolean;
 };
 
+export type MercadoLivreSellerShippingCostRequestResult =
+  | { ok: true; payload: unknown }
+  | { ok: false; status: number; retryAfter: string | null };
+
+export type MercadoLivreSellerShippingCostRetryResult = {
+  shippingCost: MercadoLivreSellerShippingCost;
+  attempts: number;
+  rateLimitResponses: number;
+  failureKind: MercadoLivreSellerShippingCostFailureKind;
+};
+
 function finiteNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -61,6 +78,100 @@ export function sellerShippingCostUnavailable(reason = "Custo ainda nao disponiv
     currencyId: null,
     source: null,
     unavailableReason: reason
+  };
+}
+
+export function usableSellerShippingCostAmount(input: { costAmount: unknown; source: unknown }) {
+  if (input.source !== MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE) return null;
+  const amount = finiteNumber(input.costAmount);
+  return amount !== null && amount >= 0 ? amount : null;
+}
+
+export function isUsableStaleSellerShippingCost(input: { costAmount: unknown; source: unknown; stale: unknown }) {
+  return input.stale === true && usableSellerShippingCostAmount(input) !== null;
+}
+
+export function sellerShippingCostRetryDelayMs(input: {
+  retryAfter: string | null;
+  attempt: number;
+  now?: Date;
+  random?: () => number;
+}) {
+  const now = input.now ?? new Date();
+  const random = input.random ?? Math.random;
+  const seconds = input.retryAfter === null ? NaN : Number(input.retryAfter);
+  const retryAt = input.retryAfter && !Number.isFinite(seconds) ? Date.parse(input.retryAfter) : NaN;
+  const headerDelay = Number.isFinite(seconds)
+    ? Math.max(0, seconds * 1000)
+    : Number.isFinite(retryAt)
+      ? Math.max(0, retryAt - now.getTime())
+      : null;
+  const fallbackDelay = Math.max(1, input.attempt) * 400;
+  const jitter = Math.floor(Math.max(0, Math.min(random(), 0.999)) * 100);
+  return Math.min(MERCADO_LIVRE_SELLER_SHIPPING_COST_MAX_RETRY_AFTER_MS, (headerDelay ?? fallbackDelay) + jitter);
+}
+
+export async function requestSellerShippingCostWithRetry(input: {
+  fallbackCurrencyId: string | null;
+  request: (attempt: number) => Promise<MercadoLivreSellerShippingCostRequestResult>;
+  wait?: (milliseconds: number) => Promise<void>;
+  now?: () => Date;
+  random?: () => number;
+}): Promise<MercadoLivreSellerShippingCostRetryResult> {
+  const wait = input.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const maximumAttempts = MERCADO_LIVRE_SELLER_SHIPPING_COST_MAX_RATE_LIMIT_RETRIES + 1;
+  let rateLimitResponses = 0;
+
+  for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    let response: MercadoLivreSellerShippingCostRequestResult;
+    try {
+      response = await input.request(attempt);
+    } catch {
+      return {
+        shippingCost: sellerShippingCostUnavailable("Custo temporariamente indisponivel."),
+        attempts: attempt,
+        rateLimitResponses,
+        failureKind: "temporary_error"
+      };
+    }
+
+    if (response.ok) {
+      const shippingCost = normalizeSellerShippingCost(response.payload, input.fallbackCurrencyId);
+      return {
+        shippingCost,
+        attempts: attempt,
+        rateLimitResponses,
+        failureKind: typeof shippingCost.costAmount === "number" ? null : "invalid_response"
+      };
+    }
+
+    if (response.status !== 429) {
+      return {
+        shippingCost: sellerShippingCostUnavailable(),
+        attempts: attempt,
+        rateLimitResponses,
+        failureKind: "http_error"
+      };
+    }
+
+    rateLimitResponses += 1;
+    if (attempt < maximumAttempts) {
+      await wait(
+        sellerShippingCostRetryDelayMs({
+          retryAfter: response.retryAfter,
+          attempt,
+          now: input.now?.() ?? new Date(),
+          random: input.random
+        })
+      );
+    }
+  }
+
+  return {
+    shippingCost: sellerShippingCostUnavailable("Custo temporariamente indisponivel."),
+    attempts: maximumAttempts,
+    rateLimitResponses,
+    failureKind: "rate_limit"
   };
 }
 

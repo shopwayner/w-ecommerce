@@ -290,6 +290,31 @@ export class MercadoLivreClientOAuthService {
     };
   }
 
+  async getUnexpiredAccessTokenForActiveConnectionReadOnly(organizationId: string) {
+    const connection = await prisma.marketplaceConnection.findUnique({
+      where: {
+        organizationId_provider: {
+          organizationId,
+          provider: MarketplaceProvider.MERCADOLIVRE
+        }
+      }
+    });
+    if (!connection || connection.status !== "ACTIVE") {
+      throw new Error("Conecte uma conta Mercado Livre do cliente antes de consultar anuncios.");
+    }
+    if (!connection.sellerId && !connection.externalAccountId) {
+      throw new Error("Conta Mercado Livre conectada sem seller identificado. Reconecte a conta.");
+    }
+    if (!connection.accessTokenEncrypted || !connection.expiresAt || connection.expiresAt.getTime() <= Date.now() + 60_000) {
+      throw new Error("Conta Mercado Livre precisa ser reconectada antes do preenchimento do cache.");
+    }
+
+    return {
+      connection,
+      accessToken: decryptSecret(connection.accessTokenEncrypted)
+    };
+  }
+
   async completeCallback(input: { code: string; state: string; organizationId: string; userId: string }) {
     const stateRecord = await this.validateOAuthState(input.state);
     if (!stateRecord) {
