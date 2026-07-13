@@ -3,6 +3,18 @@ import { MarketplaceCategoryProvider, MarketplaceProvider } from "@prisma/client
 import { prisma } from "@/lib/prisma";
 import { normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { mercadoLivreClientOAuthService } from "@/lib/services/marketplaces/mercado-livre-client-oauth-service";
+import {
+  buildPersistedSellerShippingCost,
+  MERCADO_LIVRE_SELLER_SHIPPING_COST_CACHE_VERSION,
+  MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE,
+  normalizeSellerShippingCost,
+  readCompatiblePersistedSellerShippingCost,
+  sellerShippingCostCacheKey,
+  sellerShippingCostPath,
+  sellerShippingCostUnavailable,
+  type MercadoLivreSellerShippingCost,
+  type MercadoLivreSellerShippingCostQuery
+} from "@/lib/services/marketplaces/mercado-livre-shipping-cost";
 import { sanitizeLogPayload } from "@/lib/utils";
 
 const apiBaseUrl = "https://api.mercadolibre.com";
@@ -14,6 +26,8 @@ const feeEstimateConcurrency = 6;
 const feeEstimateTimeoutMs = 5000;
 const shippingEstimateConcurrency = 6;
 const shippingEstimateTimeoutMs = 5000;
+const shippingEstimateCacheTtlMs = 15 * 60 * 1000;
+const shippingEstimateUnavailableCacheTtlMs = 30 * 1000;
 const listingStatuses = ["active", "paused", "closed", "under_review"] as const;
 const cacheRefreshStatusFilters = [undefined, ...listingStatuses] as const;
 const listingStatusFilters = ["all", "active", "paused", "closed", "under_review", "error"] as const;
@@ -160,11 +174,14 @@ type ListingFeeEstimate = {
   unavailableReason: string | null;
 };
 
-type ListingShippingCostEstimate = {
-  costAmount: number | null;
-  currencyId: string | null;
-  source: "item_shipping" | "mercado_livre_shipping_options_free" | "buyer_paid_shipping" | null;
-  unavailableReason: string | null;
+type ListingShippingCostEstimate = MercadoLivreSellerShippingCost & {
+  fetchedAt: string | null;
+  stale: boolean;
+};
+
+type CachedShippingCostEstimate = {
+  estimate: ListingShippingCostEstimate;
+  expiresAt: number;
 };
 
 type MercadoLivreMultiGetEntry = {
@@ -249,6 +266,8 @@ export type MercadoLivreClientListing = {
     currencyId: string | null;
     costSource: string | null;
     costUnavailableReason: string | null;
+    costLastUpdatedAt: string | null;
+    costStale: boolean;
   } | null;
   fees: {
     sellingFeeAmount: number | null;
@@ -313,7 +332,7 @@ type MercadoLivreClientListingsPaging = {
 
 const memoryCache = new Map<string, CachedListings>();
 const feeEstimateCache = new Map<string, ListingFeeEstimate>();
-const shippingEstimateCache = new Map<string, ListingShippingCostEstimate>();
+const shippingEstimateCache = new Map<string, CachedShippingCostEstimate>();
 
 function cacheKey(organizationId: string, connectionId: string) {
   return `${organizationId}:${connectionId}`;
@@ -716,13 +735,12 @@ function normalizeListing(item: MercadoLivreItemBody, syncedAt: Date): MercadoLi
           freeShipping: typeof item.shipping.free_shipping === "boolean" ? item.shipping.free_shipping : null,
           localPickUp: typeof item.shipping.local_pick_up === "boolean" ? item.shipping.local_pick_up : null,
           tags: normalizeStringList(item.shipping.tags),
-          costAmount: firstFiniteNumber(item.shipping.cost, item.shipping.list_cost, item.shipping.base_cost, item.shipping.shipping_cost, item.shipping.amount),
+          costAmount: null,
           currencyId: typeof item.shipping.currency_id === "string" ? item.shipping.currency_id : currencyId,
-          costSource:
-            firstFiniteNumber(item.shipping.cost, item.shipping.list_cost, item.shipping.base_cost, item.shipping.shipping_cost, item.shipping.amount) !== null
-              ? "item_shipping"
-              : null,
-          costUnavailableReason: null
+          costSource: null,
+          costUnavailableReason: "Custo ainda nao disponivel.",
+          costLastUpdatedAt: null,
+          costStale: false
         }
       : null,
     fees: normalizeFees(item, currencyId),
@@ -947,100 +965,59 @@ async function getListingFeeEstimate(input: {
 
 function shippingCostEstimateUnavailable(reason = "Frete nao retornado pela API nesta consulta."): ListingShippingCostEstimate {
   return {
-    costAmount: null,
-    currencyId: null,
-    source: null,
-    unavailableReason: reason
+    ...sellerShippingCostUnavailable(reason),
+    fetchedAt: null,
+    stale: false
   };
 }
 
-function shippingEstimateCacheKey(input: { sellerId: string; itemId: string; currencyId: string | null }) {
-  return [input.sellerId, input.itemId, input.currencyId ?? ""].join(":");
+function preserveStaleShippingCost(candidates: Array<ListingShippingCostEstimate | undefined>, unavailable: ListingShippingCostEstimate) {
+  const previous = candidates.find(
+    (candidate) =>
+      typeof candidate?.costAmount === "number" &&
+      candidate.source === MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE &&
+      typeof candidate.fetchedAt === "string"
+  );
+  if (!previous) return unavailable;
+  return { ...previous, stale: true, unavailableReason: unavailable.unavailableReason };
 }
 
-function shippingOptionsFreePath(input: { sellerId: string; itemId: string; currencyId: string | null }) {
-  const params = new URLSearchParams();
-  params.set("item_id", input.itemId);
-  if (input.currencyId) params.set("currency_id", input.currencyId);
-  return `/users/${encodeURIComponent(input.sellerId)}/shipping_options/free?${params.toString()}`;
-}
-
-function shippingEstimateFromRecord(record: Record<string, unknown>, fallbackCurrencyId: string | null): ListingShippingCostEstimate | null {
-  const amount = firstFiniteNumber(record.list_cost, record.cost, record.shipping_cost, record.base_cost, record.amount);
-  if (amount === null) return null;
-
+function listingShippingCostQuery(input: {
+  organizationId: string;
+  connectionId: string;
+  sellerId: string;
+  listing: MercadoLivreClientListing;
+}): MercadoLivreSellerShippingCostQuery | null {
+  if (!input.listing.shipping || typeof input.listing.shipping.freeShipping !== "boolean") return null;
   return {
-    costAmount: amount,
-    currencyId: typeof record.currency_id === "string" ? record.currency_id : fallbackCurrencyId,
-    source: "mercado_livre_shipping_options_free",
-    unavailableReason: null
+    organizationId: input.organizationId,
+    connectionId: input.connectionId,
+    sellerId: input.sellerId,
+    itemId: input.listing.itemId,
+    currencyId: input.listing.shipping.currencyId ?? input.listing.currencyId,
+    freeShipping: input.listing.shipping.freeShipping,
+    itemPrice: input.listing.price,
+    listingTypeId: input.listing.listingTypeId,
+    mode: input.listing.shipping.mode,
+    logisticType: input.listing.shipping.logisticType
   };
-}
-
-function findShippingEstimatePayload(payload: unknown, fallbackCurrencyId: string | null): ListingShippingCostEstimate | null {
-  if (!payload || typeof payload !== "object") return null;
-
-  if (Array.isArray(payload)) {
-    for (const item of payload) {
-      const estimate = findShippingEstimatePayload(item, fallbackCurrencyId);
-      if (estimate) return estimate;
-    }
-    return null;
-  }
-
-  const record = payload as Record<string, unknown>;
-  const directEstimate = shippingEstimateFromRecord(record, fallbackCurrencyId);
-  if (directEstimate) return directEstimate;
-
-  const coverage = record.coverage;
-  if (coverage && typeof coverage === "object") {
-    const coverageRecord = coverage as Record<string, unknown>;
-    const allCountry = coverageRecord.all_country;
-    const allCountryEstimate = findShippingEstimatePayload(allCountry, fallbackCurrencyId);
-    if (allCountryEstimate) return allCountryEstimate;
-
-    for (const value of Object.values(coverageRecord)) {
-      const estimate = findShippingEstimatePayload(value, fallbackCurrencyId);
-      if (estimate) return estimate;
-    }
-  }
-
-  for (const key of ["options", "results", "prices"]) {
-    const value = record[key];
-    const estimate = findShippingEstimatePayload(value, fallbackCurrencyId);
-    if (estimate) return estimate;
-  }
-
-  return null;
-}
-
-function normalizeShippingCostEstimate(payload: unknown, fallbackCurrencyId: string | null): ListingShippingCostEstimate {
-  return findShippingEstimatePayload(payload, fallbackCurrencyId) ?? shippingCostEstimateUnavailable();
 }
 
 async function getListingShippingCostEstimate(input: {
   accessToken: string;
-  sellerId: string;
-  itemId: string;
-  currencyId: string | null;
+  query: MercadoLivreSellerShippingCostQuery;
+  persistedEstimate?: ListingShippingCostEstimate;
 }) {
-  const cacheKey = shippingEstimateCacheKey({
-    sellerId: input.sellerId,
-    itemId: input.itemId,
-    currencyId: input.currencyId
-  });
+  const query = input.query;
+  const cacheKey = sellerShippingCostCacheKey(query);
   const cached = shippingEstimateCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached && cached.expiresAt > Date.now()) return cached.estimate;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), shippingEstimateTimeoutMs);
 
   try {
-    const path = shippingOptionsFreePath({
-      sellerId: input.sellerId,
-      itemId: input.itemId,
-      currencyId: input.currencyId
-    });
+    const path = sellerShippingCostPath(query);
     const response = await fetch(`${apiBaseUrl}${path}`, {
       headers: {
         Authorization: `Bearer ${input.accessToken}`,
@@ -1050,21 +1027,87 @@ async function getListingShippingCostEstimate(input: {
     });
 
     if (!response.ok) {
-      const unavailable = shippingCostEstimateUnavailable();
-      shippingEstimateCache.set(cacheKey, unavailable);
+      const reason = response.status === 429 ? "Custo temporariamente indisponivel." : "Custo ainda nao disponivel.";
+      const unavailable = preserveStaleShippingCost([cached?.estimate, input.persistedEstimate], shippingCostEstimateUnavailable(reason));
+      shippingEstimateCache.set(cacheKey, {
+        estimate: unavailable,
+        expiresAt: Date.now() + shippingEstimateUnavailableCacheTtlMs
+      });
       return unavailable;
     }
 
-    const estimate = normalizeShippingCostEstimate(await response.json(), input.currencyId);
-    shippingEstimateCache.set(cacheKey, estimate);
-    return estimate;
+    const normalized = normalizeSellerShippingCost(await response.json(), query.currencyId);
+    const now = new Date().toISOString();
+    const estimate: ListingShippingCostEstimate = {
+      ...normalized,
+      fetchedAt: typeof normalized.costAmount === "number" ? now : null,
+      stale: false
+    };
+    const resolved =
+      typeof estimate.costAmount === "number" ? estimate : preserveStaleShippingCost([cached?.estimate, input.persistedEstimate], estimate);
+    shippingEstimateCache.set(cacheKey, {
+      estimate: resolved,
+      expiresAt: Date.now() + (typeof resolved.costAmount === "number" && !resolved.stale ? shippingEstimateCacheTtlMs : shippingEstimateUnavailableCacheTtlMs)
+    });
+    return resolved;
   } catch {
-    const unavailable = shippingCostEstimateUnavailable();
-    shippingEstimateCache.set(cacheKey, unavailable);
+    const unavailable = preserveStaleShippingCost(
+      [cached?.estimate, input.persistedEstimate],
+      shippingCostEstimateUnavailable("Custo temporariamente indisponivel.")
+    );
+    shippingEstimateCache.set(cacheKey, {
+      estimate: unavailable,
+      expiresAt: Date.now() + shippingEstimateUnavailableCacheTtlMs
+    });
     return unavailable;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function loadPersistedShippingCostEstimates(input: {
+  organizationId: string;
+  connectionId: string;
+  sellerId: string;
+  listings: MercadoLivreClientListing[];
+}) {
+  const listingsById = new Map(input.listings.map((listing) => [listing.externalId, listing]));
+  if (!listingsById.size) return new Map<string, ListingShippingCostEstimate>();
+
+  const rows = await prisma.mercadoLivreListingCache.findMany({
+    where: {
+      organizationId: input.organizationId,
+      externalItemId: { in: Array.from(listingsById.keys()) }
+    },
+    orderBy: { lastSyncedAt: "desc" },
+    select: { externalItemId: true, rawAttributesJson: true }
+  });
+  const estimates = new Map<string, ListingShippingCostEstimate>();
+
+  for (const row of rows) {
+    if (estimates.has(row.externalItemId)) continue;
+    const listing = listingsById.get(row.externalItemId);
+    if (!listing) continue;
+    const query = listingShippingCostQuery({
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      sellerId: input.sellerId,
+      listing
+    });
+    if (!query) continue;
+    const persisted = readCompatiblePersistedSellerShippingCost(jsonRecord(row.rawAttributesJson)?.sellerShippingCost, query);
+    if (!persisted) continue;
+    estimates.set(row.externalItemId, {
+      costAmount: persisted.costAmount,
+      currencyId: persisted.currencyId,
+      source: persisted.source,
+      unavailableReason: persisted.unavailableReason,
+      fetchedAt: persisted.lastUpdatedAt,
+      stale: true
+    });
+  }
+
+  return estimates;
 }
 
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>) {
@@ -1117,34 +1160,42 @@ async function enrichListingFeesReadOnly(input: {
 }
 
 async function enrichListingShippingCostsReadOnly(input: {
+  organizationId: string;
+  connectionId: string;
   accessToken: string;
   sellerId: string;
   listings: MercadoLivreClientListing[];
 }) {
   if (!input.listings.length) return input.listings;
+  const persistedEstimates = await loadPersistedShippingCostEstimates(input);
 
   return mapWithConcurrency(input.listings, shippingEstimateConcurrency, async (listing) => {
     if (!listing.shipping) return listing;
-    if (typeof listing.shipping.costAmount === "number") return listing;
-
-    if (listing.shipping.freeShipping === false) {
+    if (typeof listing.shipping.freeShipping !== "boolean") {
       return {
         ...listing,
         shipping: {
           ...listing.shipping,
-          costAmount: 0,
-          currencyId: listing.shipping.currencyId ?? listing.currencyId,
-          costSource: "buyer_paid_shipping",
-          costUnavailableReason: null
+          costAmount: null,
+          costSource: null,
+          costUnavailableReason: "Custo ainda nao disponivel.",
+          costLastUpdatedAt: null,
+          costStale: false
         }
       };
     }
 
+    const query = listingShippingCostQuery({
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      sellerId: input.sellerId,
+      listing
+    });
+    if (!query) return listing;
     const estimate = await getListingShippingCostEstimate({
       accessToken: input.accessToken,
-      sellerId: input.sellerId,
-      itemId: listing.itemId,
-      currencyId: listing.shipping.currencyId ?? listing.currencyId
+      query,
+      persistedEstimate: persistedEstimates.get(listing.externalId)
     });
 
     return {
@@ -1154,7 +1205,9 @@ async function enrichListingShippingCostsReadOnly(input: {
         costAmount: estimate.costAmount,
         currencyId: estimate.currencyId ?? listing.shipping.currencyId ?? listing.currencyId,
         costSource: estimate.source,
-        costUnavailableReason: estimate.unavailableReason
+        costUnavailableReason: estimate.unavailableReason,
+        costLastUpdatedAt: estimate.fetchedAt,
+        costStale: estimate.stale
       }
     };
   });
@@ -1453,12 +1506,79 @@ async function fetchListingDetailsReadOnly(input: {
   return { accessToken, listings };
 }
 
-function listingCacheRawAttributes(listing: MercadoLivreClientListing): Prisma.InputJsonValue {
+function jsonRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function listingCacheSellerShippingCost(
+  listing: MercadoLivreClientListing,
+  query: MercadoLivreSellerShippingCostQuery | null,
+  previousRawAttributes?: unknown
+): Prisma.InputJsonValue {
+  const currentShipping = listing.shipping;
+  if (!query) {
+    return {
+      version: MERCADO_LIVRE_SELLER_SHIPPING_COST_CACHE_VERSION,
+      marketplaceListingId: listing.externalId,
+      amount: null,
+      currencyId: currentShipping?.currencyId ?? listing.currencyId,
+      source: null,
+      lastUpdatedAt: null,
+      stale: false,
+      unavailableReason: "Custo ainda nao disponivel.",
+      context: null
+    };
+  }
+  if (
+    typeof currentShipping?.costAmount === "number" &&
+    currentShipping.costSource === MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE &&
+    typeof currentShipping.costLastUpdatedAt === "string"
+  ) {
+    return buildPersistedSellerShippingCost({
+      query,
+      costAmount: currentShipping.costAmount,
+      currencyId: currentShipping.currencyId,
+      lastUpdatedAt: currentShipping.costLastUpdatedAt,
+      stale: currentShipping.costStale,
+      unavailableReason: currentShipping.costUnavailableReason
+    });
+  }
+
+  const previous = readCompatiblePersistedSellerShippingCost(jsonRecord(previousRawAttributes)?.sellerShippingCost, query);
+  if (previous) {
+    return buildPersistedSellerShippingCost({
+      query,
+      costAmount: previous.costAmount,
+      currencyId: previous.currencyId,
+      lastUpdatedAt: previous.lastUpdatedAt,
+      stale: true,
+      unavailableReason: currentShipping?.costUnavailableReason ?? "Custo temporariamente indisponivel."
+    });
+  }
+
+  return buildPersistedSellerShippingCost({
+    query,
+    costAmount: null,
+    currencyId: currentShipping?.currencyId ?? listing.currencyId,
+    lastUpdatedAt: null,
+    stale: false,
+    unavailableReason: currentShipping?.costUnavailableReason ?? "Custo ainda nao disponivel."
+  });
+}
+
+function listingCacheRawAttributes(
+  listing: MercadoLivreClientListing,
+  query: MercadoLivreSellerShippingCostQuery | null,
+  previousRawAttributes?: unknown
+): Prisma.InputJsonValue {
+  const previous = jsonRecord(previousRawAttributes) ?? {};
   return {
+    ...previous,
     source: "MERCADO_LIVRE_CLIENT_LISTINGS_READ_ONLY",
     availableQuantity: listing.availableQuantity,
     soldQuantity: listing.soldQuantity,
     listingTypeId: listing.listingTypeId,
+    sellerShippingCost: listingCacheSellerShippingCost(listing, query, previousRawAttributes),
     dimensions: listing.dimensionInfo,
     attributes: listing.attributes.map((attribute) => ({
       id: attribute.id,
@@ -1712,6 +1832,8 @@ export class MercadoLivreClientListingsService {
       listings: pageListings
     });
     const shippingEnrichedListings = await enrichListingShippingCostsReadOnly({
+      organizationId: input.authContext.organizationId,
+      connectionId: connection.id,
       accessToken,
       sellerId,
       listings: feeEnrichedListings
@@ -1836,6 +1958,8 @@ export class MercadoLivreClientListingsService {
       listings: matchedListings
     });
     const shippingEnrichedListings = await enrichListingShippingCostsReadOnly({
+      organizationId: input.authContext.organizationId,
+      connectionId: connection.id,
       accessToken,
       sellerId,
       listings: feeEnrichedListings
@@ -1975,10 +2099,35 @@ export class MercadoLivreClientListingsService {
     void accessToken;
 
     const listings = uniqueListingsByMercadoLivreId(detailResult.listings);
-    const listingsWithLocalCategory = await enrichListingsReadOnly(input.authContext.organizationId, listings);
+    const shippingEnrichedListings = await enrichListingShippingCostsReadOnly({
+      organizationId: input.authContext.organizationId,
+      connectionId: connection.id,
+      accessToken,
+      sellerId,
+      listings
+    });
+    const listingsWithLocalCategory = await enrichListingsReadOnly(input.authContext.organizationId, shippingEnrichedListings);
+    const existingCacheRows = await prisma.mercadoLivreListingCache.findMany({
+      where: {
+        mercadoLivreConnectionId: cacheConnection.id,
+        externalItemId: { in: listingsWithLocalCategory.map((listing) => listing.externalId) }
+      },
+      select: {
+        externalItemId: true,
+        rawAttributesJson: true
+      }
+    });
+    const existingRawAttributesByItemId = new Map(existingCacheRows.map((row) => [row.externalItemId, row.rawAttributesJson]));
     let upserted = 0;
 
     for (const listing of listingsWithLocalCategory) {
+      const query = listingShippingCostQuery({
+        organizationId: input.authContext.organizationId,
+        connectionId: connection.id,
+        sellerId,
+        listing
+      });
+      const rawAttributesJson = listingCacheRawAttributes(listing, query, existingRawAttributesByItemId.get(listing.externalId));
       await prisma.mercadoLivreListingCache.upsert({
         where: {
           mercadoLivreConnectionId_externalItemId: {
@@ -2004,7 +2153,7 @@ export class MercadoLivreClientListingsService {
           status: listing.status,
           permalink: listing.permalink,
           thumbnail: listing.thumbnail,
-          rawAttributesJson: listingCacheRawAttributes(listing),
+          rawAttributesJson,
           lastSyncedAt: syncedAt
         },
         update: {
@@ -2022,7 +2171,7 @@ export class MercadoLivreClientListingsService {
           status: listing.status,
           permalink: listing.permalink,
           thumbnail: listing.thumbnail,
-          rawAttributesJson: listingCacheRawAttributes(listing),
+          rawAttributesJson,
           lastSyncedAt: syncedAt
         }
       });
@@ -2155,6 +2304,8 @@ export class MercadoLivreClientListingsService {
       listings
     });
     const shippingEnrichedListings = await enrichListingShippingCostsReadOnly({
+      organizationId: input.authContext.organizationId,
+      connectionId: connection.id,
       accessToken,
       sellerId,
       listings: feeEnrichedListings

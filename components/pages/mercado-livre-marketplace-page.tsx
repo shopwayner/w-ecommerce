@@ -32,6 +32,11 @@ import {
 import { AppShell } from "@/components/app-shell";
 import { ProductCopyButton } from "@/components/product-copy-button";
 import { Badge, Button, Card, KpiCard } from "@/components/ui";
+import {
+  calculateMercadoLivreProfitMargin,
+  MERCADO_LIVRE_MARGIN_TAX_RATE
+} from "@/lib/marketplaces/mercado-livre-profit-margin";
+import { MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE } from "@/lib/services/marketplaces/mercado-livre-shipping-cost";
 
 type MercadoLivreClientAccount = {
   connected: boolean;
@@ -100,6 +105,8 @@ type MercadoLivreClientListing = {
     currencyId?: string | null;
     costSource?: string | null;
     costUnavailableReason?: string | null;
+    costLastUpdatedAt?: string | null;
+    costStale?: boolean;
     paidBy?: "seller" | "buyer" | "unknown";
     displayMode?: "free_shipping" | "paid_shipping" | "unknown";
   } | null;
@@ -484,8 +491,6 @@ function normalizeListingPageSize(value: number | null | undefined, fallback = d
   if (value <= pageSizeOptions[1]) return pageSizeOptions[1];
   return pageSizeOptions[2];
 }
-// Visual-only tax rate for Bling - 262 Moto until account-level fiscal config exists.
-const profitMarginTaxRate = 0.085;
 const allowedPictureUploadMimeTypes = new Set(["image/jpeg", "image/png"]);
 const maxPictureUploadBytes = 10 * 1024 * 1024;
 
@@ -691,19 +696,43 @@ function feePercentLabel(listing: MercadoLivreClientListing) {
 }
 
 function shippingCostAmount(listing: MercadoLivreClientListing) {
+  if (listing.shipping?.costStale) return null;
+  if (listing.shipping?.costSource !== MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE) return null;
   return typeof listing.shipping?.costAmount === "number" ? listing.shipping.costAmount : null;
+}
+
+function staleShippingCostLabel(listing: MercadoLivreClientListing) {
+  const shipping = listing.shipping;
+  if (
+    !shipping?.costStale ||
+    shipping.costSource !== MERCADO_LIVRE_SELLER_SHIPPING_COST_SOURCE ||
+    typeof shipping.costAmount !== "number"
+  ) {
+    return null;
+  }
+  const updatedAt = shipping.costLastUpdatedAt ? ` Atualizado em ${formatDate(shipping.costLastUpdatedAt)}.` : "";
+  return `Atualização não concluída. Último custo disponível: ${formatPrice(shipping.costAmount, shipping.currencyId ?? listing.currencyId)}.${updatedAt}`;
 }
 
 function shippingCostLabel(listing: MercadoLivreClientListing) {
   const amount = shippingCostAmount(listing);
   if (typeof amount === "number") return formatPrice(amount, listing.shipping?.currencyId ?? listing.currencyId);
-  return listing.shipping?.costUnavailableReason ?? "Frete nao retornado";
+  const staleLabel = staleShippingCostLabel(listing);
+  if (staleLabel) return staleLabel;
+  return "Custo de envio ainda não disponível";
 }
 
 function shippingCostCardLabel(listing: MercadoLivreClientListing) {
   const amount = shippingCostAmount(listing);
-  if (typeof amount === "number") return `Frete ML: ${formatPrice(amount, listing.shipping?.currencyId ?? listing.currencyId)}`;
-  return "Frete nao retornado";
+  if (typeof amount === "number") return `Custo considerado: ${formatPrice(amount, listing.shipping?.currencyId ?? listing.currencyId)}`;
+  const staleLabel = staleShippingCostLabel(listing);
+  if (staleLabel) return staleLabel;
+  return "Custo de envio ainda não disponível";
+}
+
+function shippingProviderLabel(listing: MercadoLivreClientListing) {
+  if (listing.shipping?.mode === "me2" || listing.shipping?.logisticType) return "Mercado Envios";
+  return shippingLabel(listing);
 }
 
 function shippingPayerLabel(listing: MercadoLivreClientListing) {
@@ -713,40 +742,25 @@ function shippingPayerLabel(listing: MercadoLivreClientListing) {
 }
 
 function profitMarginTaxLabel() {
-  return `${(profitMarginTaxRate * 100).toFixed(1).replace(".", ",")}%`;
+  return `${(MERCADO_LIVRE_MARGIN_TAX_RATE * 100).toFixed(1).replace(".", ",")}%`;
 }
 
 function buildProfitMargin(listing: MercadoLivreClientListing, priceOverride?: number | null) {
   const price = typeof priceOverride === "number" && Number.isFinite(priceOverride) ? priceOverride : listing.price;
-  const costPrice = listing.localProduct?.costPrice ?? null;
-  const mlFee = feeAmount(listing);
-  const shippingCost = shippingCostAmount(listing);
-  const taxAmount = typeof price === "number" ? price * profitMarginTaxRate : null;
-  const missingData: string[] = [];
-
-  if (typeof price !== "number") missingData.push("Preco");
-  if (typeof costPrice !== "number") missingData.push("Custo local");
-  if (typeof mlFee !== "number") missingData.push("Tarifa ML");
-  if (typeof shippingCost !== "number") missingData.push("Frete nao retornado");
-  if (typeof taxAmount !== "number") missingData.push("Imposto");
-
-  const profit =
-    typeof price === "number"
-      ? price - (costPrice ?? 0) - (mlFee ?? 0) - (shippingCost ?? 0) - (taxAmount ?? 0)
-      : null;
-  const percent = typeof profit === "number" && typeof price === "number" && price > 0 ? (profit / price) * 100 : null;
+  const margin = calculateMercadoLivreProfitMargin({
+    salePrice: price,
+    productCost: listing.localProduct?.costPrice ?? null,
+    marketplaceFee: feeAmount(listing),
+    freightCost: shippingCostAmount(listing),
+    taxRate: MERCADO_LIVRE_MARGIN_TAX_RATE
+  });
 
   return {
-    status: missingData.length ? "partial" : "complete",
-    price,
-    costPrice,
-    mlFee,
-    shippingCost,
-    taxRate: profitMarginTaxRate,
-    taxAmount,
-    profit,
-    percent,
-    missingData
+    ...margin,
+    price: margin.salePrice,
+    costPrice: margin.productCost,
+    mlFee: margin.marketplaceFee,
+    shippingCost: margin.freightCost
   };
 }
 
@@ -3521,7 +3535,7 @@ export function MercadoLivreMarketplacePage() {
                       <div className="grid gap-2 md:grid-cols-2">
                         <div className="rounded-md border border-matrix-border bg-matrix-panel2/55 px-3 py-2">
                           <p className="text-[11px] uppercase tracking-[0.12em] text-matrix-muted">Frete / logística</p>
-                          <p className="mt-1 break-words text-xs font-semibold leading-5 text-matrix-fg">{shippingLabel(listing)}</p>
+                          <p className="mt-1 break-words text-xs font-semibold leading-5 text-matrix-fg">{shippingProviderLabel(listing)}</p>
                           <p className="mt-1 text-[11px] leading-4 text-matrix-muted">{shippingCostCardLabel(listing)}</p>
                         </div>
                         <div className="rounded-md border border-matrix-border bg-matrix-panel2/55 px-3 py-2">
