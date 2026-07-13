@@ -1,7 +1,8 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Braces, CheckCircle2, Copy, Eye, EyeOff, Link2, Plus, ReceiptText, X } from "lucide-react";
+import Image from "next/image";
+import { AlertTriangle, Braces, CalendarClock, CheckCircle2, Copy, Eye, EyeOff, Link2, MoreVertical, Plus, ReceiptText, Settings, ShieldCheck, X } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { Badge, Button, Card } from "@/components/ui";
 
@@ -43,6 +44,17 @@ type ERPConnection = {
   lastError: string | null;
 };
 
+type BlingIntegratedConnection = {
+  id: string;
+  name: string;
+  role: string;
+  status: string;
+  lastSyncAt: string | null;
+  lastTestAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+};
+
 type ERP = {
   key: ERPKey;
   name: string;
@@ -70,13 +82,41 @@ const erps: ERP[] = [
   { key: "custom-api", name: "API personalizada", description: "Endpoints customizados com autenticação segura.", icon: "api" }
 ];
 
-function ERPLogo({ erp }: { erp: ERP }) {
+function ERPLogo({ erp, size = "card" }: { erp: ERP; size?: "card" | "account" }) {
+  if (erp.icon === "bling") {
+    return (
+      <div className={size === "account" ? "flex h-16 w-28 shrink-0 items-center" : "flex h-14 w-28 shrink-0 items-center"}>
+        <Image alt="Bling ERP" className="max-h-full w-full object-contain" height={73} src="/integrations/bling-erp-logo.png" width={180} />
+      </div>
+    );
+  }
   const base = "grid h-14 w-14 shrink-0 place-items-center rounded-xl shadow-gold";
-  if (erp.icon === "bling") return <div className={`${base} bg-gradient-to-br from-emerald-400 to-cyan-500 text-2xl font-black text-white`}>B</div>;
   if (erp.icon === "olist") return <div className={`${base} bg-gradient-to-br from-violet-500 to-orange-400 text-2xl font-black text-white`}>O</div>;
   if (erp.icon === "omie") return <div className={`${base} bg-gradient-to-br from-blue-500 to-indigo-700 text-2xl font-black text-white`}>Om</div>;
   if (erp.icon === "conta") return <div className={`${base} bg-gradient-to-br from-sky-400 to-blue-700 text-white`}><ReceiptText className="h-7 w-7" /></div>;
   return <div className={`${base} bg-matrix-panel2 text-matrix-goldDark ring-1 ring-matrix-gold/25`}><Braces className="h-7 w-7" /></div>;
+}
+
+function connectorBadge(connection: ERPConnection | undefined) {
+  if (connection?.configStatus === "READY" || connection?.hasCredentials) {
+    return { label: "Configuração pronta", tone: "info" as const };
+  }
+  return { label: "Configuração ausente", tone: "muted" as const };
+}
+
+function blingStatusLabel(status: string) {
+  if (status === "ACTIVE") return "Conectado";
+  if (status === "EXPIRED") return "Token expirado";
+  if (status === "ERROR") return "Erro";
+  if (status === "DISCONNECTED") return "Desconectado";
+  return "Pendente";
+}
+
+function blingStatusTone(status: string) {
+  if (status === "ACTIVE") return "success" as const;
+  if (status === "ERROR" || status === "EXPIRED") return "danger" as const;
+  if (status === "DISCONNECTED") return "muted" as const;
+  return "warning" as const;
 }
 
 function tone(status: string, configStatus: string) {
@@ -124,6 +164,7 @@ function createForm(connection: ERPConnection | null, erp: ERP | null): FormStat
 
 export function ERPsPage() {
   const [connections, setConnections] = useState<ERPConnection[]>([]);
+  const [blingAccounts, setBlingAccounts] = useState<BlingIntegratedConnection[]>([]);
   const [selected, setSelected] = useState<ERP | null>(null);
   const [form, setForm] = useState<FormState>({ accountAlias: "", credentials: {}, taxRate: "", orderImportStartDate: "", internalNotes: "", productSyncEnabled: false, orderSyncEnabled: false, stockSyncEnabled: false, invoiceSyncEnabled: false });
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
@@ -133,6 +174,8 @@ export function ERPsPage() {
   const [testing, setTesting] = useState(false);
 
   const selectedConnection = useMemo(() => connections.find((connection) => connection.slug === selected?.key) ?? null, [connections, selected]);
+  const blingErp = useMemo(() => erps.find((erp) => erp.key === "bling") ?? null, []);
+  const integratedEmptyErps = useMemo(() => erps.filter((erp) => erp.key !== "bling" || blingAccounts.length === 0), [blingAccounts.length]);
 
   async function loadConnections() {
     const response = await fetch("/api/erps/connections");
@@ -141,8 +184,16 @@ export function ERPsPage() {
     setConnections(payload.connections);
   }
 
+  async function loadBlingAccounts() {
+    const response = await fetch("/api/integrations");
+    if (!response.ok) return;
+    const payload = (await response.json()) as { data?: BlingIntegratedConnection[] };
+    setBlingAccounts(payload.data ?? []);
+  }
+
   useEffect(() => {
     void loadConnections();
+    void loadBlingAccounts();
   }, []);
 
   useEffect(() => {
@@ -251,13 +302,14 @@ export function ERPsPage() {
       <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         {erps.map((erp) => {
           const connection = connections.find((item) => item.slug === erp.key);
+          const badge = connectorBadge(connection);
           return (
-            <Card key={erp.key} className="group flex min-h-[260px] flex-col bg-matrix-panel/78 p-4 transition hover:border-matrix-gold/55 hover:shadow-gold">
+            <Card key={erp.key} className="group flex min-h-[230px] flex-col border-matrix-gold/20 bg-matrix-panel/78 p-4 transition hover:border-matrix-gold/55 hover:shadow-gold">
               <div className="flex items-start justify-between gap-3">
                 <ERPLogo erp={erp} />
-                <Badge tone={tone(connection?.status ?? "NOT_CONFIGURED", connection?.configStatus ?? "MISSING")}>{connection?.statusLabel ?? "Não configurado"}</Badge>
+                <Badge tone={badge.tone}>{badge.label}</Badge>
               </div>
-              <div className="mt-5 min-h-[86px]">
+              <div className="mt-5 min-h-[82px]">
                 <h3 className="text-lg font-semibold text-matrix-fg">{erp.name}</h3>
                 <p className="mt-3 text-sm leading-6 text-matrix-muted">{erp.description}</p>
               </div>
@@ -269,6 +321,70 @@ export function ERPsPage() {
           );
         })}
       </div>
+
+      <section className="mt-10">
+        <div className="mb-4">
+          <h2 className="text-xl font-bold text-matrix-fg">Contas integradas</h2>
+          <p className="mt-2 text-sm text-matrix-muted">Contas conectadas com seus respectivos ERPs.</p>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+          {blingAccounts.map((account) => (
+            <Card key={account.id} className="flex min-h-[300px] flex-col border-matrix-border bg-matrix-panel/82 p-5">
+              <div className="flex items-start justify-between gap-4">
+                {blingErp ? <ERPLogo erp={blingErp} size="account" /> : null}
+                <Badge tone="success">Produção</Badge>
+              </div>
+              <div className="mt-4">
+                <h3 className="text-lg font-bold text-matrix-fg">Bling</h3>
+                <p className="mt-1 text-base font-semibold text-matrix-fg">{account.name}</p>
+              </div>
+
+              <div className="mt-5 border-t border-matrix-border pt-5">
+                <dl className="grid gap-3 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="flex items-center gap-2 font-semibold text-matrix-muted"><ShieldCheck className="h-4 w-4 text-matrix-goldDark" />Ambiente</dt>
+                    <dd><Badge tone="success">Produção</Badge></dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="flex items-center gap-2 font-semibold text-matrix-muted"><CheckCircle2 className="h-4 w-4 text-matrix-goldDark" />Status</dt>
+                    <dd className="flex items-center gap-2 text-matrix-fg"><span className="h-2 w-2 rounded-full bg-emerald-400" />{blingStatusLabel(account.status)}</dd>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <dt className="flex items-center gap-2 font-semibold text-matrix-muted"><CalendarClock className="h-4 w-4 text-matrix-goldDark" />Última sincronização</dt>
+                    <dd className="text-right text-matrix-fg">{formatDate(account.lastSyncAt)}</dd>
+                  </div>
+                </dl>
+                {account.status !== "ACTIVE" ? <div className="mt-3"><Badge tone={blingStatusTone(account.status)}>{blingStatusLabel(account.status)}</Badge></div> : null}
+              </div>
+
+              <div className="mt-auto grid grid-cols-[1fr_40px] gap-2 pt-5">
+                <Button className="justify-center border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" disabled={!blingErp} onClick={() => blingErp && setSelected(blingErp)} type="button" variant="secondary">
+                  <Settings className="h-4 w-4" />
+                  Gerenciar conta
+                </Button>
+                <Button aria-label="Mais opções da conta Bling" className="px-0" disabled title="Opções em breve" type="button" variant="secondary">
+                  <MoreVertical className="h-4 w-4" />
+                </Button>
+              </div>
+            </Card>
+          ))}
+
+          {integratedEmptyErps.map((erp) => (
+            <Card key={`empty-${erp.key}`} className="flex min-h-[300px] flex-col items-center justify-center border-matrix-border bg-matrix-panel/72 p-5 text-center">
+              <div className="grid h-16 w-16 place-items-center rounded-full border border-dashed border-matrix-gold/45 text-matrix-goldDark">
+                <Plus className="h-8 w-8" />
+              </div>
+              <h3 className="mt-6 font-bold text-matrix-goldDark">Nenhuma conta integrada</h3>
+              <p className="mt-4 max-w-48 text-sm leading-6 text-matrix-muted">Conecte uma conta para começar a sincronizar seus dados.</p>
+              <Button className="mt-auto w-full justify-center border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" onClick={() => setSelected(erp)} type="button" variant="secondary">
+                <Plus className="h-4 w-4" />
+                Conectar conta
+              </Button>
+            </Card>
+          ))}
+        </div>
+      </section>
 
       {selected && selectedConnection ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 px-4 py-6 backdrop-blur-sm" onClick={() => setSelected(null)}>
