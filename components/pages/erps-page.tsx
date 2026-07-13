@@ -7,6 +7,8 @@ import { AppShell } from "@/components/app-shell";
 import { Badge, Button, Card } from "@/components/ui";
 
 type ERPKey = "bling" | "olist" | "omie" | "conta-azul" | "custom-api";
+type ERPModalMode = "create" | "manage";
+type BlingConnectionRole = "MATRIX" | "BRANCH" | "OTHER";
 
 type ERPField = {
   key: string;
@@ -47,12 +49,16 @@ type ERPConnection = {
 type BlingIntegratedConnection = {
   id: string;
   name: string;
-  role: string;
+  role: BlingConnectionRole;
   status: string;
+  environment: string;
+  externalAccountEmail: string | null;
   lastSyncAt: string | null;
   lastTestAt: string | null;
   lastError: string | null;
   createdAt: string;
+  updatedAt: string;
+  tokenExpiresAt: string | null;
 };
 
 type ERP = {
@@ -74,12 +80,25 @@ type FormState = {
   invoiceSyncEnabled: boolean;
 };
 
+type BlingFormState = {
+  accountAlias: string;
+  role: BlingConnectionRole;
+};
+
 const erps: ERP[] = [
   { key: "bling", name: "Bling", description: "OAuth seguro e integração ERP.", icon: "bling" },
   { key: "olist", name: "Olist", description: "ERP e hub de vendas.", icon: "olist" },
   { key: "omie", name: "Omie", description: "ERP financeiro e operacional.", icon: "omie" },
   { key: "conta-azul", name: "Conta Azul", description: "Financeiro e faturamento.", icon: "conta" },
   { key: "custom-api", name: "API personalizada", description: "Endpoints customizados com autenticação segura.", icon: "api" }
+];
+
+const emptyForm: FormState = { accountAlias: "", credentials: {}, taxRate: "", orderImportStartDate: "", internalNotes: "", productSyncEnabled: false, orderSyncEnabled: false, stockSyncEnabled: false, invoiceSyncEnabled: false };
+const emptyBlingForm: BlingFormState = { accountAlias: "", role: "OTHER" };
+const blingRoleOptions: Array<{ label: string; value: BlingConnectionRole }> = [
+  { label: "Matriz", value: "MATRIX" },
+  { label: "Filial", value: "BRANCH" },
+  { label: "Outra", value: "OTHER" }
 ];
 
 function ERPLogo({ erp, size = "card" }: { erp: ERP; size?: "card" | "account" }) {
@@ -168,7 +187,11 @@ export function ERPsPage() {
   const [connections, setConnections] = useState<ERPConnection[]>([]);
   const [blingAccounts, setBlingAccounts] = useState<BlingIntegratedConnection[]>([]);
   const [selected, setSelected] = useState<ERP | null>(null);
-  const [form, setForm] = useState<FormState>({ accountAlias: "", credentials: {}, taxRate: "", orderImportStartDate: "", internalNotes: "", productSyncEnabled: false, orderSyncEnabled: false, stockSyncEnabled: false, invoiceSyncEnabled: false });
+  const [modalMode, setModalMode] = useState<ERPModalMode | null>(null);
+  const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
+  const [selectedBlingAccount, setSelectedBlingAccount] = useState<BlingIntegratedConnection | null>(null);
+  const [form, setForm] = useState<FormState>(emptyForm);
+  const [blingForm, setBlingForm] = useState<BlingFormState>(emptyBlingForm);
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [message, setMessage] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
@@ -202,16 +225,104 @@ export function ERPsPage() {
     setMessage("");
     setCopyMessage("");
     setShowSecrets({});
+    if (selected?.key === "bling" && modalMode) return;
     setForm(createForm(selectedConnection, selected));
-  }, [selected, selectedConnection]);
+  }, [selected, selectedConnection, modalMode]);
+
+  function closeModal() {
+    setSelected(null);
+    setModalMode(null);
+    setSelectedConnectionId(null);
+    setSelectedBlingAccount(null);
+    setForm(emptyForm);
+    setBlingForm(emptyBlingForm);
+    setShowSecrets({});
+    setMessage("");
+    setCopyMessage("");
+    setSaving(false);
+    setTesting(false);
+  }
+
+  function openCreateIntegration(erp: ERP) {
+    setModalMode("create");
+    setSelectedConnectionId(null);
+    setSelectedBlingAccount(null);
+    setMessage("");
+    setCopyMessage("");
+    setShowSecrets({});
+    setBlingForm(emptyBlingForm);
+    setForm(emptyForm);
+    setSelected(erp);
+  }
+
+  function openManageBlingConnection(account: BlingIntegratedConnection) {
+    if (!blingErp) return;
+    setModalMode("manage");
+    setSelectedConnectionId(account.id);
+    setSelectedBlingAccount(account);
+    setBlingForm({ accountAlias: account.name, role: account.role });
+    setForm(emptyForm);
+    setMessage("");
+    setCopyMessage("");
+    setShowSecrets({});
+    setSelected(blingErp);
+  }
 
   function replaceConnection(connection: ERPConnection) {
     setConnections((current) => current.map((item) => (item.slug === connection.slug ? connection : item)));
   }
 
+  async function submitBlingModal(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!modalMode || !blingForm.accountAlias.trim()) return;
+
+    setSaving(true);
+    setMessage("");
+
+    if (modalMode === "create") {
+      const response = await fetch("/api/integrations/bling/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: blingForm.accountAlias.trim(), role: blingForm.role })
+      });
+      const payload = await response.json().catch(() => ({}));
+      setSaving(false);
+      if (!response.ok) {
+        setMessage(payload.error ?? "Não foi possível iniciar a nova integração Bling.");
+        return;
+      }
+      window.location.assign(payload.authorizationUrl);
+      return;
+    }
+
+    if (!selectedConnectionId) {
+      setSaving(false);
+      setMessage("Selecione a conta Bling que deseja gerenciar.");
+      return;
+    }
+
+    const response = await fetch(`/api/integrations/${selectedConnectionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: blingForm.accountAlias.trim(), role: blingForm.role })
+    });
+    const payload = await response.json().catch(() => ({}));
+    setSaving(false);
+    if (!response.ok) {
+      setMessage(payload.error ?? "Não foi possível atualizar esta conta Bling.");
+      return;
+    }
+
+    const updated = payload.connection as BlingIntegratedConnection;
+    setBlingAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
+    setSelectedBlingAccount(updated);
+    setBlingForm({ accountAlias: updated.name, role: updated.role });
+    setMessage("Conta Bling atualizada com segurança.");
+  }
+
   async function saveConfig(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selected) return;
+    if (!selected || selected.key === "bling") return;
     setSaving(true);
     setMessage("");
     const response = await fetch(`/api/erps/connections/${selected.key}/config`, {
@@ -278,6 +389,7 @@ export function ERPsPage() {
   const canSave = Boolean(selectedConnection && form.accountAlias.trim());
   const canTest = Boolean(selectedConnection?.hasCredentials);
   const canConnect = Boolean(selectedConnection?.supportsOAuth && selectedConnection.authUrlImplemented && selectedConnection.hasCredentials);
+  const canSubmitBling = Boolean(blingForm.accountAlias.trim().length >= 2 && (modalMode === "create" || selectedConnectionId));
 
   return (
     <AppShell>
@@ -315,7 +427,7 @@ export function ERPsPage() {
                 <h3 className="text-lg font-semibold text-matrix-fg">{erp.name}</h3>
                 <p className="mt-3 text-sm leading-6 text-matrix-muted">{erp.description}</p>
               </div>
-              <Button className="mt-auto w-full border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" variant="secondary" onClick={() => setSelected(erp)}>
+              <Button className="mt-auto w-full border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" variant="secondary" onClick={() => openCreateIntegration(erp)}>
                 <Plus className="h-4 w-4" />
                 Nova integração {erp.name}
               </Button>
@@ -361,7 +473,7 @@ export function ERPsPage() {
               </div>
 
               <div className="mt-auto grid grid-cols-[1fr_40px] gap-2 pt-5">
-                <Button className="justify-center border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" disabled={!blingErp} onClick={() => blingErp && setSelected(blingErp)} type="button" variant="secondary">
+                <Button className="justify-center border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" disabled={!blingErp} onClick={() => openManageBlingConnection(account)} type="button" variant="secondary">
                   <Settings className="h-4 w-4" />
                   Gerenciar conta
                 </Button>
@@ -379,7 +491,7 @@ export function ERPsPage() {
               </div>
               <h3 className="mt-6 font-bold text-matrix-goldDark">Nenhuma conta integrada</h3>
               <p className="mt-4 max-w-48 text-sm leading-6 text-matrix-muted">Conecte uma conta para começar a sincronizar seus dados.</p>
-              <Button className="mt-auto w-full justify-center border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" onClick={() => setSelected(erp)} type="button" variant="secondary">
+              <Button className="mt-auto w-full justify-center border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" onClick={() => openCreateIntegration(erp)} type="button" variant="secondary">
                 <Plus className="h-4 w-4" />
                 Conectar conta
               </Button>
@@ -388,8 +500,77 @@ export function ERPsPage() {
         </div>
       </section>
 
-      {selected && selectedConnection ? (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 px-4 py-6 backdrop-blur-sm" onClick={() => setSelected(null)}>
+      {selected?.key === "bling" && modalMode ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 px-4 py-6 backdrop-blur-sm" onClick={closeModal}>
+          <section aria-modal="true" className="matrix-scroll max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-[0_24px_90px_rgb(0_0_0/0.35)]" onClick={(event) => event.stopPropagation()} role="dialog">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <ERPLogo erp={selected} />
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-matrix-goldDark">{modalMode === "create" ? "Nova conta" : "Conta integrada"}</p>
+                  <h3 className="mt-1 text-2xl font-bold text-matrix-fg">{modalMode === "create" ? "Nova integração Bling" : "Gerenciar conta Bling"}</h3>
+                </div>
+              </div>
+              <button aria-label="Fechar integração Bling" className="grid h-10 w-10 place-items-center rounded-md border border-matrix-border text-matrix-muted hover:border-matrix-gold/45 hover:text-matrix-goldDark" onClick={closeModal} type="button">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <form className="mt-5 space-y-4" onSubmit={submitBlingModal}>
+              <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm text-matrix-muted">Status atual</p>
+                    <p className="mt-1 font-semibold text-matrix-fg">{modalMode === "create" ? "Não configurado" : blingStatusLabel(selectedBlingAccount?.status ?? "PENDING")}</p>
+                  </div>
+                  <Badge tone={modalMode === "create" ? "muted" : blingStatusTone(selectedBlingAccount?.status ?? "PENDING")}>
+                    {modalMode === "create" ? "Não configurado" : blingStatusLabel(selectedBlingAccount?.status ?? "PENDING")}
+                  </Badge>
+                </div>
+                {modalMode === "manage" && selectedBlingAccount ? (
+                  <div className="mt-3 grid gap-2 text-sm text-matrix-muted sm:grid-cols-2 lg:grid-cols-4">
+                    <span>Última atualização: {formatDate(selectedBlingAccount.updatedAt)}</span>
+                    <span>Último teste: {formatDate(selectedBlingAccount.lastTestAt)}</span>
+                    <span>Conectado em: {formatDate(selectedBlingAccount.createdAt)}</span>
+                    <span>Ambiente: {selectedBlingAccount.environment === "PRODUCTION" ? "Produção" : "Sandbox"}</span>
+                  </div>
+                ) : null}
+                {modalMode === "manage" && selectedBlingAccount?.externalAccountEmail ? <p className="mt-3 text-sm text-matrix-muted">Conta: {selectedBlingAccount.externalAccountEmail}</p> : null}
+                {modalMode === "manage" && selectedBlingAccount?.lastError ? <p className="mt-3 text-sm text-orange-200">{selectedBlingAccount.lastError}</p> : null}
+              </section>
+
+              <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
+                <div className="mb-4 flex items-center gap-2"><CheckCircle2 className="h-4 w-4 text-matrix-goldDark" /><h4 className="font-semibold text-matrix-fg">Configuração da conta</h4></div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="grid gap-2 text-sm text-matrix-muted">Apelido da conta<input autoComplete="off" className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" value={blingForm.accountAlias} onChange={(event) => setBlingForm((current) => ({ ...current, accountAlias: event.target.value }))} /></label>
+                  <label className="grid gap-2 text-sm text-matrix-muted">Tipo<select className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" value={blingForm.role} onChange={(event) => setBlingForm((current) => ({ ...current, role: event.target.value as BlingConnectionRole }))}>{blingRoleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+                </div>
+              </section>
+
+              <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
+                <h4 className="font-semibold text-matrix-fg">Credenciais protegidas</h4>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <label className="grid gap-2 text-sm text-matrix-muted">Client ID<input autoComplete="off" className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-muted outline-none" disabled value="" /></label>
+                  <label className="grid gap-2 text-sm text-matrix-muted">Client Secret<input autoComplete="new-password" className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-muted outline-none" disabled placeholder={modalMode === "manage" ? "••••••••••••" : ""} type="password" value="" /></label>
+                  <label className="grid gap-2 text-sm text-matrix-muted">Token Expiration<input className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-muted outline-none" disabled value={modalMode === "manage" && selectedBlingAccount?.tokenExpiresAt ? formatDate(selectedBlingAccount.tokenExpiresAt) : ""} /></label>
+                  <label className="grid gap-2 text-sm text-matrix-muted">Observações<textarea className="min-h-20 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-muted outline-none" disabled value="" /></label>
+                </div>
+                <p className="mt-3 text-sm text-matrix-muted">As credenciais OAuth permanecem protegidas no servidor e nunca são copiadas de outra conta para este formulário.</p>
+              </section>
+
+              {message ? <p className="rounded-lg border border-matrix-border bg-matrix-panel2/60 px-3 py-2 text-sm text-matrix-muted">{message}</p> : null}
+
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button variant="secondary" type="button" onClick={closeModal}>Cancelar</Button>
+                <Button type="submit" disabled={!canSubmitBling || saving}>{saving ? "Processando..." : modalMode === "create" ? "Autorizar nova conta" : "Salvar alterações"}</Button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ) : null}
+
+      {selected && selectedConnection && selected.key !== "bling" ? (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 px-4 py-6 backdrop-blur-sm" onClick={closeModal}>
           <section aria-modal="true" className="matrix-scroll max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-[0_24px_90px_rgb(0_0_0/0.35)]" onClick={(event) => event.stopPropagation()} role="dialog">
             <div className="flex items-start justify-between gap-4">
               <div className="flex items-center gap-3">
@@ -399,7 +580,7 @@ export function ERPsPage() {
                   <h3 className="mt-1 text-2xl font-bold text-matrix-fg">{selected.name}</h3>
                 </div>
               </div>
-              <button aria-label="Fechar nova integração" className="grid h-10 w-10 place-items-center rounded-md border border-matrix-border text-matrix-muted hover:border-matrix-gold/45 hover:text-matrix-goldDark" onClick={() => setSelected(null)} type="button">
+              <button aria-label="Fechar nova integração" className="grid h-10 w-10 place-items-center rounded-md border border-matrix-border text-matrix-muted hover:border-matrix-gold/45 hover:text-matrix-goldDark" onClick={closeModal} type="button">
                 <X className="h-5 w-5" />
               </button>
             </div>
@@ -489,7 +670,7 @@ export function ERPsPage() {
               {message ? <p className="rounded-lg border border-matrix-border bg-matrix-panel2/60 px-3 py-2 text-sm text-matrix-muted">{message}</p> : null}
 
               <div className="flex flex-wrap justify-end gap-2">
-                <Button variant="secondary" type="button" onClick={() => setSelected(null)}>Cancelar</Button>
+                <Button variant="secondary" type="button" onClick={closeModal}>Cancelar</Button>
                 {selectedConnection.status === "ACTIVE" ? <Button variant="danger" type="button" onClick={disconnectProvider}>Desconectar</Button> : null}
                 <Button type="submit" disabled={!canSave || saving}>{saving ? "Salvando..." : "Salvar configuração"}</Button>
                 <Button type="button" variant="secondary" onClick={testConnection} disabled={!canTest || testing}>{testing ? "Testando..." : "Testar conexão"}</Button>
