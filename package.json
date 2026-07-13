@@ -12,6 +12,7 @@
     "prisma:seed": "tsx prisma/seed.ts",
     "seed:production": "tsx scripts/seed-production.ts",
     "security:audit": "tsx scripts/audit-api-security.ts",
+    "amazon:import-sandbox-token": "tsx scripts/import-amazon-sandbox-token.ts",
     "seed:test-products": "tsx scripts/seed-test-products.ts"
   },
   "dependencies": {
