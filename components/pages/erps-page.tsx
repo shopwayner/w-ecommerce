@@ -104,6 +104,8 @@ function connectorBadge(connection: ERPConnection | undefined) {
   return { label: "Configuração ausente", tone: "muted" as const };
 }
 
+const availableConnectorBadge = { label: "Conector disponível", tone: "muted" as const };
+
 function blingStatusLabel(status: string) {
   if (status === "ACTIVE") return "Conectado";
   if (status === "EXPIRED") return "Token expirado";
@@ -301,8 +303,8 @@ export function ERPsPage() {
 
       <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         {erps.map((erp) => {
-          const connection = connections.find((item) => item.slug === erp.key);
-          const badge = connectorBadge(connection);
+          const connection = erp.key === "bling" ? undefined : connections.find((item) => item.slug === erp.key);
+          const badge = erp.key === "bling" ? availableConnectorBadge : connectorBadge(connection);
           return (
             <Card key={erp.key} className="group flex min-h-[230px] flex-col border-matrix-gold/20 bg-matrix-panel/78 p-4 transition hover:border-matrix-gold/55 hover:shadow-gold">
               <div className="flex items-start justify-between gap-3">
