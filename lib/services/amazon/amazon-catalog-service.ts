@@ -48,6 +48,17 @@ type AmazonCatalogPayload = {
   items?: unknown;
 };
 
+type AmazonCatalogErrorPayload = {
+  errors?: unknown;
+};
+
+type AmazonCatalogUpstreamDiagnostic = {
+  httpStatus: number;
+  code: string | null;
+  requestId: string | null;
+  message: string | null;
+};
+
 type LwaRefreshPayload = {
   access_token?: unknown;
 };
@@ -56,7 +67,7 @@ export class AmazonCatalogError extends Error {
   constructor(
     message: string,
     public readonly status: number,
-    public readonly code: "INVALID_INPUT" | "NOT_AVAILABLE" | "UPSTREAM_UNAVAILABLE"
+    public readonly code: "INVALID_INPUT" | "NOT_AVAILABLE" | "SANDBOX_NO_REFERENCE" | "UPSTREAM_UNAVAILABLE"
   ) {
     super(message);
     this.name = "AmazonCatalogError";
@@ -88,6 +99,49 @@ function asArray(value: unknown): unknown[] {
 
 function stringValue(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function sanitizeDiagnosticText(value: unknown) {
+  const text = stringValue(value);
+  if (!text) return null;
+  return text
+    .replace(/\s+/g, " ")
+    .replace(/\d{8,14}/g, (match) => `${match.slice(0, 4)}...${match.slice(-4)}`)
+    .slice(0, 180);
+}
+
+function maskDiagnosticValue(value: string | null) {
+  if (!value) return null;
+  if (value.length <= 10) return `${value.slice(0, 2)}...${value.slice(-2)}`;
+  return `${value.slice(0, 5)}...${value.slice(-5)}`;
+}
+
+function maskCatalogSearch(search: ReturnType<typeof resolveAmazonCatalogSearchInput>) {
+  return search.mode === "identifier" ? maskDiagnosticValue(search.identifier.value) : "keywords";
+}
+
+async function readUpstreamDiagnostic(response: Response): Promise<AmazonCatalogUpstreamDiagnostic> {
+  const payload = (await response.json().catch(() => null)) as AmazonCatalogErrorPayload | null;
+  const firstError =
+    asArray(payload?.errors)
+      .map(asRecord)
+      .find((entry): entry is Record<string, unknown> => Boolean(entry)) ?? null;
+  return {
+    httpStatus: response.status,
+    code: sanitizeDiagnosticText(firstError?.code),
+    requestId: maskDiagnosticValue(
+      response.headers.get("x-amzn-requestid") ?? response.headers.get("x-amz-request-id")
+    ),
+    message: sanitizeDiagnosticText(firstError?.message)
+  };
+}
+
+function isStaticSandboxWithoutFixture(diagnostic: AmazonCatalogUpstreamDiagnostic) {
+  return (
+    diagnostic.httpStatus === 400 &&
+    diagnostic.code?.toLowerCase() === "invalidinput" &&
+    diagnostic.message?.toLowerCase().includes("could not match input arguments")
+  );
 }
 
 function safeHttpUrl(value: unknown) {
@@ -328,7 +382,22 @@ export const amazonCatalogService = {
     });
 
     if (!response.ok) {
+      const diagnostic = await readUpstreamDiagnostic(response);
+      console.warn("[amazon.catalog] Consulta Sandbox recusada.", {
+        httpStatus: diagnostic.httpStatus,
+        code: diagnostic.code,
+        requestId: diagnostic.requestId,
+        message: diagnostic.message,
+        search: maskCatalogSearch(search)
+      });
       if (response.status === 401 || response.status === 403) throw safeConnectionError();
+      if (isStaticSandboxWithoutFixture(diagnostic)) {
+        throw new AmazonCatalogError(
+          "O ambiente de testes da Amazon não possui uma referência para este produto.",
+          400,
+          "SANDBOX_NO_REFERENCE"
+        );
+      }
       throw new AmazonCatalogError("Nao foi possivel consultar a Amazon agora.", 502, "UPSTREAM_UNAVAILABLE");
     }
 
