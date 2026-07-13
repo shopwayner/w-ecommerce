@@ -670,10 +670,10 @@ function localLookupMessage(payload: LookupResponse) {
             ? "titulo"
             : "dados locais";
 
-    return `Product local encontrado por ${matchLabel}. Escolha uma fonte para consultar GTIN interno ou Mercado Livre. Nenhuma API externa foi chamada.`;
+    return `Produto local encontrado por ${matchLabel}. Escolha uma fonte para consultar GTIN interno ou Mercado Livre. Nenhuma consulta externa foi realizada.`;
   }
 
-  return payload.error ?? "Nenhum Product local foi localizado. Nenhuma API externa foi chamada.";
+  return payload.error ?? "Nenhum produto local foi localizado. Nenhuma consulta externa foi realizada.";
 }
 
 function confidenceTone(confidence: number | null) {
@@ -1861,7 +1861,7 @@ export function IntelligentProductRegistrationPage() {
     setSelectedReferenceFields(new Set());
     setSelectedMercadoLivreSuggestion(null);
     setSelectedMercadoLivreFields(new Set());
-    setMessage("Consultando somente o Product local. Nenhuma API externa sera chamada.");
+    setMessage("Consultando somente o produto local. Nenhuma consulta externa sera realizada.");
     setEnrichmentHistory([]);
     setSelectedHistory(null);
 
