@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { AlertTriangle, ArrowLeft, Copy, Database, ExternalLink, ImageIcon, PackageSearch, Save, Search, ShieldCheck, SlidersHorizontal } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, Copy, Database, ExternalLink, ImageIcon, PackageSearch, RotateCcw, Save, Search, ShieldCheck, SlidersHorizontal, WandSparkles } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { Badge, Button, Card, PageHeader } from "@/components/ui";
 import {
@@ -14,6 +14,20 @@ import {
   type ProductSuggestionCompatibilityLevel,
   type ProductSuggestionCompatibilityResult
 } from "@/lib/intelligent-product-compatibility";
+import {
+  AMAZON_DRAFT_FIELDS,
+  amazonDraftPersistableValues,
+  amazonDraftValueHasContent,
+  amazonDraftValuesEqual,
+  amazonReferenceSuggestion,
+  applyAmazonReferenceSuggestion,
+  applyAmazonReferenceToEmptyFields,
+  createAmazonReferenceDraft,
+  keepAmazonDraftCurrentValue,
+  type AmazonCatalogItem,
+  type AmazonDraftField,
+  type AmazonReferenceDraft
+} from "@/lib/amazon-reference-draft";
 
 const SAVE_CONFIRMATION = "APLICAR_SUGESTAO_MERCADO_LIVRE_LOCALMENTE";
 const AMAZON_LOGO_SRC = "/marketplaces/amazon.png";
@@ -393,21 +407,6 @@ type GtinSearchPayload = {
   error?: string;
 };
 
-type AmazonCatalogIdentifier = {
-  type: string;
-  value: string;
-};
-
-type AmazonCatalogItem = {
-  asin: string;
-  title: string | null;
-  brand: string | null;
-  imageUrl: string | null;
-  identifiers: AmazonCatalogIdentifier[];
-  productType: string | null;
-  attributes: Record<string, string | string[]>;
-};
-
 type AmazonCatalogResponse = {
   success: boolean;
   data?: {
@@ -419,6 +418,33 @@ type AmazonCatalogResponse = {
 };
 
 type AmazonCatalogState = "idle" | "loading" | "success" | "empty" | "unavailable" | "error";
+
+function amazonAttributeLabel(value: string) {
+  const normalized = value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1).toLowerCase() : "Caracteristica";
+}
+
+function amazonDraftDisplayValue(
+  field: AmazonDraftField,
+  value: string | Record<string, string | string[]>
+) {
+  if (field === "attributes" && typeof value !== "string") {
+    const count = Object.keys(value).length;
+    return count ? `${count} característica(s)` : "-";
+  }
+  return typeof value === "string" && value.trim() ? value : "-";
+}
+
+const amazonDraftFieldLabels: Record<AmazonDraftField, string> = {
+  name: "Título sugerido",
+  brand: "Marca",
+  productType: "Tipo do produto",
+  attributes: "Características"
+};
 
 type InternalGtinDiagnostic = {
   selectedProductSku: string | null;
@@ -1218,7 +1244,9 @@ export function IntelligentProductRegistrationPage() {
   const [amazonCatalogState, setAmazonCatalogState] = useState<AmazonCatalogState>("idle");
   const [amazonCatalogItems, setAmazonCatalogItems] = useState<AmazonCatalogItem[]>([]);
   const [amazonCatalogMessage, setAmazonCatalogMessage] = useState<string | null>(null);
-  const [selectedAmazonReferenceAsin, setSelectedAmazonReferenceAsin] = useState<string | null>(null);
+  const [selectedAmazonReference, setSelectedAmazonReference] = useState<AmazonCatalogItem | null>(null);
+  const [amazonDraft, setAmazonDraft] = useState<AmazonReferenceDraft>(() => createAmazonReferenceDraft());
+  const [amazonDraftReviewOpen, setAmazonDraftReviewOpen] = useState(false);
   const [, setMercadoLivreLoading] = useState(true);
   const [mercadoLivreConfigured, setMercadoLivreConfigured] = useState(false);
   const [mercadoLivreAccounts, setMercadoLivreAccounts] = useState<MercadoLivreAccount[]>([]);
@@ -1268,8 +1296,14 @@ export function IntelligentProductRegistrationPage() {
   const mercadoLivreDetailRequestsRef = useRef<Set<string>>(new Set());
   const mercadoLivreLoadedRawPagesRef = useRef<Set<number>>(new Set());
 
-  const selectedCount = selectedFields.size + selectedReferenceFields.size + selectedMercadoLivreFields.size;
   const product = selectedProduct;
+  const selectedAmazonReferenceAsin = selectedAmazonReference?.asin ?? null;
+  const amazonPersistableValues = amazonDraftPersistableValues(amazonDraft);
+  const selectedCount =
+    selectedFields.size +
+    selectedReferenceFields.size +
+    selectedMercadoLivreFields.size +
+    Object.keys(amazonPersistableValues).length;
   const lookupGtinCatalog = lookup?.gtinCatalog ?? null;
   const gtinCatalog = internalGtinCatalog ?? lookupGtinCatalog;
   const suggestions = lookup?.fieldSuggestions ?? [];
@@ -1539,6 +1573,51 @@ export function IntelligentProductRegistrationPage() {
       ]
     : [];
 
+  const amazonDraftBase = createAmazonReferenceDraft(product);
+  const amazonDraftFieldsSelectedElsewhere = AMAZON_DRAFT_FIELDS.filter((field) => {
+    if (field !== "name" && field !== "brand") return false;
+    return selectedFields.has(field) || selectedReferenceFields.has(field) || selectedMercadoLivreFields.has(field);
+  });
+  const amazonReferenceReviewRows = selectedAmazonReference
+    ? AMAZON_DRAFT_FIELDS.map((field) => {
+        const selectedElsewhereValue =
+          field === "name" || field === "brand"
+            ? [
+                mercadoLivreSuggestionReviewRows.find((row) => row.field === field && selectedMercadoLivreFields.has(field))?.suggested,
+                referenceReviewRows.find((row) => row.field === field && selectedReferenceFields.has(field))?.suggested,
+                suggestions.find((row) => row.field === field && selectedFields.has(field))?.suggestedValue
+              ].find((value) => typeof value === "string" && value.trim())
+            : undefined;
+        const current = typeof selectedElsewhereValue === "string" ? selectedElsewhereValue : amazonDraftBase.values[field];
+        const suggested = amazonReferenceSuggestion(selectedAmazonReference, field);
+        return {
+          field,
+          label: amazonDraftFieldLabels[field],
+          current,
+          suggested,
+          applied: amazonDraft.appliedFields.includes(field),
+          kept: amazonDraft.keptFields.includes(field),
+          hasSuggestion: amazonDraftValueHasContent(suggested),
+          matchesCurrent:
+            amazonDraftValueHasContent(current) &&
+            amazonDraftValueHasContent(suggested) &&
+            amazonDraftValuesEqual(current, suggested),
+          conflict:
+            amazonDraftValueHasContent(current) &&
+            amazonDraftValueHasContent(suggested) &&
+            !amazonDraftValuesEqual(current, suggested),
+          persistsWithExistingSave: field === "name" || field === "brand"
+        };
+      })
+    : [];
+  const amazonReferenceHasConflicts = amazonReferenceReviewRows.some((row) => row.conflict);
+
+  function resetAmazonReferenceState(nextProduct: SafeProduct | null) {
+    setSelectedAmazonReference(null);
+    setAmazonDraft(createAmazonReferenceDraft(nextProduct));
+    setAmazonDraftReviewOpen(false);
+  }
+
   async function searchAmazonCatalog() {
     const gtin = amazonGtinInput.trim();
     const fallbackTitle = selectedProductName?.trim() || query.trim();
@@ -1549,10 +1628,10 @@ export function IntelligentProductRegistrationPage() {
       return;
     }
 
+    resetAmazonReferenceState(product);
     setAmazonCatalogState("loading");
     setAmazonCatalogItems([]);
     setAmazonCatalogMessage("Buscando referencia na Amazon...");
-    setSelectedAmazonReferenceAsin(null);
 
     const params = new URLSearchParams();
     if (gtin) params.set("gtin", gtin);
@@ -1600,9 +1679,51 @@ export function IntelligentProductRegistrationPage() {
   }
 
   function selectAmazonReference(item: AmazonCatalogItem) {
-    setSelectedAmazonReferenceAsin(item.asin);
-    setAmazonCatalogMessage("Referencia Amazon selecionada.");
-    setMessage("Referencia Amazon selecionada apenas nesta tela. Nenhum dado foi salvo.");
+    setSelectedAmazonReference(item);
+    setAmazonDraft(createAmazonReferenceDraft(product));
+    setAmazonDraftReviewOpen(false);
+    setAmazonCatalogMessage("Referência Amazon selecionada.");
+    setMessage("Referência Amazon selecionada. As alterações ainda não foram salvas.");
+  }
+
+  function openAmazonDraftReview() {
+    if (!selectedAmazonReference) return;
+    setAmazonDraftReviewOpen(true);
+    setAmazonCatalogMessage(
+      amazonReferenceHasConflicts
+        ? "Alguns campos já possuem informações. Escolha quais sugestões deseja usar."
+        : "Compare as informações antes de aplicar."
+    );
+    setMessage("Compare as informações antes de aplicar. As alterações ainda não foram salvas.");
+  }
+
+  function applyAmazonSuggestionToDraft(field: AmazonDraftField) {
+    if (!selectedAmazonReference) return;
+    setAmazonDraft((current) => applyAmazonReferenceSuggestion(current, selectedAmazonReference, field));
+    setAmazonCatalogMessage("Sugestão aplicada somente ao rascunho.");
+    setMessage("As alterações ainda não foram salvas.");
+  }
+
+  function keepAmazonCurrentValue(field: AmazonDraftField) {
+    setAmazonDraft((current) => keepAmazonDraftCurrentValue(current, product, field));
+    setAmazonCatalogMessage("Valor atual mantido no rascunho.");
+    setMessage("As alterações ainda não foram salvas.");
+  }
+
+  function applyAmazonOnlyToEmptyFields() {
+    if (!selectedAmazonReference) return;
+    const result = applyAmazonReferenceToEmptyFields(
+      amazonDraft,
+      selectedAmazonReference,
+      amazonDraftFieldsSelectedElsewhere
+    );
+    setAmazonDraft(result.draft);
+    setAmazonCatalogMessage(
+      result.appliedFields.length
+        ? "Sugestões aplicadas somente aos campos vazios."
+        : "Nenhum campo vazio possui uma sugestão nova."
+    );
+    setMessage("As alterações ainda não foram salvas.");
   }
 
   async function loadMercadoLivreAccounts(options?: { silent?: boolean }) {
@@ -1720,7 +1841,7 @@ export function IntelligentProductRegistrationPage() {
     setAmazonCatalogState("idle");
     setAmazonCatalogItems([]);
     setAmazonCatalogMessage(null);
-    setSelectedAmazonReferenceAsin(null);
+    resetAmazonReferenceState(nextProduct);
   }
 
   async function consultInternalGtinCatalog() {
@@ -2532,6 +2653,7 @@ export function IntelligentProductRegistrationPage() {
       ...gtinFields,
       ...referenceFields,
       ...mercadoLivreFields,
+      ...amazonPersistableValues,
       ...(referenceImport ? { referenceImportId: referenceImport.id } : {})
     };
 
@@ -3242,7 +3364,7 @@ export function IntelligentProductRegistrationPage() {
                   setAmazonCatalogState("idle");
                   setAmazonCatalogItems([]);
                   setAmazonCatalogMessage(null);
-                  setSelectedAmazonReferenceAsin(null);
+                  resetAmazonReferenceState(product);
                 }}
                 placeholder="GTIN/EAN do produto"
                 value={amazonGtinInput}
@@ -3328,7 +3450,7 @@ export function IntelligentProductRegistrationPage() {
                       {amazonCatalogMessage ?? "Consulte referencias para revisar os dados do produto."}
                     </p>
                   </div>
-                  {selectedAmazonReferenceAsin ? <Badge tone="success">Referencia selecionada</Badge> : null}
+                  {selectedAmazonReferenceAsin ? <Badge tone="success">Referência selecionada</Badge> : null}
                 </div>
 
                 {amazonCatalogState === "loading" ? (
@@ -3376,11 +3498,136 @@ export function IntelligentProductRegistrationPage() {
                             type="button"
                             variant={selected ? "secondary" : "primary"}
                           >
-                            {selected ? "Referencia selecionada" : "Usar como referencia"}
+                            {selected ? "Referência selecionada" : "Usar como referência"}
                           </Button>
                         </article>
                       );
                     })}
+                  </div>
+                ) : null}
+
+                {selectedAmazonReference ? (
+                  <div className="border-t border-matrix-border px-4 py-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <p className="font-semibold text-matrix-fg">Referência escolhida para revisão</p>
+                        <p className="mt-1 text-sm text-matrix-muted">Compare as informações antes de aplicar.</p>
+                        <p className="mt-2 text-xs text-matrix-muted">
+                          Imagem exibida apenas como referência para conferência.
+                        </p>
+                      </div>
+                      <Button className="shrink-0" onClick={openAmazonDraftReview} type="button">
+                        <WandSparkles className="h-4 w-4" />
+                        Aplicar ao rascunho
+                      </Button>
+                    </div>
+
+                    {amazonDraftReviewOpen ? (
+                      <div className="mt-4 border-t border-matrix-border pt-4">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <p className="font-semibold text-matrix-fg">
+                              {amazonReferenceHasConflicts
+                                ? "Alguns campos já possuem informações. Escolha quais sugestões deseja usar."
+                                : "Compare as informações antes de aplicar."}
+                            </p>
+                            <p className="mt-1 text-xs text-matrix-muted">As alterações ainda não foram salvas.</p>
+                          </div>
+                          <Button onClick={applyAmazonOnlyToEmptyFields} type="button" variant="secondary">
+                            <Check className="h-4 w-4" />
+                            Aplicar somente nos campos vazios
+                          </Button>
+                        </div>
+
+                        <div className="mt-4 divide-y divide-matrix-border border-y border-matrix-border">
+                          {amazonReferenceReviewRows.map((row) => {
+                            const attributeEntries =
+                              row.field === "attributes" && typeof row.suggested !== "string"
+                                ? Object.entries(row.suggested)
+                                : [];
+                            return (
+                              <div className="py-4" key={row.field}>
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <p className="font-semibold text-matrix-fg">{row.label}</p>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    {row.conflict ? <Badge tone="warning">Revisar</Badge> : null}
+                                    {row.matchesCurrent ? <Badge tone="success">Já corresponde</Badge> : null}
+                                    {row.applied ? <Badge tone="success">Sugestão Amazon</Badge> : null}
+                                    {row.kept ? <Badge tone="muted">Valor atual mantido</Badge> : null}
+                                  </div>
+                                </div>
+
+                                <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+                                  <div className="min-w-0 border-l-2 border-matrix-border pl-3">
+                                    <p className="text-matrix-muted">Valor atual:</p>
+                                    <p className="mt-1 break-words text-matrix-fg">
+                                      {amazonDraftDisplayValue(row.field, row.current)}
+                                    </p>
+                                  </div>
+                                  <div className="min-w-0 border-l-2 border-matrix-gold/50 pl-3">
+                                    <p className="text-matrix-muted">Sugestão Amazon:</p>
+                                    <p className="mt-1 break-words text-matrix-fg">
+                                      {amazonDraftDisplayValue(row.field, row.suggested)}
+                                    </p>
+                                  </div>
+                                </div>
+
+                                {attributeEntries.length ? (
+                                  <div className="matrix-scroll mt-3 grid max-h-40 gap-2 overflow-y-auto pr-1 text-xs sm:grid-cols-2">
+                                    {attributeEntries.map(([key, value]) => (
+                                      <div className="flex min-w-0 justify-between gap-3 border-b border-matrix-border/70 pb-2" key={key}>
+                                        <span className="text-matrix-muted">{amazonAttributeLabel(key)}</span>
+                                        <span className="break-words text-right text-matrix-fg">
+                                          {Array.isArray(value) ? value.join(", ") : value}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : null}
+
+                                {row.applied ? (
+                                  <p className="mt-3 text-xs text-matrix-muted">
+                                    No rascunho: <span className="font-medium text-matrix-fg">{amazonDraftDisplayValue(row.field, amazonDraft.values[row.field])}</span>
+                                  </p>
+                                ) : null}
+
+                                <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                                  <Button
+                                    className="sm:min-w-36"
+                                    onClick={() => keepAmazonCurrentValue(row.field)}
+                                    type="button"
+                                    variant="ghost"
+                                  >
+                                    <RotateCcw className="h-4 w-4" />
+                                    Manter atual
+                                  </Button>
+                                  <Button
+                                    className="sm:min-w-36"
+                                    disabled={!row.hasSuggestion || row.matchesCurrent}
+                                    onClick={() => applyAmazonSuggestionToDraft(row.field)}
+                                    type="button"
+                                    variant="secondary"
+                                  >
+                                    <Check className="h-4 w-4" />
+                                    Usar sugestão
+                                  </Button>
+                                </div>
+
+                                {!row.persistsWithExistingSave ? (
+                                  <p className="mt-2 text-xs text-matrix-muted">
+                                    Esta informação permanece somente no rascunho para conferência.
+                                  </p>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        <p className="mt-3 text-xs text-matrix-muted">
+                          ASIN, identificadores, tipo, características e imagem de referência não são incluídos no salvamento do produto.
+                        </p>
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
               </section>
