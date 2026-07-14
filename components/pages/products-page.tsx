@@ -82,6 +82,46 @@ type ProductListItem = {
   updatedAt: string;
 };
 
+type ProductAccountContext = {
+  mode: "MATRIX" | "ERP_ACCOUNT";
+  provider: "BLING" | null;
+  connectionId: string | null;
+  selectedOption?: { status?: string } | null;
+};
+
+type BlingImportPreview = {
+  totalReportedByBling: number | null;
+  totalFound: number;
+  pagesFound: number;
+  simpleProducts: number;
+  variations: number;
+  active: number;
+  inactive: number;
+  withoutSku: number;
+  existing: number;
+  new: number;
+  wouldUpdate: number;
+  importable: number;
+  errors: number;
+  ignored: number;
+  duplicateExternalIds: number;
+  skuConflicts: number;
+  completed: boolean;
+  writesPerformed: false;
+};
+
+type BlingSyncJob = {
+  id: string;
+  status: string;
+  totalFetched: number;
+  totalCreatedDrafts: number;
+  totalUpdatedDrafts: number;
+  totalExistingProducts: number;
+  totalErrors: number;
+  currentPage: number;
+  errorMessage: string | null;
+};
+
 type ProductEnrichmentDraft = {
   id: string;
   productId: string;
@@ -382,7 +422,13 @@ export function ProductsPage() {
   const [activeEnrichmentProductId, setActiveEnrichmentProductId] = useState<string | null>(null);
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(new Set());
   const [products, setProducts] = useState<ProductListItem[]>([]);
+  const [accountContext, setAccountContext] = useState<ProductAccountContext | null>(null);
   const [loadingProducts, setLoadingProducts] = useState(true);
+  const [blingImportOpen, setBlingImportOpen] = useState(false);
+  const [blingImportBusy, setBlingImportBusy] = useState(false);
+  const [blingImportMessage, setBlingImportMessage] = useState("");
+  const [blingImportPreview, setBlingImportPreview] = useState<BlingImportPreview | null>(null);
+  const [blingSyncJob, setBlingSyncJob] = useState<BlingSyncJob | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [imageFilter, setImageFilter] = useState<ImageFilter>("all");
   const [stockFilter, setStockFilter] = useState<StockFilter>("all");
@@ -400,8 +446,9 @@ export function ProductsPage() {
         return;
       }
 
-      const payload = (await response.json()) as { data?: ProductListItem[] };
+      const payload = (await response.json()) as { data?: ProductListItem[]; accountContext?: ProductAccountContext };
       setProducts(payload.data ?? []);
+      setAccountContext(payload.accountContext ?? null);
     } finally {
       setLoadingProducts(false);
     }
@@ -539,6 +586,102 @@ export function ProductsPage() {
     setViewingProduct(updatedProduct);
   }
 
+  async function openBlingImportPreview() {
+    setBlingImportOpen(true);
+    setBlingImportPreview(null);
+    setBlingSyncJob(null);
+    setBlingImportMessage("");
+
+    const connectionId = accountContext?.mode === "ERP_ACCOUNT" && accountContext.provider === "BLING" ? accountContext.connectionId : null;
+    if (!connectionId) {
+      setBlingImportMessage("Selecione uma conta Bling no topo antes de consultar os produtos.");
+      return;
+    }
+    if (accountContext?.selectedOption?.status !== "ACTIVE") {
+      setBlingImportMessage("Reconecte a conta Bling antes de continuar.");
+      return;
+    }
+
+    setBlingImportBusy(true);
+    try {
+      const response = await fetch("/api/products/import-from-bling", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "dry-run", connectionId })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setBlingImportMessage(payload.error ?? "Nao foi possivel consultar os produtos do Bling agora.");
+        return;
+      }
+      setBlingImportPreview(payload.preview as BlingImportPreview);
+      setBlingImportMessage("Consulta concluida. Nenhum produto foi alterado.");
+    } finally {
+      setBlingImportBusy(false);
+    }
+  }
+
+  async function loadBlingSyncJob(connectionId: string, jobId: string) {
+    const response = await fetch(`/api/products/import-from-bling?connectionId=${encodeURIComponent(connectionId)}&jobId=${encodeURIComponent(jobId)}`);
+    if (!response.ok) return null;
+    const payload = await response.json().catch(() => ({}));
+    const job = payload.job as BlingSyncJob | undefined;
+    if (job) setBlingSyncJob(job);
+    return job ?? null;
+  }
+
+  async function runPreparedBlingSync(connectionId: string, jobId: string) {
+    let finished = false;
+    const runPromise = fetch("/api/products/import-from-bling", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "run", connectionId, jobId, confirmed: true })
+    }).finally(() => {
+      finished = true;
+    });
+
+    while (!finished) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+      await loadBlingSyncJob(connectionId, jobId);
+    }
+
+    const response = await runPromise;
+    const payload = await response.json().catch(() => ({}));
+    await loadBlingSyncJob(connectionId, jobId);
+    if (!response.ok) throw new Error(payload.error ?? "Nao foi possivel concluir a sincronizacao.");
+    setBlingImportMessage("Sincronizacao concluida em todas as paginas encontradas.");
+    await loadProducts();
+  }
+
+  async function startBlingSync() {
+    const connectionId = accountContext?.mode === "ERP_ACCOUNT" && accountContext.provider === "BLING" ? accountContext.connectionId : null;
+    if (!connectionId || !blingImportPreview || blingImportBusy) return;
+    const confirmed = window.confirm("Esta acao percorrera todas as paginas do Bling e atualizara o catalogo local. Deseja continuar?");
+    if (!confirmed) return;
+
+    setBlingImportBusy(true);
+    setBlingImportMessage("Preparando a sincronizacao completa...");
+    try {
+      const response = await fetch("/api/products/import-from-bling", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "prepare", connectionId, confirmed: true })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.job?.id) {
+        setBlingImportMessage(payload.error ?? "Nao foi possivel preparar a sincronizacao.");
+        return;
+      }
+      setBlingSyncJob(payload.job as BlingSyncJob);
+      setBlingImportMessage("Sincronizando as paginas encontradas...");
+      await runPreparedBlingSync(connectionId, payload.job.id as string);
+    } catch (error) {
+      setBlingImportMessage(error instanceof Error ? error.message : "Nao foi possivel concluir a sincronizacao.");
+    } finally {
+      setBlingImportBusy(false);
+    }
+  }
+
   return (
     <AppShell>
       <PageHeader
@@ -553,9 +696,9 @@ export function ProductsPage() {
               <Sparkles className="h-4 w-4" /> Cadastro Inteligente
             </Link>
             <Button onClick={() => setOpen(true)}><Plus className="h-4 w-4" /> Novo produto</Button>
-            <Button variant="secondary"><FileUp className="h-4 w-4" /> Importar do Bling</Button>
+            <Button onClick={() => void openBlingImportPreview()} variant="secondary"><FileUp className="h-4 w-4" /> Importar do Bling</Button>
             <Button variant="secondary"><Download className="h-4 w-4" /> Exportar</Button>
-            <Button variant="secondary"><RefreshCw className="h-4 w-4" /> Sincronizar</Button>
+            <Button onClick={() => void openBlingImportPreview()} variant="secondary"><RefreshCw className="h-4 w-4" /> Sincronizar</Button>
           </>
         }
       />
@@ -775,6 +918,59 @@ export function ProductsPage() {
           onSaved={() => void loadProducts()}
           products={enrichmentProducts}
         />
+      ) : null}
+      {blingImportOpen ? (
+        <div className="fixed inset-0 z-[70] grid place-items-center bg-black/70 px-4 py-6 backdrop-blur-sm" onClick={() => !blingImportBusy && setBlingImportOpen(false)}>
+          <section aria-modal="true" className="matrix-scroll max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-matrix-gold/35 bg-matrix-panel p-5" onClick={(event) => event.stopPropagation()} role="dialog">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-xl font-semibold text-matrix-fg">Produtos da conta Bling</h3>
+                <p className="mt-1 text-sm text-matrix-muted">Revise a consulta antes de iniciar qualquer atualização local.</p>
+              </div>
+              <button aria-label="Fechar consulta Bling" className="grid h-9 w-9 place-items-center rounded-md border border-matrix-border text-matrix-muted" disabled={blingImportBusy} onClick={() => setBlingImportOpen(false)} type="button"><X className="h-4 w-4" /></button>
+            </div>
+
+            {blingImportBusy && !blingSyncJob ? <p className="mt-5 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm text-matrix-muted">Consultando todas as páginas com segurança...</p> : null}
+            {blingImportPreview ? (
+              <>
+                <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <KpiCard label="Encontrados" value={String(blingImportPreview.totalFound)} hint={`${blingImportPreview.pagesFound} paginas`} />
+                  <KpiCard label="Importáveis" value={String(blingImportPreview.importable)} hint="Por identidade externa" tone="success" />
+                  <KpiCard label="Já existentes" value={String(blingImportPreview.existing)} hint="Seriam atualizados" tone="purple" />
+                  <KpiCard label="Novos" value={String(blingImportPreview.new)} hint="Seriam criados" tone="info" />
+                  <KpiCard label="Ativos" value={String(blingImportPreview.active)} hint="Na conta consultada" />
+                  <KpiCard label="Inativos" value={String(blingImportPreview.inactive)} hint="Mantidos sem exclusão" tone="warning" />
+                  <KpiCard label="Sem SKU" value={String(blingImportPreview.withoutSku)} hint="Identificados pelo Bling" tone="warning" />
+                  <KpiCard label="Precisam de revisão" value={String(blingImportPreview.ignored)} hint="Conflitos ou dados inválidos" tone="danger" />
+                </div>
+                <dl className="mt-4 grid gap-x-6 gap-y-2 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm sm:grid-cols-2">
+                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Total informado pelo Bling</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.totalReportedByBling ?? "Não informado"}</dd></div>
+                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Produtos simples</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.simpleProducts}</dd></div>
+                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Variações</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.variations}</dd></div>
+                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Seriam atualizados</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.wouldUpdate}</dd></div>
+                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Dados inválidos</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.errors}</dd></div>
+                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">IDs repetidos</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.duplicateExternalIds}</dd></div>
+                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Conflitos de SKU</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.skuConflicts}</dd></div>
+                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Alterações realizadas</dt><dd className="font-semibold text-matrix-fg">Nenhuma</dd></div>
+                </dl>
+              </>
+            ) : null}
+
+            {blingSyncJob ? (
+              <section className="mt-5 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm text-matrix-muted">
+                <div className="flex items-center justify-between gap-3"><span>Próxima página</span><strong className="text-matrix-fg">{blingSyncJob.currentPage}</strong></div>
+                <div className="mt-2 flex items-center justify-between gap-3"><span>Registros processados</span><strong className="text-matrix-fg">{blingSyncJob.totalFetched}</strong></div>
+                <div className="mt-2 flex items-center justify-between gap-3"><span>Status</span><Badge tone={blingSyncJob.status === "COMPLETED" ? "success" : blingSyncJob.status === "FAILED" ? "danger" : "warning"}>{blingSyncJob.status === "COMPLETED" ? "Concluído" : blingSyncJob.status === "FAILED" ? "Interrompido" : "Em andamento"}</Badge></div>
+              </section>
+            ) : null}
+
+            {blingImportMessage ? <p className="mt-5 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm text-matrix-muted">{blingImportMessage}</p> : null}
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <Button disabled={blingImportBusy} onClick={() => setBlingImportOpen(false)} type="button" variant="secondary">Fechar</Button>
+              {blingImportPreview ? <Button disabled={blingImportBusy || !blingImportPreview.completed} onClick={() => void startBlingSync()} type="button">{blingImportBusy ? "Sincronizando..." : "Confirmar sincronização"}</Button> : null}
+            </div>
+          </section>
+        </div>
       ) : null}
       {open ? (
         <div className="fixed inset-0 z-50 bg-black/50">

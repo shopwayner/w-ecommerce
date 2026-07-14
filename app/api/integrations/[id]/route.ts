@@ -3,13 +3,15 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
-import { blingOAuthService } from "@/lib/services/bling-oauth-service";
+import { blingOAuthService, getBlingOAuthConfigurationStatus } from "@/lib/services/bling-oauth-service";
 import { sanitizeLogPayload } from "@/lib/utils";
 
 const updateConnectionSchema = z.object({
   name: z.string().trim().min(2).max(80),
   role: z.enum(["MATRIX", "BRANCH", "OTHER"])
 }).strict();
+
+const disconnectSchema = z.object({ confirmed: z.literal(true) }).strict();
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireApiAuth("integrations:write");
@@ -47,7 +49,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         tokens: {
           orderBy: { updatedAt: "desc" },
           take: 1,
-          select: { expiresAt: true }
+          select: { expiresAt: true, createdAt: true }
         }
       }
     });
@@ -75,19 +77,38 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       externalAccountEmail: updated.externalAccountEmail,
       lastSyncAt: updated.lastSyncAt,
       lastTestAt: updated.lastTestAt,
-      lastError: updated.lastError,
+      lastError: updated.lastError
+        ? updated.status === "EXPIRED"
+          ? "A autorizacao desta conta expirou. Reconecte a conta para continuar."
+          : "Nao foi possivel validar esta conta. Teste a conexao ou reconecte para continuar."
+        : null,
       createdAt: updated.createdAt,
       updatedAt: updated.updatedAt,
-      tokenExpiresAt: updated.tokens[0]?.expiresAt ?? null
+      connectedAt: updated.tokens[0]?.createdAt ?? null,
+      tokenExpiresAt: updated.tokens[0]?.expiresAt ?? null,
+      hasToken: updated.tokens.length > 0,
+      credentialsConfigured: getBlingOAuthConfigurationStatus().configured
     }
   });
 }
 
-export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
+  if (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN") {
+    return NextResponse.json({ error: "Somente administradores podem desconectar uma conta." }, { status: 403 });
+  }
+
+  const payload = await request.json().catch(() => null);
+  if (!disconnectSchema.safeParse(payload).success) {
+    return NextResponse.json({ error: "Confirme a desconexao antes de continuar." }, { status: 400 });
+  }
 
   const { id } = await params;
-  await blingOAuthService.revokeLocalConnection(id, auth.context.organizationId, auth.context.user.id);
-  return NextResponse.json({ id, status: "DISCONNECTED" });
+  try {
+    await blingOAuthService.revokeLocalConnection(id, auth.context.organizationId, auth.context.user.id);
+    return NextResponse.json({ status: "DISCONNECTED" });
+  } catch {
+    return NextResponse.json({ error: "Nao foi possivel desconectar esta conta." }, { status: 400 });
+  }
 }

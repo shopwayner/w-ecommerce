@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Image from "next/image";
-import { AlertTriangle, Braces, CalendarClock, CheckCircle2, Copy, Eye, EyeOff, Link2, MoreVertical, Plus, ReceiptText, Settings, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, Braces, CalendarClock, CheckCircle2, Copy, Eye, EyeOff, Link2, MoreVertical, Plus, Power, ReceiptText, RefreshCw, Settings, ShieldCheck, Unplug, X } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { Badge, Button, Card } from "@/components/ui";
 
@@ -58,7 +58,10 @@ type BlingIntegratedConnection = {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+  connectedAt: string | null;
   tokenExpiresAt: string | null;
+  hasToken: boolean;
+  credentialsConfigured: boolean;
 };
 
 type ERP = {
@@ -197,6 +200,7 @@ export function ERPsPage() {
   const [copyMessage, setCopyMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [blingAction, setBlingAction] = useState<"test" | "reconnect" | "disconnect" | null>(null);
 
   const selectedConnection = useMemo(() => connections.find((connection) => connection.slug === selected?.key) ?? null, [connections, selected]);
   const blingErp = useMemo(() => erps.find((erp) => erp.key === "bling") ?? null, []);
@@ -211,9 +215,12 @@ export function ERPsPage() {
 
   async function loadBlingAccounts() {
     const response = await fetch("/api/integrations");
-    if (!response.ok) return;
+    if (!response.ok) return [];
     const payload = (await response.json()) as { data?: BlingIntegratedConnection[] };
-    setBlingAccounts(payload.data ?? []);
+    const accounts = payload.data ?? [];
+    setBlingAccounts(accounts);
+    setSelectedBlingAccount((current) => current ? accounts.find((account) => account.id === current.id) ?? current : current);
+    return accounts;
   }
 
   useEffect(() => {
@@ -235,7 +242,9 @@ export function ERPsPage() {
     if (!blingResult) return;
 
     if (blingResult === "connected") setMessage("Conta Bling conectada com sucesso.");
+    else if (blingResult === "reconnected") setMessage("Conta Bling reconectada com sucesso.");
     else if (blingResult === "already-connected") setMessage("Esta conta Bling já está conectada.");
+    else if (blingResult === "wrong-account") setMessage("Autorize a mesma conta Bling que esta sendo reconectada.");
     else if (blingResult === "error") setMessage("Não foi possível concluir a conexão Bling.");
     else return;
 
@@ -255,6 +264,7 @@ export function ERPsPage() {
     setCopyMessage("");
     setSaving(false);
     setTesting(false);
+    setBlingAction(null);
   }
 
   function openCreateIntegration(erp: ERP) {
@@ -334,6 +344,55 @@ export function ERPsPage() {
     setMessage("Conta Bling atualizada com segurança.");
   }
 
+  async function testSelectedBlingConnection() {
+    if (!selectedConnectionId || blingAction) return;
+    setBlingAction("test");
+    setMessage("");
+    try {
+      const response = await fetch(`/api/integrations/${selectedConnectionId}/test`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      await loadBlingAccounts();
+      setMessage(response.ok ? payload.message ?? "Conexao com o Bling funcionando corretamente." : payload.error ?? "Nao foi possivel testar a conexao agora.");
+    } finally {
+      setBlingAction(null);
+    }
+  }
+
+  async function reconnectSelectedBlingConnection() {
+    if (!selectedConnectionId || blingAction) return;
+    setBlingAction("reconnect");
+    setMessage("");
+    const response = await fetch(`/api/integrations/${selectedConnectionId}/reconnect`, { method: "POST" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.authorizationUrl) {
+      setMessage(payload.error ?? "Nao foi possivel iniciar a reconexao agora.");
+      setBlingAction(null);
+      return;
+    }
+    window.location.assign(payload.authorizationUrl);
+  }
+
+  async function disconnectSelectedBlingConnection() {
+    if (!selectedConnectionId || blingAction) return;
+    const confirmed = window.confirm("Desconectar esta conta impedira novas sincronizacoes. Os produtos ja importados permanecerao no sistema.");
+    if (!confirmed) return;
+
+    setBlingAction("disconnect");
+    setMessage("");
+    try {
+      const response = await fetch(`/api/integrations/${selectedConnectionId}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmed: true })
+      });
+      const payload = await response.json().catch(() => ({}));
+      await loadBlingAccounts();
+      setMessage(response.ok ? "Conta desconectada. Os produtos importados foram preservados." : payload.error ?? "Nao foi possivel desconectar esta conta.");
+    } finally {
+      setBlingAction(null);
+    }
+  }
+
   async function saveConfig(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selected || selected.key === "bling") return;
@@ -404,6 +463,9 @@ export function ERPsPage() {
   const canTest = Boolean(selectedConnection?.hasCredentials);
   const canConnect = Boolean(selectedConnection?.supportsOAuth && selectedConnection.authUrlImplemented && selectedConnection.hasCredentials);
   const canSubmitBling = Boolean(blingForm.accountAlias.trim().length >= 2 && (modalMode === "create" || selectedConnectionId));
+  const selectedBlingStatus = selectedBlingAccount?.status ?? "PENDING";
+  const canTestSelectedBling = Boolean(selectedBlingAccount?.hasToken && selectedBlingStatus !== "DISCONNECTED" && !blingAction);
+  const canReconnectSelectedBling = Boolean(selectedConnectionId && !blingAction);
 
   return (
     <AppShell>
@@ -545,7 +607,7 @@ export function ERPsPage() {
                   <div className="mt-3 grid gap-2 text-sm text-matrix-muted sm:grid-cols-2 lg:grid-cols-4">
                     <span>Última atualização: {formatDate(selectedBlingAccount.updatedAt)}</span>
                     <span>Último teste: {formatDate(selectedBlingAccount.lastTestAt)}</span>
-                    <span>Conectado em: {formatDate(selectedBlingAccount.createdAt)}</span>
+                    <span>Autorização atual: {formatDate(selectedBlingAccount.connectedAt)}</span>
                     <span>Ambiente: {selectedBlingAccount.environment === "PRODUCTION" ? "Produção" : "Sandbox"}</span>
                   </div>
                 ) : null}
@@ -562,15 +624,42 @@ export function ERPsPage() {
               </section>
 
               <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
-                <h4 className="font-semibold text-matrix-fg">Credenciais protegidas</h4>
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                  <label className="grid gap-2 text-sm text-matrix-muted">Client ID<input autoComplete="off" className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-muted outline-none" disabled value="" /></label>
-                  <label className="grid gap-2 text-sm text-matrix-muted">Client Secret<input autoComplete="new-password" className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-muted outline-none" disabled placeholder={modalMode === "manage" ? "••••••••••••" : ""} type="password" value="" /></label>
-                  <label className="grid gap-2 text-sm text-matrix-muted">Token Expiration<input className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-muted outline-none" disabled value={modalMode === "manage" && selectedBlingAccount?.tokenExpiresAt ? formatDate(selectedBlingAccount.tokenExpiresAt) : ""} /></label>
-                  <label className="grid gap-2 text-sm text-matrix-muted">Observações<textarea className="min-h-20 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-muted outline-none" disabled value="" /></label>
+                <div className="flex items-start gap-3">
+                  <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-matrix-goldDark" />
+                  <div>
+                    <h4 className="font-semibold text-matrix-fg">Credenciais protegidas</h4>
+                    <p className="mt-1 text-sm text-matrix-muted">
+                      {modalMode === "create" || selectedBlingAccount?.credentialsConfigured
+                        ? "Credenciais configuradas e protegidas no servidor."
+                        : "A conexão ainda não pode ser renovada. A configuração do Bling precisa ser concluída pelo administrador."}
+                    </p>
+                    {modalMode === "manage" ? <p className="mt-2 text-sm text-matrix-muted">Validade da autorização: {formatDate(selectedBlingAccount?.tokenExpiresAt)}</p> : null}
+                  </div>
                 </div>
-                <p className="mt-3 text-sm text-matrix-muted">As credenciais OAuth permanecem protegidas no servidor e nunca são copiadas de outra conta para este formulário.</p>
               </section>
+
+              {modalMode === "manage" ? (
+                <section className="rounded-lg border border-matrix-gold/30 bg-matrix-panel2/58 p-4">
+                  <h4 className="font-semibold text-matrix-fg">Ações da conexão</h4>
+                  <p className="mt-1 text-sm text-matrix-muted">Consulte o estado da conta ou refaça a autorização sem iniciar sincronizações.</p>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Button disabled={!canTestSelectedBling} onClick={testSelectedBlingConnection} type="button" variant="secondary">
+                      <RefreshCw className={`h-4 w-4 ${blingAction === "test" ? "animate-spin" : ""}`} />
+                      {blingAction === "test" ? "Testando..." : "Testar conexão"}
+                    </Button>
+                    <Button disabled={!canReconnectSelectedBling} onClick={reconnectSelectedBlingConnection} type="button" variant="secondary">
+                      <Power className="h-4 w-4" />
+                      {blingAction === "reconnect" ? "Abrindo autorização..." : selectedBlingStatus === "DISCONNECTED" ? "Conectar conta" : "Reconectar conta"}
+                    </Button>
+                    {selectedBlingStatus !== "DISCONNECTED" ? (
+                      <Button disabled={Boolean(blingAction)} onClick={disconnectSelectedBlingConnection} type="button" variant="danger">
+                        <Unplug className="h-4 w-4" />
+                        {blingAction === "disconnect" ? "Desconectando..." : "Desconectar"}
+                      </Button>
+                    ) : null}
+                  </div>
+                </section>
+              ) : null}
 
               {message ? <p className="rounded-lg border border-matrix-border bg-matrix-panel2/60 px-3 py-2 text-sm text-matrix-muted">{message}</p> : null}
 

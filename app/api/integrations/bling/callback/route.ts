@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { BlingAccountAlreadyConnectedError, blingOAuthService } from "@/lib/services/bling-oauth-service";
+import {
+  BlingAccountAlreadyConnectedError,
+  BlingReconnectAccountMismatchError,
+  blingOAuthService
+} from "@/lib/services/bling-oauth-service";
 import { sanitizeLogPayload } from "@/lib/utils";
 
 export async function GET(request: NextRequest) {
@@ -16,11 +20,14 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    await blingOAuthService.completeCallback(code, state);
-    return NextResponse.redirect(new URL("/erps?bling=connected", request.url));
+    const result = await blingOAuthService.completeCallback(code, state);
+    return NextResponse.redirect(new URL(result.mode === "reconnect" ? "/erps?bling=reconnected" : "/erps?bling=connected", request.url));
   } catch (callbackError) {
     if (callbackError instanceof BlingAccountAlreadyConnectedError) {
       return NextResponse.redirect(new URL("/erps?bling=already-connected", request.url));
+    }
+    if (callbackError instanceof BlingReconnectAccountMismatchError) {
+      return NextResponse.redirect(new URL("/erps?bling=wrong-account", request.url));
     }
     await safeCallbackAudit(state, "BLING_OAUTH_CALLBACK_ERROR", {
       reason: "callback_error"
