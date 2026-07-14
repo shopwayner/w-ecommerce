@@ -122,6 +122,68 @@ type BlingSyncJob = {
   errorMessage: string | null;
 };
 
+type BlingProductUpdateField =
+  | "name"
+  | "sku"
+  | "gtin"
+  | "unit"
+  | "category"
+  | "weight"
+  | "dimensions"
+  | "description";
+
+const blingProductUpdateFields: BlingProductUpdateField[] = [
+  "name",
+  "sku",
+  "gtin",
+  "unit",
+  "category",
+  "weight",
+  "dimensions",
+  "description"
+];
+
+type BlingProductDifference = {
+  key: BlingProductUpdateField;
+  label: string;
+  matrixValue: string;
+  blingValue: string;
+};
+
+type BlingProductUpdatePreviewItem = {
+  productId: string;
+  name: string;
+  sku: string | null;
+  gtin: string | null;
+  imageUrl: string | null;
+  externalProductIdMasked: string | null;
+  connectionName: string;
+  status: "READY" | "UNCHANGED" | "NOT_LINKED" | "UNSUPPORTED" | "ERROR";
+  message: string;
+  differences: BlingProductDifference[];
+};
+
+type BlingProductUpdatePreview = {
+  connectionName: string;
+  items: BlingProductUpdatePreviewItem[];
+  summary: {
+    selected: number;
+    ready: number;
+    unchanged: number;
+    notLinked: number;
+    unavailable: number;
+  };
+};
+
+type BlingProductUpdateResult = {
+  productId: string;
+  externalProductIdMasked: string | null;
+  status: "UPDATED" | "UNCHANGED" | "FAILED";
+  message: string;
+  fields: BlingProductUpdateField[];
+  replayed?: boolean;
+};
+
 type ProductEnrichmentDraft = {
   id: string;
   productId: string;
@@ -453,6 +515,13 @@ export function ProductsPage() {
   const [blingImportMessage, setBlingImportMessage] = useState("");
   const [blingImportPreview, setBlingImportPreview] = useState<BlingImportPreview | null>(null);
   const [blingSyncJob, setBlingSyncJob] = useState<BlingSyncJob | null>(null);
+  const [blingUpdateOpen, setBlingUpdateOpen] = useState(false);
+  const [blingUpdateBusy, setBlingUpdateBusy] = useState(false);
+  const [blingUpdateMessage, setBlingUpdateMessage] = useState("");
+  const [blingUpdatePreview, setBlingUpdatePreview] = useState<BlingProductUpdatePreview | null>(null);
+  const [blingUpdateResults, setBlingUpdateResults] = useState<BlingProductUpdateResult[]>([]);
+  const [blingUpdateProgress, setBlingUpdateProgress] = useState({ current: 0, total: 0 });
+  const blingUpdateIdempotencyKeys = useRef<Map<string, string>>(new Map());
   const [searchQuery, setSearchQuery] = useState("");
   const [imageFilter, setImageFilter] = useState<ImageFilter>("all");
   const [stockFilter, setStockFilter] = useState<StockFilter>("all");
@@ -575,6 +644,22 @@ export function ProductsPage() {
 
   const visibleProductIds = useMemo(() => paginatedProducts.map((product) => product.id), [paginatedProducts]);
   const selectedProducts = useMemo(() => products.filter((product) => selectedProductIds.has(product.id)), [products, selectedProductIds]);
+  const selectedBlingConnectionId =
+    accountContext?.mode === "ERP_ACCOUNT" && accountContext.provider === "BLING"
+      ? accountContext.connectionId
+      : null;
+  const selectedLinkedBlingProducts = useMemo(
+    () =>
+      selectedProducts.filter(
+        (product) =>
+          selectedBlingConnectionId &&
+          product.blingAccount?.blingAccountId === selectedBlingConnectionId &&
+          Boolean(product.blingAccount.externalProductId?.trim())
+      ),
+    [selectedBlingConnectionId, selectedProducts]
+  );
+  const selectedUnlinkedBlingCount = selectedProducts.length - selectedLinkedBlingProducts.length;
+  const blingUpdateSelectionTooLarge = selectedProducts.length > 50;
   const selectedVisibleCount = visibleProductIds.filter((id) => selectedProductIds.has(id)).length;
   const allVisibleSelected = visibleProductIds.length > 0 && selectedVisibleCount === visibleProductIds.length;
   const someVisibleSelected = selectedVisibleCount > 0 && selectedVisibleCount < visibleProductIds.length;
@@ -582,6 +667,19 @@ export function ProductsPage() {
     filteredProducts.length === 1 ? "1 produto visivel" : `${filteredProducts.length} produtos visiveis`;
   const pageStart = filteredProducts.length ? (currentPage - 1) * pageSize + 1 : 0;
   const pageEnd = Math.min(currentPage * pageSize, filteredProducts.length);
+  const blingUpdateSelectionMessage = !selectedBlingConnectionId
+    ? "Selecione uma conta Bling no topo para atualizar produtos vinculados."
+    : blingUpdateSelectionTooLarge
+      ? "Selecione no maximo 50 produtos por atualizacao."
+      : selectedLinkedBlingProducts.length === 0
+        ? selectedProducts.length === 1
+          ? "Este produto ainda nao esta vinculado ao Bling. Cadastre-o primeiro."
+          : "Nenhum dos produtos selecionados esta vinculado a esta conta Bling."
+        : selectedUnlinkedBlingCount > 0
+          ? `${selectedProducts.length} produtos selecionados: ${selectedLinkedBlingProducts.length} podem ser atualizados e ${selectedUnlinkedBlingCount} ainda nao estao vinculados a esta conta Bling.`
+          : selectedLinkedBlingProducts.length === 1
+            ? "1 produto selecionado pode ser atualizado no Bling."
+            : `${selectedLinkedBlingProducts.length} produtos selecionados podem ser atualizados no Bling.`;
 
   function toggleProductSelection(productId: string, checked: boolean) {
     setSelectedProductIds((current) => {
@@ -612,6 +710,150 @@ export function ProductsPage() {
   function openEnrichment(productsToRegister: ProductListItem[]) {
     setEnrichmentProducts(productsToRegister);
     setActiveEnrichmentProductId(productsToRegister[0]?.id ?? null);
+  }
+
+  function closeBlingUpdateModal() {
+    if (blingUpdateBusy) return;
+    setBlingUpdateOpen(false);
+    setBlingUpdateMessage("");
+    setBlingUpdatePreview(null);
+    setBlingUpdateResults([]);
+    setBlingUpdateProgress({ current: 0, total: 0 });
+    blingUpdateIdempotencyKeys.current.clear();
+  }
+
+  async function openBlingUpdatePreview() {
+    setBlingUpdateOpen(true);
+    setBlingUpdatePreview(null);
+    setBlingUpdateResults([]);
+    setBlingUpdateProgress({ current: 0, total: 0 });
+    setBlingUpdateMessage("");
+    blingUpdateIdempotencyKeys.current.clear();
+
+    if (!selectedBlingConnectionId) {
+      setBlingUpdateMessage("Selecione uma conta Bling no topo antes de atualizar produtos.");
+      return;
+    }
+    if (accountContext?.selectedOption?.status !== "ACTIVE") {
+      setBlingUpdateMessage("Reconecte a conta Bling antes de continuar.");
+      return;
+    }
+    if (!selectedProducts.length || !selectedLinkedBlingProducts.length) {
+      setBlingUpdateMessage("Nenhum dos produtos selecionados esta vinculado a esta conta Bling.");
+      return;
+    }
+    if (blingUpdateSelectionTooLarge) {
+      setBlingUpdateMessage("Selecione no maximo 50 produtos por atualizacao.");
+      return;
+    }
+
+    setBlingUpdateBusy(true);
+    setBlingUpdateMessage("Consultando os dados atuais no Bling...");
+    try {
+      const response = await fetch("/api/products/bling/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          connectionId: selectedBlingConnectionId,
+          productIds: selectedProducts.map((product) => product.id),
+          fields: blingProductUpdateFields,
+          confirmed: false
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.data) {
+        setBlingUpdateMessage(payload.error ?? "Nao foi possivel revisar os produtos no Bling agora.");
+        return;
+      }
+
+      const preview = payload.data as BlingProductUpdatePreview;
+      setBlingUpdatePreview(preview);
+      for (const item of preview.items) {
+        if (item.status === "READY") {
+          blingUpdateIdempotencyKeys.current.set(item.productId, crypto.randomUUID());
+        }
+      }
+      setBlingUpdateMessage(
+        preview.summary.ready
+          ? "Revise as diferencas antes de confirmar."
+          : "Nenhum produto selecionado precisa de atualizacao."
+      );
+    } catch {
+      setBlingUpdateMessage("Nao foi possivel revisar os produtos no Bling agora.");
+    } finally {
+      setBlingUpdateBusy(false);
+    }
+  }
+
+  async function confirmBlingProductUpdates() {
+    if (!selectedBlingConnectionId || !blingUpdatePreview || blingUpdateBusy) return;
+    const readyItems = blingUpdatePreview.items.filter((item) => item.status === "READY");
+    if (!readyItems.length) return;
+
+    setBlingUpdateBusy(true);
+    setBlingUpdateResults([]);
+    setBlingUpdateProgress({ current: 0, total: readyItems.length });
+    setBlingUpdateMessage(`Atualizando 0 de ${readyItems.length} produtos...`);
+    const results: BlingProductUpdateResult[] = [];
+
+    for (const [index, item] of readyItems.entries()) {
+      setBlingUpdateProgress({ current: index + 1, total: readyItems.length });
+      setBlingUpdateMessage(`Atualizando ${index + 1} de ${readyItems.length} produtos...`);
+      try {
+        const response = await fetch("/api/products/bling/update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            connectionId: selectedBlingConnectionId,
+            productIds: [item.productId],
+            fields: item.differences.map((difference) => difference.key),
+            confirmed: true,
+            idempotencyKey:
+              blingUpdateIdempotencyKeys.current.get(item.productId) ?? crypto.randomUUID()
+          })
+        });
+        const payload = await response.json().catch(() => ({}));
+        const result = payload.data?.items?.[0] as BlingProductUpdateResult | undefined;
+        if (!response.ok || !result) {
+          results.push({
+            productId: item.productId,
+            externalProductIdMasked: item.externalProductIdMasked,
+            status: "FAILED",
+            message: payload.error ?? "Nao foi possivel atualizar este produto no Bling agora.",
+            fields: []
+          });
+        } else {
+          results.push(result);
+        }
+      } catch {
+        results.push({
+          productId: item.productId,
+          externalProductIdMasked: item.externalProductIdMasked,
+          status: "FAILED",
+          message: "Nao foi possivel atualizar este produto no Bling agora.",
+          fields: []
+        });
+      }
+      setBlingUpdateResults([...results]);
+    }
+
+    const completedIds = new Set(
+      results.filter((result) => result.status !== "FAILED").map((result) => result.productId)
+    );
+    for (const item of blingUpdatePreview.items) {
+      if (item.status === "UNCHANGED") completedIds.add(item.productId);
+    }
+    setSelectedProductIds((current) => new Set([...current].filter((id) => !completedIds.has(id))));
+    const updated = results.filter((result) => result.status === "UPDATED").length;
+    const unchanged = results.filter((result) => result.status === "UNCHANGED").length;
+    const failed = results.filter((result) => result.status === "FAILED").length;
+    setBlingUpdateMessage(
+      failed
+        ? `${updated + unchanged} produtos concluidos e ${failed} precisam de nova tentativa.`
+        : `${updated + unchanged} produtos concluidos com sucesso.`
+    );
+    if (updated) await loadProducts();
+    setBlingUpdateBusy(false);
   }
 
   function handleProductUpdated(updatedProduct: ProductListItem) {
@@ -894,13 +1136,40 @@ export function ProductsPage() {
           </div>
         ) : null}
         {selectedProducts.length ? (
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-matrix-gold/25 bg-matrix-goldSoft/28 px-3 py-2">
-            <p className="text-sm font-semibold text-matrix-goldDark">
-              {selectedProducts.length === 1
-                ? "1 produto selecionado para cadastro"
-                : `${selectedProducts.length} produtos selecionados para cadastro`}
-            </p>
-            <Button onClick={() => openEnrichment(selectedProducts)}>Cadastrar selecionados</Button>
+          <div className="mb-3 flex flex-col gap-3 rounded-lg border border-matrix-gold/25 bg-matrix-goldSoft/28 px-3 py-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-matrix-goldDark">
+                {selectedProducts.length === 1
+                  ? "1 produto selecionado para cadastro"
+                  : `${selectedProducts.length} produtos selecionados para cadastro`}
+              </p>
+              <p className="mt-1 text-xs text-matrix-muted">{blingUpdateSelectionMessage}</p>
+            </div>
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+              <Button className="w-full sm:w-auto" onClick={() => openEnrichment(selectedProducts)}>
+                Cadastrar selecionados
+              </Button>
+              <Button
+                className="w-full sm:w-auto"
+                disabled={
+                  !selectedBlingConnectionId ||
+                  accountContext?.selectedOption?.status !== "ACTIVE" ||
+                  !selectedLinkedBlingProducts.length ||
+                  blingUpdateSelectionTooLarge ||
+                  blingUpdateBusy
+                }
+                onClick={() => void openBlingUpdatePreview()}
+                type="button"
+                variant="secondary"
+              >
+                <RefreshCw className="h-4 w-4" />
+                {selectedLinkedBlingProducts.length === 1
+                  ? "Atualizar 1 produto no Bling"
+                  : selectedLinkedBlingProducts.length > 1
+                    ? `Atualizar ${selectedLinkedBlingProducts.length} produtos no Bling`
+                    : "Atualizar no Bling"}
+              </Button>
+            </div>
           </div>
         ) : null}
         <DataTable
@@ -1008,6 +1277,17 @@ export function ProductsPage() {
           products={enrichmentProducts}
         />
       ) : null}
+      {blingUpdateOpen ? (
+        <BlingProductUpdateModal
+          busy={blingUpdateBusy}
+          message={blingUpdateMessage}
+          onClose={closeBlingUpdateModal}
+          onConfirm={() => void confirmBlingProductUpdates()}
+          preview={blingUpdatePreview}
+          progress={blingUpdateProgress}
+          results={blingUpdateResults}
+        />
+      ) : null}
       {blingImportOpen ? (
         <div className="fixed inset-0 z-[70] grid place-items-center bg-black/70 px-4 py-6 backdrop-blur-sm" onClick={() => !blingImportBusy && setBlingImportOpen(false)}>
           <section aria-modal="true" className="matrix-scroll max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-matrix-gold/35 bg-matrix-panel p-5" onClick={(event) => event.stopPropagation()} role="dialog">
@@ -1085,6 +1365,218 @@ export function ProductsPage() {
         </div>
       ) : null}
     </AppShell>
+  );
+}
+
+function blingUpdateStatusPresentation(
+  item: BlingProductUpdatePreviewItem,
+  result?: BlingProductUpdateResult
+): { label: string; tone: "success" | "warning" | "danger" | "muted" } {
+  if (result?.status === "UPDATED") return { label: "Atualizado", tone: "success" };
+  if (result?.status === "UNCHANGED") return { label: "Ja atualizado", tone: "success" };
+  if (result?.status === "FAILED") return { label: "Precisa de nova tentativa", tone: "danger" };
+  if (item.status === "READY") return { label: "Pronto para atualizar", tone: "warning" };
+  if (item.status === "UNCHANGED") return { label: "Ja atualizado", tone: "success" };
+  if (item.status === "NOT_LINKED") return { label: "Sem vinculo", tone: "muted" };
+  if (item.status === "UNSUPPORTED") return { label: "Revisao necessaria", tone: "warning" };
+  return { label: "Indisponivel", tone: "danger" };
+}
+
+function BlingProductUpdateModal({
+  busy,
+  message,
+  onClose,
+  onConfirm,
+  preview,
+  progress,
+  results
+}: {
+  busy: boolean;
+  message: string;
+  onClose: () => void;
+  onConfirm: () => void;
+  preview: BlingProductUpdatePreview | null;
+  progress: { current: number; total: number };
+  results: BlingProductUpdateResult[];
+}) {
+  const resultByProductId = new Map(results.map((result) => [result.productId, result]));
+  const readyCount = preview?.summary.ready ?? 0;
+  const progressPercent = progress.total ? Math.round((progress.current / progress.total) * 100) : 0;
+  const updateSummary = preview
+    ? {
+        updated: results.filter((result) => result.status === "UPDATED").length,
+        unchanged:
+          preview.summary.unchanged + results.filter((result) => result.status === "UNCHANGED").length,
+        notLinked: preview.summary.notLinked,
+        failed: results.filter((result) => result.status === "FAILED").length,
+        review: preview.summary.unavailable
+      }
+    : null;
+
+  useEffect(() => {
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape" && !busy) onClose();
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [busy, onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[80] grid place-items-center bg-black/75 px-3 py-4 backdrop-blur-sm sm:px-5"
+      onClick={() => !busy && onClose()}
+    >
+      <section
+        aria-labelledby="bling-product-update-title"
+        aria-modal="true"
+        className="matrix-scroll flex max-h-[94vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-matrix-gold/35 bg-matrix-panel shadow-[0_24px_90px_rgb(0_0_0/0.45)]"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+      >
+        <header className="flex items-start justify-between gap-4 border-b border-matrix-border px-4 py-4 sm:px-5">
+          <div className="min-w-0">
+            <h3 id="bling-product-update-title" className="text-xl font-semibold text-matrix-fg">
+              Atualizar produto no Bling
+            </h3>
+            <p className="mt-1 text-sm text-matrix-muted">
+              Revise os dados antes de enviar. Essa acao atualizara o produto ja existente no Bling.
+            </p>
+          </div>
+          <button
+            aria-label="Fechar atualizacao de produtos"
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-matrix-border text-matrix-muted transition hover:border-matrix-gold/45 hover:text-matrix-goldDark disabled:opacity-50"
+            disabled={busy}
+            onClick={onClose}
+            type="button"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+
+        <div className="matrix-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-5">
+          <div className="rounded-md border border-matrix-gold/25 bg-matrix-goldSoft/20 px-3 py-2 text-sm text-matrix-muted">
+            Nome, SKU, GTIN, unidade, categoria vinculada, peso, dimensoes e descricao podem ser comparados.
+            Preco, custo, estoque, imagens, variacoes e dados fiscais nao fazem parte desta atualizacao.
+          </div>
+
+          {busy && progress.total > 0 ? (
+            <div className="mt-4 rounded-md border border-matrix-border bg-matrix-panel2 p-3">
+              <div className="flex items-center justify-between gap-3 text-sm">
+                <span className="text-matrix-muted">Atualizando {progress.current} de {progress.total} produtos...</span>
+                <span className="font-semibold text-matrix-fg">{progressPercent}%</span>
+              </div>
+              <div className="mt-2 h-2 overflow-hidden rounded bg-black/30">
+                <div className="h-full bg-matrix-gold transition-[width]" style={{ width: `${progressPercent}%` }} />
+              </div>
+            </div>
+          ) : null}
+
+          {message ? (
+            <p className="mt-4 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm text-matrix-muted">
+              {message}
+            </p>
+          ) : null}
+
+          {!preview && busy ? (
+            <div className="mt-4 flex items-center gap-3 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm text-matrix-muted">
+              <RefreshCw className="h-4 w-4 animate-spin text-matrix-goldDark" />
+              Consultando os dados atuais no Bling...
+            </div>
+          ) : null}
+
+          {preview ? (
+            <div className="mt-4 space-y-3">
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+                {[
+                  [results.length ? "Atualizados" : "Para atualizar", results.length ? updateSummary?.updated ?? 0 : preview.summary.ready],
+                  ["Ja estavam iguais", updateSummary?.unchanged ?? 0],
+                  ["Sem vinculo", updateSummary?.notLinked ?? 0],
+                  ["Falhas", updateSummary?.failed ?? 0],
+                  ["Precisam de revisao", updateSummary?.review ?? 0]
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-md border border-matrix-border bg-matrix-panel2 p-3">
+                    <p className="text-xs text-matrix-muted">{label}</p>
+                    <p className="mt-1 text-lg font-semibold text-matrix-fg">{value}</p>
+                  </div>
+                ))}
+              </div>
+              {preview.items.map((item) => {
+                const result = resultByProductId.get(item.productId);
+                const presentation = blingUpdateStatusPresentation(item, result);
+                return (
+                  <article key={item.productId} className="overflow-hidden rounded-md border border-matrix-border bg-matrix-panel2/65">
+                    <div className="flex flex-col gap-3 border-b border-matrix-border p-3 sm:flex-row sm:items-start">
+                      <div className="grid h-14 w-14 shrink-0 place-items-center overflow-hidden rounded-md border border-matrix-border bg-matrix-panel">
+                        {item.imageUrl ? (
+                          <Image
+                            alt={item.name}
+                            className="h-full w-full object-cover"
+                            height={56}
+                            src={item.imageUrl}
+                            unoptimized
+                            width={56}
+                          />
+                        ) : (
+                          <Package className="h-5 w-5 text-matrix-muted" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0">
+                            <h4 className="break-words text-sm font-semibold text-matrix-fg">{item.name}</h4>
+                            <p className="mt-1 text-xs text-matrix-muted">
+                              SKU {item.sku || "nao informado"} | GTIN {item.gtin || "nao informado"}
+                            </p>
+                            <p className="mt-1 text-xs text-matrix-muted">
+                              {item.connectionName} | Cadastro {item.externalProductIdMasked || "nao vinculado"}
+                            </p>
+                          </div>
+                          <Badge tone={presentation.tone}>{presentation.label}</Badge>
+                        </div>
+                        <p className={`mt-2 text-xs ${result?.status === "FAILED" ? "text-red-300" : "text-matrix-muted"}`}>
+                          {result?.message ?? item.message}
+                        </p>
+                      </div>
+                    </div>
+
+                    {item.differences.length ? (
+                      <div className="grid gap-2 p-3 md:grid-cols-2">
+                        {item.differences.map((difference) => (
+                          <div key={difference.key} className="rounded-md border border-matrix-border bg-matrix-panel p-3 text-sm">
+                            <p className="font-semibold text-matrix-goldDark">{difference.label}</p>
+                            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                              <div className="min-w-0">
+                                <p className="text-xs text-matrix-muted">Matrix</p>
+                                <p className="mt-1 break-words text-matrix-fg">{difference.matrixValue}</p>
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-xs text-matrix-muted">Bling atual</p>
+                                <p className="mt-1 break-words text-matrix-fg">{difference.blingValue}</p>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </article>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+
+        <footer className="flex flex-col-reverse gap-2 border-t border-matrix-border px-4 py-4 sm:flex-row sm:items-center sm:justify-end sm:px-5">
+          <Button className="w-full sm:w-auto" disabled={busy} onClick={onClose} type="button" variant="secondary">
+            {results.length ? "Fechar" : "Cancelar"}
+          </Button>
+          {!results.length && preview ? (
+            <Button className="w-full sm:w-auto" disabled={busy || readyCount === 0} onClick={onConfirm} type="button">
+              {busy ? "Atualizando..." : `Confirmar atualizacao${readyCount > 1 ? ` de ${readyCount} produtos` : ""}`}
+            </Button>
+          ) : null}
+        </footer>
+      </section>
+    </div>
   );
 }
 
