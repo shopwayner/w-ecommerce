@@ -66,6 +66,20 @@ export type BlingProductStatusBackfillReport = {
   errors: number;
   completed: boolean;
   writesPerformed: number;
+  concurrentUpdates: number;
+  identityMismatches: number;
+};
+
+export type BlingProductStatusConditionalUpdateInput = {
+  productId: string;
+  organizationId: string;
+  connectionId: string;
+  externalProductId: string;
+  attributes: Prisma.JsonValue | null;
+  updatedAt: Date;
+  status: CanonicalBlingProductStatus;
+  externalStatus: "A" | "I" | "E" | null;
+  statusCheckedAt: string;
 };
 
 export type BlingProductDryRun = {
@@ -390,6 +404,51 @@ export function mergeBlingProductStatusAttributes(
   } as Prisma.InputJsonValue;
 }
 
+export function buildBlingProductStatusConditionalUpdate(
+  input: BlingProductStatusConditionalUpdateInput
+) {
+  return {
+    where: {
+      id: input.productId,
+      organizationId: input.organizationId,
+      updatedAt: input.updatedAt,
+      mappings: {
+        some: {
+          organizationId: input.organizationId,
+          connectionId: input.connectionId,
+          externalProductId: input.externalProductId
+        }
+      }
+    },
+    data: {
+      attributes: mergeBlingProductStatusAttributes(
+        input.attributes,
+        input.status,
+        input.externalStatus,
+        input.statusCheckedAt
+      ),
+      updatedAt: input.updatedAt
+    }
+  } satisfies Prisma.ProductUpdateManyArgs;
+}
+
+export function classifyBlingProductStatusConditionalUpdate(input: {
+  count: number;
+  originalUpdatedAt: Date;
+  currentUpdatedAt: Date | null;
+  identityMatches: boolean;
+}) {
+  if (input.count === 1) return "UPDATED" as const;
+  if (input.count === 0) {
+    if (!input.identityMatches || !input.currentUpdatedAt) return "IDENTITY_MISMATCH" as const;
+    if (input.currentUpdatedAt.getTime() !== input.originalUpdatedAt.getTime()) {
+      return "CONCURRENT_UPDATE" as const;
+    }
+    return "IDENTITY_MISMATCH" as const;
+  }
+  throw new Error("A atualizacao condicional de status afetou mais de um produto.");
+}
+
 function productStatusMetadataMatches(
   attributes: Prisma.JsonValue | null,
   expected: NormalizedBlingProductStatus
@@ -427,7 +486,7 @@ async function reconcileLinkedStatusSnapshot(input: {
     where: { organizationId: input.organizationId, connectionId: input.connectionId },
     select: {
       externalProductId: true,
-      product: { select: { id: true, attributes: true } }
+      product: { select: { id: true, attributes: true, updatedAt: true } }
     }
   });
   const mappedExternalIds = new Set(mappings.map((mapping) => mapping.externalProductId));
@@ -435,7 +494,7 @@ async function reconcileLinkedStatusSnapshot(input: {
     const status = statusByExternalId.get(mapping.externalProductId);
     if (!status || conflictingExternalIds.has(mapping.externalProductId)) return [];
     if (productStatusMetadataMatches(mapping.product.attributes, status)) return [];
-    return [{ product: mapping.product, status }];
+    return [{ externalProductId: mapping.externalProductId, product: mapping.product, status }];
   });
   const linkedStatuses = mappings.map((mapping) => statusByExternalId.get(mapping.externalProductId));
   const linkedRecordsWithoutCatalogStatus = linkedStatuses.filter((status) => !status).length;
@@ -443,6 +502,8 @@ async function reconcileLinkedStatusSnapshot(input: {
   const linkedUnknownStatuses = linkedStatuses.filter((status) => status?.status === "UNKNOWN").length;
 
   let writesPerformed = 0;
+  let concurrentUpdates = 0;
+  let identityMismatches = 0;
   if (input.confirm) {
     if (!input.fetched.completed || input.fetched.errors || linkedConflicts || linkedUnknownStatuses) {
       throw new Error("O catalogo Bling apresentou divergencias; nenhuma atualizacao de status foi executada.");
@@ -454,22 +515,52 @@ async function reconcileLinkedStatusSnapshot(input: {
     const statusCheckedAt = new Date().toISOString();
     for (let start = 0; start < changes.length; start += 100) {
       const batch = changes.slice(start, start + 100);
-      await prisma.$transaction(
+      const results = await prisma.$transaction(
         batch.map((change) =>
-          prisma.product.update({
-            where: { id: change.product.id },
-            data: {
-              attributes: mergeBlingProductStatusAttributes(
-                change.product.attributes,
-                change.status.status,
-                change.status.externalStatus,
-                statusCheckedAt
-              )
-            }
-          })
+          prisma.product.updateMany(
+            buildBlingProductStatusConditionalUpdate({
+              productId: change.product.id,
+              organizationId: input.organizationId,
+              connectionId: input.connectionId,
+              externalProductId: change.externalProductId,
+              attributes: change.product.attributes,
+              updatedAt: change.product.updatedAt,
+              status: change.status.status,
+              externalStatus: change.status.externalStatus,
+              statusCheckedAt
+            })
+          )
         )
       );
-      writesPerformed += batch.length;
+      for (const [index, result] of results.entries()) {
+        const change = batch[index];
+        let currentIdentity: { updatedAt: Date } | null = null;
+        if (result.count === 0) {
+          currentIdentity = await prisma.product.findFirst({
+            where: {
+              id: change.product.id,
+              organizationId: input.organizationId,
+              mappings: {
+                some: {
+                  organizationId: input.organizationId,
+                  connectionId: input.connectionId,
+                  externalProductId: change.externalProductId
+                }
+              }
+            },
+            select: { updatedAt: true }
+          });
+        }
+        const outcome = classifyBlingProductStatusConditionalUpdate({
+          count: result.count,
+          originalUpdatedAt: change.product.updatedAt,
+          currentUpdatedAt: currentIdentity?.updatedAt ?? null,
+          identityMatches: Boolean(currentIdentity)
+        });
+        if (outcome === "UPDATED") writesPerformed += 1;
+        else if (outcome === "CONCURRENT_UPDATE") concurrentUpdates += 1;
+        else identityMismatches += 1;
+      }
     }
   }
 
@@ -494,7 +585,9 @@ async function reconcileLinkedStatusSnapshot(input: {
     conflictingExternalIds: conflictingExternalIds.size,
     errors: input.fetched.errors,
     completed: input.fetched.completed,
-    writesPerformed
+    writesPerformed,
+    concurrentUpdates,
+    identityMismatches
   } satisfies BlingProductStatusBackfillReport;
 }
 
