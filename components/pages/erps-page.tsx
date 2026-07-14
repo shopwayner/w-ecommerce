@@ -62,6 +62,8 @@ type BlingIntegratedConnection = {
   tokenExpiresAt: string | null;
   hasToken: boolean;
   credentialsConfigured: boolean;
+  clientIdMasked: string | null;
+  internalNotes: string;
 };
 
 type ERP = {
@@ -86,6 +88,9 @@ type FormState = {
 type BlingFormState = {
   accountAlias: string;
   role: BlingConnectionRole;
+  clientId: string;
+  clientSecret: string;
+  internalNotes: string;
 };
 
 const erps: ERP[] = [
@@ -97,7 +102,7 @@ const erps: ERP[] = [
 ];
 
 const emptyForm: FormState = { accountAlias: "", credentials: {}, taxRate: "", orderImportStartDate: "", internalNotes: "", productSyncEnabled: false, orderSyncEnabled: false, stockSyncEnabled: false, invoiceSyncEnabled: false };
-const emptyBlingForm: BlingFormState = { accountAlias: "", role: "OTHER" };
+const emptyBlingForm: BlingFormState = { accountAlias: "", role: "OTHER", clientId: "", clientSecret: "", internalNotes: "" };
 const blingRoleOptions: Array<{ label: string; value: BlingConnectionRole }> = [
   { label: "Matriz", value: "MATRIX" },
   { label: "Filial", value: "BRANCH" },
@@ -284,7 +289,13 @@ export function ERPsPage() {
     setModalMode("manage");
     setSelectedConnectionId(account.id);
     setSelectedBlingAccount(account);
-    setBlingForm({ accountAlias: account.name, role: account.role });
+    setBlingForm({
+      accountAlias: account.name,
+      role: account.role,
+      clientId: "",
+      clientSecret: "",
+      internalNotes: account.internalNotes
+    });
     setForm(emptyForm);
     setMessage("");
     setCopyMessage("");
@@ -307,7 +318,13 @@ export function ERPsPage() {
       const response = await fetch("/api/integrations/bling/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: blingForm.accountAlias.trim(), role: blingForm.role })
+        body: JSON.stringify({
+          name: blingForm.accountAlias.trim(),
+          role: blingForm.role,
+          clientId: blingForm.clientId.trim(),
+          clientSecret: blingForm.clientSecret,
+          internalNotes: blingForm.internalNotes.trim()
+        })
       });
       const payload = await response.json().catch(() => ({}));
       setSaving(false);
@@ -328,7 +345,13 @@ export function ERPsPage() {
     const response = await fetch(`/api/integrations/${selectedConnectionId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: blingForm.accountAlias.trim(), role: blingForm.role })
+      body: JSON.stringify({
+        name: blingForm.accountAlias.trim(),
+        role: blingForm.role,
+        clientId: blingForm.clientId.trim(),
+        clientSecret: blingForm.clientSecret,
+        internalNotes: blingForm.internalNotes.trim()
+      })
     });
     const payload = await response.json().catch(() => ({}));
     setSaving(false);
@@ -337,10 +360,18 @@ export function ERPsPage() {
       return;
     }
 
-    const updated = payload.connection as BlingIntegratedConnection;
-    setBlingAccounts((current) => current.map((account) => (account.id === updated.id ? updated : account)));
-    setSelectedBlingAccount(updated);
-    setBlingForm({ accountAlias: updated.name, role: updated.role });
+    const accounts = await loadBlingAccounts();
+    const updated = accounts.find((account) => account.id === selectedConnectionId);
+    if (updated) {
+      setSelectedBlingAccount(updated);
+      setBlingForm({
+        accountAlias: updated.name,
+        role: updated.role,
+        clientId: "",
+        clientSecret: "",
+        internalNotes: updated.internalNotes
+      });
+    }
     setMessage("Conta Bling atualizada com segurança.");
   }
 
@@ -462,7 +493,10 @@ export function ERPsPage() {
   const canSave = Boolean(selectedConnection && form.accountAlias.trim());
   const canTest = Boolean(selectedConnection?.hasCredentials);
   const canConnect = Boolean(selectedConnection?.supportsOAuth && selectedConnection.authUrlImplemented && selectedConnection.hasCredentials);
-  const canSubmitBling = Boolean(blingForm.accountAlias.trim().length >= 2 && (modalMode === "create" || selectedConnectionId));
+  const canSubmitBling = Boolean(
+    blingForm.accountAlias.trim().length >= 2
+    && (modalMode === "manage" ? selectedConnectionId : blingForm.clientId.trim() && blingForm.clientSecret)
+  );
   const selectedBlingStatus = selectedBlingAccount?.status ?? "PENDING";
   const canTestSelectedBling = Boolean(selectedBlingAccount?.hasToken && selectedBlingStatus !== "DISCONNECTED" && !blingAction);
   const canReconnectSelectedBling = Boolean(selectedConnectionId && !blingAction);
@@ -620,20 +654,49 @@ export function ERPsPage() {
                 <div className="grid gap-3 sm:grid-cols-2">
                   <label className="grid gap-2 text-sm text-matrix-muted">Apelido da conta<input autoComplete="off" className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" value={blingForm.accountAlias} onChange={(event) => setBlingForm((current) => ({ ...current, accountAlias: event.target.value }))} /></label>
                   <label className="grid gap-2 text-sm text-matrix-muted">Tipo<select className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" value={blingForm.role} onChange={(event) => setBlingForm((current) => ({ ...current, role: event.target.value as BlingConnectionRole }))}>{blingRoleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+                  <label className="grid gap-2 text-sm text-matrix-muted sm:col-span-2">Observações<textarea className="min-h-20 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" maxLength={2000} value={blingForm.internalNotes} onChange={(event) => setBlingForm((current) => ({ ...current, internalNotes: event.target.value }))} /></label>
                 </div>
               </section>
 
               <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
                 <div className="flex items-start gap-3">
                   <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-matrix-goldDark" />
-                  <div>
+                  <div className="min-w-0 flex-1">
                     <h4 className="font-semibold text-matrix-fg">Credenciais protegidas</h4>
                     <p className="mt-1 text-sm text-matrix-muted">
-                      {modalMode === "create" || selectedBlingAccount?.credentialsConfigured
-                        ? "Credenciais configuradas e protegidas no servidor."
-                        : "A conexão ainda não pode ser renovada. A configuração do Bling precisa ser concluída pelo administrador."}
+                      {selectedBlingAccount?.credentialsConfigured
+                        ? "Credenciais configuradas e protegidas."
+                        : "Cadastre as credenciais desta conta para conectar ao Bling."}
                     </p>
-                    {modalMode === "manage" ? <p className="mt-2 text-sm text-matrix-muted">Validade da autorização: {formatDate(selectedBlingAccount?.tokenExpiresAt)}</p> : null}
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      <label className="grid gap-2 text-sm text-matrix-muted">
+                        Client ID
+                        <input
+                          autoComplete="off"
+                          className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60"
+                          maxLength={512}
+                          placeholder={selectedBlingAccount?.clientIdMasked ? `Salvo como ${selectedBlingAccount.clientIdMasked}. Digite para substituir.` : "Informe o Client ID"}
+                          value={blingForm.clientId}
+                          onChange={(event) => setBlingForm((current) => ({ ...current, clientId: event.target.value }))}
+                        />
+                      </label>
+                      <label className="grid gap-2 text-sm text-matrix-muted">
+                        Client Secret
+                        <input
+                          autoComplete="new-password"
+                          className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60"
+                          maxLength={2048}
+                          placeholder="Digite somente para cadastrar ou substituir"
+                          type="password"
+                          value={blingForm.clientSecret}
+                          onChange={(event) => setBlingForm((current) => ({ ...current, clientSecret: event.target.value }))}
+                        />
+                      </label>
+                      <label className="grid gap-2 text-sm text-matrix-muted sm:col-span-2">
+                        Expiração da autorização
+                        <input className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-muted outline-none" disabled value={formatDate(selectedBlingAccount?.tokenExpiresAt)} />
+                      </label>
+                    </div>
                   </div>
                 </div>
               </section>

@@ -73,9 +73,12 @@ export const loginSchema = z.object({
 });
 
 export const blingStartSchema = z.object({
-  name: z.string().min(2).max(80),
-  role: z.enum(["MATRIX", "BRANCH", "OTHER"])
-});
+  name: z.string().trim().min(2).max(80),
+  role: z.enum(["MATRIX", "BRANCH", "OTHER"]),
+  clientId: z.string().trim().min(1).max(512),
+  clientSecret: z.string().trim().min(1).max(2048),
+  internalNotes: z.string().trim().max(2000).optional().default("")
+}).strict();
 
 export const internalGtinCatalogSchema = z.object({
   gtin: z.string().min(8).max(32),

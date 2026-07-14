@@ -21,7 +21,7 @@ export async function GET(_request: NextRequest, { params }: Params) {
         connectionName: "Bling",
         connectionRole: "OTHER"
       });
-      return NextResponse.json({ authorizationUrl: blingOAuthService.buildAuthorizationUrl(state) });
+      return NextResponse.json({ authorizationUrl: await blingOAuthService.buildAuthorizationUrl(state) });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Falha ao iniciar OAuth Bling.";
       return NextResponse.json({ error: message }, { status: 400 });

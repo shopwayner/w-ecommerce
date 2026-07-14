@@ -1,7 +1,7 @@
 import type { ConnectionStatus, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { decryptSecret } from "@/lib/security/encryption";
-import { blingOAuthService } from "@/lib/services/bling-oauth-service";
+import { blingOAuthService, BlingCredentialsMissingError } from "@/lib/services/bling-oauth-service";
 import { scheduleBlingRequest } from "@/lib/services/bling-rate-limit";
 import { sanitizeLogPayload } from "@/lib/utils";
 
@@ -48,10 +48,6 @@ export function getBlingApiErrorMessage(code: BlingApiErrorCode) {
   return "Nao foi possivel testar a conexao agora.";
 }
 
-function hasOAuthConfiguration() {
-  return Boolean(process.env.BLING_CLIENT_ID && process.env.BLING_CLIENT_SECRET && process.env.BLING_REDIRECT_URI);
-}
-
 function statusForTestFailure(current: ConnectionStatus, code: BlingApiErrorCode): ConnectionStatus {
   if (code === "CONNECTION_DISCONNECTED") return "DISCONNECTED";
   if (["TOKEN_MISSING", "TOKEN_EXPIRED", "TOKEN_INVALID"].includes(code)) return "EXPIRED";
@@ -83,13 +79,9 @@ export class BlingApiClient {
 
     const testedAt = new Date();
     try {
-      if (!hasOAuthConfiguration()) {
-        throw new BlingApiError("Configuracao Bling ausente.", 409, "CONFIGURATION_MISSING");
-      }
-
       const testPath = process.env.BLING_TEST_PATH ?? "/contatos?limite=1";
       await scheduleBlingRequest(connectionId, async () =>
-        this.performRequest<unknown>({ organizationId, connectionId, method: "GET", path: testPath }, false, false)
+        this.performRequest<unknown>({ organizationId, connectionId, method: "GET", path: testPath }, false, true)
       );
 
       await prisma.blingConnection.updateMany({
@@ -186,7 +178,10 @@ export class BlingApiClient {
       if (!allowRefresh) throw new BlingApiError("Autorizacao Bling expirada.", 401, "TOKEN_EXPIRED");
       try {
         return await blingOAuthService.refreshAccessToken(connectionId, organizationId);
-      } catch {
+      } catch (error) {
+        if (error instanceof BlingCredentialsMissingError) {
+          throw new BlingApiError("Configuracao Bling ausente.", 409, "CONFIGURATION_MISSING");
+        }
         throw new BlingApiError("Autorizacao Bling expirada.", 401, "TOKEN_EXPIRED");
       }
     }

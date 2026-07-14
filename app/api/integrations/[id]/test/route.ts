@@ -3,8 +3,11 @@ import { requireApiAuth } from "@/lib/auth/api";
 import { blingApiClient, BlingApiError, getBlingApiErrorMessage } from "@/lib/services/bling-api-client";
 
 export async function POST(_request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const auth = await requireApiAuth("integrations:read");
+  const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
+  if (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN") {
+    return NextResponse.json({ error: "Somente administradores podem testar uma conta." }, { status: 403 });
+  }
 
   const { id } = await params;
   try {

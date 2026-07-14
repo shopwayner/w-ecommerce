@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
-import { blingOAuthService, getBlingOAuthConfigurationStatus } from "@/lib/services/bling-oauth-service";
+import { blingOAuthService } from "@/lib/services/bling-oauth-service";
 
 export async function POST(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireApiAuth("integrations:write");
@@ -10,19 +10,18 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
     return NextResponse.json({ error: "Somente administradores podem reconectar uma conta." }, { status: 403 });
   }
 
-  if (!getBlingOAuthConfigurationStatus().configured) {
-    return NextResponse.json(
-      { error: "A conexão ainda não pode ser renovada. A configuração do Bling precisa ser concluída pelo administrador." },
-      { status: 409 }
-    );
-  }
-
   const { id } = await params;
   const connection = await prisma.blingConnection.findFirst({
     where: { id, organizationId: auth.context.organizationId },
     select: { id: true }
   });
   if (!connection) return NextResponse.json({ error: "Conta Bling nao encontrada." }, { status: 404 });
+  if (!(await blingOAuthService.hasUsableCredentials(connection.id, auth.context.organizationId))) {
+    return NextResponse.json(
+      { error: "Cadastre o Client ID e o Client Secret desta conta antes de conectar." },
+      { status: 409 }
+    );
+  }
 
   try {
     const state = await blingOAuthService.createOAuthState({
@@ -30,7 +29,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
       userId: auth.context.user.id,
       reconnectConnectionId: connection.id
     });
-    return NextResponse.json({ authorizationUrl: blingOAuthService.buildAuthorizationUrl(state) });
+    return NextResponse.json({ authorizationUrl: await blingOAuthService.buildAuthorizationUrl(state) });
   } catch {
     return NextResponse.json({ error: "Nao foi possivel iniciar a reconexao agora." }, { status: 400 });
   }

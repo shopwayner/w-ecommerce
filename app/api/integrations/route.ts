@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
 import { planLimitService } from "@/lib/services/plan-limit-service";
-import { getBlingOAuthConfigurationStatus } from "@/lib/services/bling-oauth-service";
+import { getBlingConnectionCredentialSummary } from "@/lib/services/bling-oauth-service";
 
 function safeLastError(status: string, value: string | null) {
   if (!value) return null;
@@ -15,7 +15,6 @@ export async function GET() {
   const auth = await requireApiAuth("integrations:read");
   if (!auth.ok) return auth.response;
 
-  const oauthConfiguration = getBlingOAuthConfigurationStatus();
   const [blingConnections, limit] = await Promise.all([
     prisma.blingConnection.findMany({
       where: { organizationId: auth.context.organizationId },
@@ -27,6 +26,9 @@ export async function GET() {
         status: true,
         environment: true,
         externalAccountEmail: true,
+        clientIdEncrypted: true,
+        clientSecretEncrypted: true,
+        internalNotes: true,
         lastSyncAt: true,
         lastTestAt: true,
         lastError: true,
@@ -44,13 +46,17 @@ export async function GET() {
 
   return NextResponse.json({
     limit,
-    data: blingConnections.map((connection) => ({
+    data: blingConnections.map((connection) => {
+      const credentialSummary = getBlingConnectionCredentialSummary(connection);
+      return {
         id: connection.id,
         name: connection.name,
         role: connection.role,
         status: connection.status,
         environment: connection.environment,
         externalAccountEmail: connection.externalAccountEmail,
+        clientIdMasked: credentialSummary.clientIdMasked,
+        internalNotes: connection.internalNotes ?? "",
         lastSyncAt: connection.lastSyncAt,
         lastTestAt: connection.lastTestAt,
         lastError: safeLastError(connection.status, connection.lastError),
@@ -59,7 +65,8 @@ export async function GET() {
         connectedAt: connection.tokens[0]?.createdAt ?? null,
         tokenExpiresAt: connection.tokens[0]?.expiresAt ?? null,
         hasToken: connection.tokens.length > 0,
-        credentialsConfigured: oauthConfiguration.configured
-      }))
+        credentialsConfigured: credentialSummary.credentialsConfigured
+      };
+    })
   });
 }

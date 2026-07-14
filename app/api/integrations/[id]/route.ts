@@ -3,12 +3,15 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
-import { blingOAuthService, getBlingOAuthConfigurationStatus } from "@/lib/services/bling-oauth-service";
+import { blingOAuthService, getBlingConnectionCredentialSummary, getEncryptedBlingCredentialUpdates } from "@/lib/services/bling-oauth-service";
 import { sanitizeLogPayload } from "@/lib/utils";
 
 const updateConnectionSchema = z.object({
   name: z.string().trim().min(2).max(80),
-  role: z.enum(["MATRIX", "BRANCH", "OTHER"])
+  role: z.enum(["MATRIX", "BRANCH", "OTHER"]),
+  clientId: z.string().trim().max(512).optional(),
+  clientSecret: z.string().trim().max(2048).optional(),
+  internalNotes: z.string().trim().max(2000).optional()
 }).strict();
 
 const disconnectSchema = z.object({ confirmed: z.literal(true) }).strict();
@@ -16,6 +19,9 @@ const disconnectSchema = z.object({ confirmed: z.literal(true) }).strict();
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
+  if (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN") {
+    return NextResponse.json({ error: "Somente administradores podem alterar uma conta Bling." }, { status: 403 });
+  }
 
   const payload = await request.json().catch(() => null);
   const parsed = updateConnectionSchema.safeParse(payload);
@@ -26,31 +32,25 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const { id } = await params;
   const current = await prisma.blingConnection.findFirst({
     where: { id, organizationId: auth.context.organizationId },
-    select: { id: true }
+    select: { id: true, clientIdEncrypted: true, clientSecretEncrypted: true }
   });
   if (!current) return NextResponse.json({ error: "Conta Bling não encontrada." }, { status: 404 });
+
+  const updateData: Prisma.BlingConnectionUpdateInput = {
+    name: parsed.data.name,
+    role: parsed.data.role,
+    ...getEncryptedBlingCredentialUpdates(parsed.data)
+  };
+  if (parsed.data.internalNotes !== undefined) updateData.internalNotes = parsed.data.internalNotes || null;
 
   const updated = await prisma.$transaction(async (transaction) => {
     const connection = await transaction.blingConnection.update({
       where: { id: current.id },
-      data: parsed.data,
+      data: updateData,
       select: {
         id: true,
-        name: true,
-        role: true,
-        status: true,
-        environment: true,
-        externalAccountEmail: true,
-        lastSyncAt: true,
-        lastTestAt: true,
-        lastError: true,
-        createdAt: true,
-        updatedAt: true,
-        tokens: {
-          orderBy: { updatedAt: "desc" },
-          take: 1,
-          select: { expiresAt: true, createdAt: true }
-        }
+        clientIdEncrypted: true,
+        clientSecretEncrypted: true
       }
     });
 
@@ -61,35 +61,22 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         action: "BLING_CONNECTION_UPDATE",
         entity: "BlingConnection",
         entityId: connection.id,
-        metadata: sanitizeLogPayload({ fields: ["name", "role"] }) as Prisma.InputJsonObject
+        metadata: sanitizeLogPayload({
+          fields: [
+            "name",
+            "role",
+            "internalNotes",
+            ...(parsed.data.clientId ? ["clientId"] : []),
+            ...(parsed.data.clientSecret ? ["clientSecret"] : [])
+          ]
+        }) as Prisma.InputJsonObject
       }
     });
     return connection;
   });
 
-  return NextResponse.json({
-    connection: {
-      id: updated.id,
-      name: updated.name,
-      role: updated.role,
-      status: updated.status,
-      environment: updated.environment,
-      externalAccountEmail: updated.externalAccountEmail,
-      lastSyncAt: updated.lastSyncAt,
-      lastTestAt: updated.lastTestAt,
-      lastError: updated.lastError
-        ? updated.status === "EXPIRED"
-          ? "A autorizacao desta conta expirou. Reconecte a conta para continuar."
-          : "Nao foi possivel validar esta conta. Teste a conexao ou reconecte para continuar."
-        : null,
-      createdAt: updated.createdAt,
-      updatedAt: updated.updatedAt,
-      connectedAt: updated.tokens[0]?.createdAt ?? null,
-      tokenExpiresAt: updated.tokens[0]?.expiresAt ?? null,
-      hasToken: updated.tokens.length > 0,
-      credentialsConfigured: getBlingOAuthConfigurationStatus().configured
-    }
-  });
+  const credentialSummary = getBlingConnectionCredentialSummary(updated);
+  return NextResponse.json({ success: true, credentialsConfigured: credentialSummary.credentialsConfigured });
 }
 
 export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) {

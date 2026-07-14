@@ -7,6 +7,9 @@ import { blingStartSchema } from "@/lib/validation";
 export async function POST(request: Request) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
+  if (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN") {
+    return NextResponse.json({ error: "Somente administradores podem criar uma integração Bling." }, { status: 403 });
+  }
 
   const body = await request.json();
   const parsed = blingStartSchema.safeParse(body);
@@ -20,16 +23,18 @@ export async function POST(request: Request) {
   }
 
   try {
-    const state = await blingOAuthService.createOAuthState({
+    const state = await blingOAuthService.createConnectionOAuthState({
       organizationId: auth.context.organizationId,
       userId: auth.context.user.id,
       connectionName: parsed.data.name,
-      connectionRole: parsed.data.role
+      connectionRole: parsed.data.role,
+      clientId: parsed.data.clientId,
+      clientSecret: parsed.data.clientSecret,
+      internalNotes: parsed.data.internalNotes
     });
-    const authorizationUrl = blingOAuthService.buildAuthorizationUrl(state);
+    const authorizationUrl = await blingOAuthService.buildAuthorizationUrl(state);
     return NextResponse.json({ authorizationUrl });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Falha ao iniciar OAuth Bling.";
-    return NextResponse.json({ error: message }, { status: 400 });
+  } catch {
+    return NextResponse.json({ error: "Não foi possível iniciar a autorização desta conta Bling." }, { status: 400 });
   }
 }

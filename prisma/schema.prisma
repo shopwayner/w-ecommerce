@@ -271,6 +271,9 @@ model BlingConnection {
   externalCompanyDocument String?
   externalCompanyId       String?
   externalAccountEmail    String?
+  clientIdEncrypted       String?
+  clientSecretEncrypted   String?
+  internalNotes           String?
   scopes                  String?
   externalAccountId       String?
   isDefault               Boolean                  @default(false)
