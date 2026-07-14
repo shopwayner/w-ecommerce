@@ -973,7 +973,13 @@ export function ProductsPage() {
             product.stock,
             <Button key={`${product.id}-actions`} variant="ghost" onClick={() => setViewingProduct(product)}>Ver</Button>
           ])}
-          emptyMessage={loadingProducts ? "Carregando produtos..." : "Nenhum produto cadastrado ainda."}
+          emptyMessage={
+            loadingProducts
+              ? "Carregando produtos..."
+              : products.length
+                ? "Nenhum produto corresponde aos filtros atuais."
+                : "Nenhum produto cadastrado ainda."
+          }
           footer={
             <div className="flex flex-col gap-1 border-t border-matrix-border px-3 py-2 text-xs text-matrix-muted sm:flex-row sm:items-center sm:justify-between">
               <span>
