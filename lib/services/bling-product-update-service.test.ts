@@ -10,6 +10,8 @@ import {
   getBlingProductUpdateErrorMessage,
   isSupportedBlingProductStructure,
   maskBlingProductId,
+  recordConfirmedBlingMappingSync,
+  type BlingProductMappingSnapshot,
   type BlingLocalProductValues
 } from "./bling-product-update-service";
 import { BlingApiError } from "./bling-api-client";
@@ -48,6 +50,16 @@ const remoteProduct = {
     tributacao: { ncm: "00000000" },
     variacoes: [{ id: 1 }]
   }
+};
+
+const mappingSnapshot: BlingProductMappingSnapshot = {
+  id: "mapping-1",
+  organizationId: "organization-1",
+  productId: "product-1",
+  connectionId: "connection-1",
+  externalProductId: "123456789",
+  lastExternalSyncAt: new Date("2026-07-10T12:00:00.000Z"),
+  updatedAt: new Date("2026-07-11T13:14:15.123Z")
 };
 
 test("builds only the documented safe product fields", () => {
@@ -220,6 +232,85 @@ test("returns friendly messages for expired tokens and rate limits", () => {
   );
 });
 
+test("records confirmed sync while preserving mapping updatedAt and every identity field", async () => {
+  const confirmedAt = new Date("2026-07-14T15:30:00.000Z");
+  const mutations: Prisma.ProductExternalMappingUpdateManyArgs[] = [];
+  const result = await recordConfirmedBlingMappingSync(mappingSnapshot, confirmedAt, {
+    updateMany: async (args) => {
+      mutations.push(args);
+      return { count: 1 };
+    }
+  });
+
+  assert.deepEqual(result, { status: "RECORDED", updatedCount: 1 });
+  assert.equal(mutations.length, 1);
+  const mutation = mutations[0];
+  assert.ok(mutation);
+  assert.deepEqual(mutation, {
+    where: {
+      id: mappingSnapshot.id,
+      organizationId: mappingSnapshot.organizationId,
+      productId: mappingSnapshot.productId,
+      connectionId: mappingSnapshot.connectionId,
+      externalProductId: mappingSnapshot.externalProductId,
+      updatedAt: mappingSnapshot.updatedAt
+    },
+    data: {
+      lastExternalSyncAt: confirmedAt,
+      updatedAt: mappingSnapshot.updatedAt
+    }
+  });
+  assert.strictEqual(mutation.data?.updatedAt, mappingSnapshot.updatedAt);
+  assert.deepEqual(Object.keys(mutation.data ?? {}).sort(), ["lastExternalSyncAt", "updatedAt"]);
+});
+
+test("blocks organization, connection and external id divergence without overwriting the mapping", async () => {
+  for (const divergentField of ["organizationId", "connectionId", "externalProductId"] as const) {
+    let overwritten = false;
+    const current = { ...mappingSnapshot, [divergentField]: `other-${divergentField}` };
+    const result = await recordConfirmedBlingMappingSync(mappingSnapshot, new Date(), {
+      updateMany: async (args) => {
+        const where = args.where ?? {};
+        const matches = where.id === current.id &&
+          where.organizationId === current.organizationId &&
+          where.productId === current.productId &&
+          where.connectionId === current.connectionId &&
+          where.externalProductId === current.externalProductId &&
+          where.updatedAt === current.updatedAt;
+        overwritten = matches;
+        return { count: matches ? 1 : 0 };
+      }
+    });
+
+    assert.deepEqual(result, { status: "LOCAL_MAPPING_CONCURRENT_UPDATE", updatedCount: 0 });
+    assert.equal(overwritten, false);
+  }
+});
+
+test("detects optimistic updatedAt concurrency and does not overwrite concurrent data", async () => {
+  let overwritten = false;
+  const concurrentUpdatedAt = new Date(mappingSnapshot.updatedAt.getTime() + 1_000);
+  const result = await recordConfirmedBlingMappingSync(mappingSnapshot, new Date(), {
+    updateMany: async (args) => {
+      const matches = args.where?.updatedAt === concurrentUpdatedAt;
+      overwritten = matches;
+      return { count: matches ? 1 : 0 };
+    }
+  });
+
+  assert.deepEqual(result, { status: "LOCAL_MAPPING_CONCURRENT_UPDATE", updatedCount: 0 });
+  assert.equal(overwritten, false);
+});
+
+test("rejects an impossible multi-row mapping timestamp update", async () => {
+  await assert.rejects(
+    recordConfirmedBlingMappingSync(mappingSnapshot, new Date(), {
+      updateMany: async () => ({ count: 2 })
+    }),
+    /identidade do vinculo Bling nao pode ser confirmada/
+  );
+});
+
 test("keeps tenant identity, active connection and idempotency guards in the service", () => {
   const source = readFileSync(
     path.join(process.cwd(), "lib/services/bling-product-update-service.ts"),
@@ -270,6 +361,34 @@ test("does not write when the product has no differences", () => {
   assert.notEqual(unchangedBranch, -1);
   assert.notEqual(readyBranch, -1);
   assert.ok(putCall > readyBranch, "PUT must remain outside the unchanged branch.");
+  assert.ok(
+    source.indexOf("recordConfirmedBlingMappingSync", unchangedBranch) > putCall,
+    "Mapping timestamp must remain outside the unchanged branch."
+  );
+});
+
+test("records the mapping timestamp only after one PUT and a matching GET verification", () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-product-update-service.ts"),
+    "utf8"
+  );
+  const updateStart = source.indexOf("  async updateOne(input:");
+  const updateSource = source.slice(updateStart);
+  const putCall = updateSource.indexOf('method: "PUT"');
+  const verificationCall = updateSource.indexOf("verifyUpdatedBlingProduct");
+  const divergentBranch = updateSource.indexOf("if (!verified)");
+  const timestampCall = updateSource.indexOf("recordConfirmedBlingMappingSync");
+
+  assert.equal((updateSource.match(/method: "PUT"/g) ?? []).length, 1);
+  assert.ok(putCall >= 0 && verificationCall > putCall);
+  assert.ok(divergentBranch > verificationCall && timestampCall > divergentBranch);
+  assert.match(updateSource, /externalProductId: inspection\.externalProductId/);
+  assert.match(updateSource, /code: "LOCAL_MAPPING_CONCURRENT_UPDATE"/);
+  assert.doesNotMatch(updateSource.slice(0, putCall), /recordConfirmedBlingMappingSync/);
+  assert.doesNotMatch(
+    updateSource.slice(divergentBranch, timestampCall),
+    /lastExternalSyncAt/
+  );
 });
 
 test("requires both permissions, an administrator and explicit confirmation", () => {

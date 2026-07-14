@@ -69,7 +69,18 @@ export type BlingProductUpdateResult = {
   status: "UPDATED" | "UNCHANGED" | "FAILED";
   message: string;
   fields: BlingProductUpdateField[];
+  code?: "LOCAL_MAPPING_CONCURRENT_UPDATE";
   replayed?: boolean;
+};
+
+export type BlingProductMappingSnapshot = {
+  id: string;
+  organizationId: string;
+  productId: string;
+  connectionId: string;
+  externalProductId: string;
+  lastExternalSyncAt: Date | null;
+  updatedAt: Date;
 };
 
 type PreviewInspection = {
@@ -77,6 +88,11 @@ type PreviewInspection = {
   localValues: BlingLocalProductValues | null;
   remoteProduct: JsonRecord | null;
   externalProductId: string | null;
+  mappingSnapshot: BlingProductMappingSnapshot | null;
+};
+
+type ProductExternalMappingWriter = {
+  updateMany(args: Prisma.ProductExternalMappingUpdateManyArgs): Promise<{ count: number }>;
 };
 
 const updateJobType = "BLING_PRODUCT_UPDATE";
@@ -198,6 +214,34 @@ export function maskBlingProductId(value: string | null | undefined) {
   if (!normalized) return null;
   if (normalized.length <= 4) return `***${normalized}`;
   return `***${normalized.slice(-4)}`;
+}
+
+export async function recordConfirmedBlingMappingSync(
+  snapshot: BlingProductMappingSnapshot,
+  confirmedAt: Date,
+  writer: ProductExternalMappingWriter = prisma.productExternalMapping
+) {
+  const update = await writer.updateMany({
+    where: {
+      id: snapshot.id,
+      organizationId: snapshot.organizationId,
+      productId: snapshot.productId,
+      connectionId: snapshot.connectionId,
+      externalProductId: snapshot.externalProductId,
+      updatedAt: snapshot.updatedAt
+    },
+    data: {
+      lastExternalSyncAt: confirmedAt,
+      updatedAt: snapshot.updatedAt
+    }
+  });
+
+  if (update.count > 1) {
+    throw new Error("A identidade do vinculo Bling nao pode ser confirmada com seguranca.");
+  }
+  return update.count === 1
+    ? { status: "RECORDED" as const, updatedCount: 1 as const }
+    : { status: "LOCAL_MAPPING_CONCURRENT_UPDATE" as const, updatedCount: 0 as const };
 }
 
 function remoteDimensions(remote: JsonRecord) {
@@ -354,7 +398,15 @@ async function loadProduct(organizationId: string, connectionId: string, product
       mappings: {
         where: { organizationId, connectionId },
         take: 1,
-        select: { externalProductId: true }
+        select: {
+          id: true,
+          organizationId: true,
+          productId: true,
+          connectionId: true,
+          externalProductId: true,
+          lastExternalSyncAt: true,
+          updatedAt: true
+        }
       }
     }
   });
@@ -398,11 +450,13 @@ async function inspectProduct(input: {
       },
       localValues: null,
       remoteProduct: null,
-      externalProductId: null
+      externalProductId: null,
+      mappingSnapshot: null
     };
   }
 
-  const externalProductId = product.mappings[0]?.externalProductId ?? null;
+  const mappingSnapshot = product.mappings[0] ?? null;
+  const externalProductId = mappingSnapshot?.externalProductId ?? null;
   const identity = {
     productId: product.id,
     name: product.name,
@@ -422,7 +476,8 @@ async function inspectProduct(input: {
       },
       localValues: null,
       remoteProduct: null,
-      externalProductId: null
+      externalProductId: null,
+      mappingSnapshot: null
     };
   }
 
@@ -447,7 +502,8 @@ async function inspectProduct(input: {
         },
         localValues,
         remoteProduct,
-        externalProductId
+        externalProductId,
+        mappingSnapshot
       };
     }
 
@@ -463,7 +519,8 @@ async function inspectProduct(input: {
       },
       localValues,
       remoteProduct,
-      externalProductId
+      externalProductId,
+      mappingSnapshot
     };
   } catch (error) {
     return {
@@ -475,9 +532,26 @@ async function inspectProduct(input: {
       },
       localValues: null,
       remoteProduct: null,
-      externalProductId
+      externalProductId,
+      mappingSnapshot
     };
   }
+}
+
+async function verifyUpdatedBlingProduct(input: {
+  organizationId: string;
+  connectionId: string;
+  externalProductId: string;
+  localValues: BlingLocalProductValues;
+  fields: readonly BlingProductUpdateField[];
+}) {
+  const payload = await blingApiClient.request<unknown>({
+    organizationId: input.organizationId,
+    connectionId: input.connectionId,
+    method: "GET",
+    path: `/produtos/${input.externalProductId}`
+  });
+  return compareBlingProductValues(input.localValues, remoteData(payload), input.fields).length === 0;
 }
 
 function parseJobCursor(value: string | null) {
@@ -635,7 +709,8 @@ export class BlingProductUpdateService {
         item.status !== "READY" ||
         !inspection.localValues ||
         !inspection.remoteProduct ||
-        !inspection.externalProductId
+        !inspection.externalProductId ||
+        !inspection.mappingSnapshot
       ) {
         result = {
           productId: input.productId,
@@ -655,13 +730,14 @@ export class BlingProductUpdateService {
           body
         });
 
-        const verification = await inspectProduct({
-          ...input,
+        const verified = await verifyUpdatedBlingProduct({
+          organizationId: input.organizationId,
+          connectionId: input.connectionId,
+          externalProductId: inspection.externalProductId,
+          localValues: inspection.localValues,
           fields: changedFields,
-          connectionName: connection.displayName,
-          readOnly: false
         });
-        if (verification.publicItem.status !== "UNCHANGED") {
+        if (!verified) {
           result = {
             productId: input.productId,
             externalProductIdMasked: item.externalProductIdMasked,
@@ -670,22 +746,26 @@ export class BlingProductUpdateService {
             fields: changedFields
           };
         } else {
-          await prisma.productExternalMapping.updateMany({
-            where: {
-              organizationId: input.organizationId,
-              connectionId: input.connectionId,
-              productId: input.productId,
-              externalProductId: inspection.externalProductId
-            },
-            data: { lastExternalSyncAt: new Date() }
-          });
-          result = {
-            productId: input.productId,
-            externalProductIdMasked: item.externalProductIdMasked,
-            status: "UPDATED",
-            message: "Produto atualizado no Bling com sucesso.",
-            fields: changedFields
-          };
+          const mappingUpdate = await recordConfirmedBlingMappingSync(
+            inspection.mappingSnapshot,
+            new Date()
+          );
+          result = mappingUpdate.status === "RECORDED"
+            ? {
+                productId: input.productId,
+                externalProductIdMasked: item.externalProductIdMasked,
+                status: "UPDATED",
+                message: "Produto atualizado no Bling com sucesso.",
+                fields: changedFields
+              }
+            : {
+                productId: input.productId,
+                externalProductIdMasked: item.externalProductIdMasked,
+                status: "UPDATED",
+                code: "LOCAL_MAPPING_CONCURRENT_UPDATE",
+                message: "O produto foi atualizado no Bling, mas a data da sincronizacao nao pode ser registrada porque o vinculo foi alterado ao mesmo tempo.",
+                fields: changedFields
+              };
         }
       }
     } catch (error) {
