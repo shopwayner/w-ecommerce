@@ -213,6 +213,7 @@ export function ERPsPage() {
   const [blingForm, setBlingForm] = useState<BlingFormState>(emptyBlingForm);
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [message, setMessage] = useState("");
+  const [callbackNotice, setCallbackNotice] = useState<{ message: string; success: boolean } | null>(null);
   const [copyMessage, setCopyMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -257,8 +258,9 @@ export function ERPsPage() {
     const blingResult = parseBlingCallbackResult(url.searchParams.get("bling"));
     if (!blingResult) return;
 
-    setMessage(getBlingCallbackResultMessage(blingResult));
-    if (blingResult === "connected" || blingResult === "reconnected") {
+    const success = blingResult === "connected" || blingResult === "reconnected";
+    setCallbackNotice({ message: getBlingCallbackResultMessage(blingResult), success });
+    if (success) {
       void loadConnections();
       void loadBlingAccounts();
     }
@@ -548,6 +550,21 @@ export function ERPsPage() {
           </div>
         </div>
       </Card>
+
+      {callbackNotice ? (
+        <div
+          className={`mt-4 flex items-start justify-between gap-3 rounded-lg border px-4 py-3 text-sm ${callbackNotice.success ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-100" : "border-amber-500/35 bg-amber-500/10 text-amber-100"}`}
+          role="status"
+        >
+          <div className="flex items-start gap-2">
+            {callbackNotice.success ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> : <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />}
+            <span>{callbackNotice.message}</span>
+          </div>
+          <button aria-label="Fechar aviso" className="rounded p-1 hover:bg-white/10" onClick={() => setCallbackNotice(null)} type="button">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      ) : null}
 
       <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         {erps.map((erp) => {
