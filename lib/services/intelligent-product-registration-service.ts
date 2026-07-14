@@ -5,13 +5,11 @@ import { createAuditLog } from "@/lib/services/audit-log-service";
 import { getUserAccountContext } from "@/lib/services/account-context-service";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import {
-  calculateProductSuggestionCompatibility,
-  LOW_COMPATIBILITY_CONFIRMATION,
-  type ProductCompatibilitySuggestion,
-  type ProductSuggestionCompatibilityResult
-} from "@/lib/intelligent-product-compatibility";
-
-export const INTELLIGENT_PRODUCT_ENRICHMENT_CONFIRMATION = "APLICAR_SUGESTAO_MERCADO_LIVRE_LOCALMENTE";
+  mergeIntelligentProductPreviewImages,
+  normalizeIntelligentProductPreviewBrand,
+  normalizeIntelligentProductPreviewImages,
+  normalizeIntelligentProductPreviewTitle
+} from "@/lib/intelligent-product-preview";
 
 type AuthContext = Pick<TenantContext, "organizationId" | "role" | "user">;
 
@@ -85,154 +83,10 @@ const gtinSelect = {
 type GtinRecord = Prisma.InternalGtinCatalogGetPayload<{ select: typeof gtinSelect }>;
 
 export type IntelligentProductApplyFields = {
-  name?: string;
-  ean?: string;
-  brand?: string | null;
-  description?: string | null;
-  ncm?: string | null;
-  imageUrl?: string;
-  additionalImageUrls?: string[];
-  weight?: number;
-  height?: number;
-  width?: number;
-  depth?: number;
-  mercadoLivreCategory?: {
-    categoryId?: string | null;
-    categoryName?: string | null;
-    categoryPath?: string | null;
-    sourceItemId?: string | null;
-    source?: string | null;
-    priceReference?: number | null;
-  };
-  mercadoLivreAttributes?: Array<{
-    attributeId: string;
-    attributeName?: string | null;
-    value?: string | null;
-  }>;
-  referenceImportId?: string;
+  name: string;
+  brand?: string;
+  images?: string[];
 };
-
-type HistoryValues = Record<string, unknown>;
-
-function serializeCompatibilityForAudit(compatibility: ProductSuggestionCompatibilityResult | null) {
-  if (!compatibility) return null;
-  return {
-    level: compatibility.level,
-    label: compatibility.label,
-    score: compatibility.score,
-    matchedWords: compatibility.matchedWords,
-    missingWords: compatibility.missingWords,
-    suggestionOnlyWords: compatibility.suggestionOnlyWords,
-    gtinMatch: compatibility.gtin.match,
-    brandMatch: compatibility.brand.match,
-    categoryMatch: compatibility.category.match,
-    warnings: compatibility.warnings,
-    reasons: compatibility.reasons
-  };
-}
-
-function currentProductFieldValue(product: { [key: string]: unknown }, field: string) {
-  const value = product[field];
-  if (value instanceof Prisma.Decimal) return value.toString();
-  return value ?? null;
-}
-
-function buildHistoryValues({
-  product,
-  inputFields,
-  productData,
-  imageUrl,
-  additionalImageUrls,
-  mercadoLivreCategory,
-  mercadoLivreAttributes,
-  currentMercadoLivreMapping
-}: {
-  product: {
-    images: Array<{ url: string; position: number }>;
-    [key: string]: unknown;
-  };
-  inputFields: IntelligentProductApplyFields;
-  productData: Prisma.ProductUpdateInput;
-  imageUrl: string | null;
-  additionalImageUrls: string[];
-  mercadoLivreCategory: ReturnType<typeof normalizeMercadoLivreCategory>;
-  mercadoLivreAttributes: ReturnType<typeof normalizeMercadoLivreAttributes>;
-  currentMercadoLivreMapping:
-    | {
-        marketplaceCategoryId: string | null;
-        marketplaceCategoryName: string | null;
-        marketplaceCategoryPath: string | null;
-        productAttributeValues: Array<{ attributeId: string; attributeName: string; value: string | null; status: string }>;
-      }
-    | null
-    | undefined;
-}) {
-  const oldValues: HistoryValues = {};
-  const newValues: HistoryValues = {};
-  const directFieldMap: Record<string, string> = {
-    name: "name",
-    ean: "ean",
-    brand: "brand",
-    description: "description",
-    ncm: "ncm",
-    weight: "weight",
-    height: "height",
-    width: "width",
-    depth: "depth"
-  };
-
-  for (const [inputField, productField] of Object.entries(directFieldMap)) {
-    if (!(inputField in inputFields)) continue;
-    oldValues[inputField] = currentProductFieldValue(product, productField);
-    newValues[inputField] = productData[productField as keyof Prisma.ProductUpdateInput] ?? null;
-  }
-
-  if (imageUrl) {
-    oldValues.imageUrl = product.images[0]?.url ?? null;
-    newValues.imageUrl = imageUrl;
-  }
-
-  if (additionalImageUrls.length) {
-    oldValues.additionalImageUrls = product.images.slice(1).map((image) => image.url);
-    newValues.additionalImageUrls = additionalImageUrls;
-  }
-
-  if (mercadoLivreCategory) {
-    oldValues.mercadoLivreCategory = currentMercadoLivreMapping
-      ? {
-          categoryId: currentMercadoLivreMapping.marketplaceCategoryId,
-          categoryName: currentMercadoLivreMapping.marketplaceCategoryName,
-          categoryPath: currentMercadoLivreMapping.marketplaceCategoryPath
-        }
-      : null;
-    newValues.mercadoLivreCategory = {
-      categoryId: mercadoLivreCategory.categoryId,
-      categoryName: mercadoLivreCategory.categoryName,
-      categoryPath: mercadoLivreCategory.categoryPath,
-      sourceItemId: mercadoLivreCategory.sourceItemId,
-      source: mercadoLivreCategory.source,
-      priceReference: mercadoLivreCategory.priceReference
-    };
-  }
-
-  if (mercadoLivreAttributes.length) {
-    oldValues.mercadoLivreAttributes =
-      currentMercadoLivreMapping?.productAttributeValues.map((attribute) => ({
-        attributeId: attribute.attributeId,
-        attributeName: attribute.attributeName,
-        value: attribute.value,
-        status: attribute.status
-      })) ?? [];
-    newValues.mercadoLivreAttributes = mercadoLivreAttributes;
-  }
-
-  if (inputFields.referenceImportId) {
-    oldValues.mercadoLivreReferenceImportStatus = "DRAFT";
-    newValues.mercadoLivreReferenceImportStatus = "APPLIED";
-  }
-
-  return { oldValues, newValues };
-}
 
 function text(value: unknown) {
   if (value === null || value === undefined) return null;
@@ -240,46 +94,6 @@ function text(value: unknown) {
   return normalized ? normalized : null;
 }
 
-function uniqueTexts(values: unknown[] | undefined) {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const value of values ?? []) {
-    const normalized = text(value);
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    result.push(normalized);
-  }
-  return result;
-}
-
-function normalizeMercadoLivreCategory(value: IntelligentProductApplyFields["mercadoLivreCategory"]) {
-  if (!value) return null;
-  const categoryId = text(value.categoryId);
-  const categoryName = text(value.categoryName);
-  const categoryPath = text(value.categoryPath) ?? categoryName ?? categoryId;
-  if (!categoryId && !categoryName && !categoryPath) return null;
-
-  return {
-    categoryId,
-    categoryName,
-    categoryPath,
-    sourceItemId: text(value.sourceItemId),
-    source: text(value.source),
-    priceReference: typeof value.priceReference === "number" && Number.isFinite(value.priceReference) ? value.priceReference : null
-  };
-}
-
-function normalizeMercadoLivreAttributes(value: IntelligentProductApplyFields["mercadoLivreAttributes"]) {
-  const byId = new Map<string, { attributeId: string; attributeName: string; value: string }>();
-  for (const raw of value ?? []) {
-    const attributeId = text(raw.attributeId);
-    const attributeName = text(raw.attributeName) ?? attributeId;
-    const attributeValue = text(raw.value);
-    if (!attributeId || !attributeName || !attributeValue) continue;
-    byId.set(attributeId, { attributeId, attributeName, value: attributeValue });
-  }
-  return Array.from(byId.values()).slice(0, 30);
-}
 
 function decimalText(value: Prisma.Decimal | null | undefined) {
   return value === null || value === undefined ? null : value.toString();
@@ -724,66 +538,15 @@ export async function lookupIntelligentProductRegistration(authContext: AuthCont
   };
 }
 
-function allowedProductFields(input: IntelligentProductApplyFields) {
-  const data: Prisma.ProductUpdateInput = {};
-  const changedFields: string[] = [];
-
-  if (input.name !== undefined) {
-    data.name = input.name.trim();
-    changedFields.push("name");
-  }
-  if (input.ean !== undefined) {
-    data.ean = normalizeGtin(input.ean);
-    changedFields.push("ean");
-  }
-  if (input.brand !== undefined) {
-    data.brand = text(input.brand);
-    changedFields.push("brand");
-  }
-  if (input.description !== undefined) {
-    data.description = text(input.description);
-    changedFields.push("description");
-  }
-  if (input.ncm !== undefined) {
-    data.ncm = text(input.ncm);
-    changedFields.push("ncm");
-  }
-  if (input.weight !== undefined) {
-    data.weight = input.weight;
-    changedFields.push("weight");
-  }
-  if (input.height !== undefined) {
-    data.height = input.height;
-    changedFields.push("height");
-  }
-  if (input.width !== undefined) {
-    data.width = input.width;
-    changedFields.push("width");
-  }
-  if (input.depth !== undefined) {
-    data.depth = input.depth;
-    changedFields.push("depth");
-  }
-
-  return { data, changedFields };
-}
-
 export async function applyIntelligentProductRegistration(input: {
   authContext: AuthContext;
   productId: string;
   fields: IntelligentProductApplyFields;
-  confirm: string;
-  lowCompatibilityConfirm?: string;
-  sourceSuggestion?: ProductCompatibilitySuggestion;
   request?: Request;
 }) {
-  if (input.confirm !== INTELLIGENT_PRODUCT_ENRICHMENT_CONFIRMATION) {
-    return {
-      ok: false as const,
-      status: 409,
-      error: "Confirmacao textual obrigatoria.",
-      confirmationRequired: INTELLIGENT_PRODUCT_ENRICHMENT_CONFIRMATION
-    };
+  const name = normalizeIntelligentProductPreviewTitle(input.fields.name);
+  if (!name) {
+    return { ok: false as const, status: 400, error: "Informe um titulo para salvar o produto." };
   }
 
   const accountContext = await getUserAccountContext(input.authContext);
@@ -794,267 +557,108 @@ export async function applyIntelligentProductRegistration(input: {
 
   const product = await prisma.product.findFirst({
     where: { id: input.productId, ...contextWhere(input.authContext, selectedConnectionId) },
-    include: {
-      images: { orderBy: { position: "asc" } },
-      marketplaceCategoryMappings: {
-        where: { provider: "MERCADO_LIVRE" },
-        take: 1,
-        orderBy: { updatedAt: "desc" },
-        include: {
-          productAttributeValues: {
-            select: {
-              attributeId: true,
-              attributeName: true,
-              value: true,
-              status: true
-            }
-          }
-        }
-      }
-    }
+    include: { images: { orderBy: { position: "asc" } } }
   });
 
   if (!product) {
     return { ok: false as const, status: 404, error: "Produto nao encontrado nesta organizacao/contexto." };
   }
 
-  const compatibility = input.sourceSuggestion
-    ? calculateProductSuggestionCompatibility(
-        {
-          name: product.name,
-          gtin: product.ean,
-          brand: product.brand
-        },
-        input.sourceSuggestion
-      )
-    : null;
+  const brand = normalizeIntelligentProductPreviewBrand(input.fields.brand);
+  const productData: Prisma.ProductUpdateInput = {};
+  const changedFields: string[] = [];
+  const oldValues: Record<string, unknown> = {};
+  const newValues: Record<string, unknown> = {};
 
-  if (compatibility?.level === "LOW" && input.lowCompatibilityConfirm !== LOW_COMPATIBILITY_CONFIRMATION) {
-    await createAuditLog({
-      organizationId: input.authContext.organizationId,
-      userId: input.authContext.user.id,
-      userEmail: input.authContext.user.email,
-      userRole: input.authContext.role,
-      action: "PRODUCT_ENRICHMENT_LOW_COMPATIBILITY_WARNING",
-      entityType: "Product",
-      entityId: product.id,
-      route: "/api/products/intelligent-registration/apply",
-      method: "POST",
-      status: "BLOCKED",
-      riskLevel: "HIGH",
-      summary: "Salvamento local bloqueado por baixa compatibilidade da sugestao Mercado Livre.",
-      metadata: {
-        compatibility: serializeCompatibilityForAudit(compatibility),
+  if (product.name !== name) {
+    productData.name = name;
+    changedFields.push("name");
+    oldValues.name = product.name;
+    newValues.name = name;
+  }
+
+  if (brand && product.brand !== brand) {
+    productData.brand = brand;
+    changedFields.push("brand");
+    oldValues.brand = product.brand;
+    newValues.brand = brand;
+  }
+
+  const existingImageUrls = product.images.map((image) => image.url);
+  const incomingImageUrls = normalizeIntelligentProductPreviewImages(input.fields.images);
+  const shouldUpdateImages = input.fields.images !== undefined && incomingImageUrls.length > 0;
+  const finalImageUrls = shouldUpdateImages
+    ? mergeIntelligentProductPreviewImages(existingImageUrls, incomingImageUrls)
+    : existingImageUrls;
+  const imagesChanged =
+    shouldUpdateImages &&
+    (finalImageUrls.length !== existingImageUrls.length ||
+      finalImageUrls.some((url, index) => url !== existingImageUrls[index]));
+
+  if (imagesChanged) {
+    changedFields.push("images");
+    oldValues.images = existingImageUrls;
+    newValues.images = finalImageUrls;
+  }
+
+  if (!changedFields.length) {
+    return {
+      ok: true as const,
+      status: 200,
+      data: {
+        productId: product.id,
+        historyId: null,
+        changedFields: [],
         externalWrite: false,
         blingApiCall: false,
         marketplaceApiCall: false,
         stockChanged: false,
         financeChanged: false
-      },
-      request: input.request
-    });
-
-    return {
-      ok: false as const,
-      status: 409,
-      error: "A sugestao selecionada pode nao corresponder ao produto local. Revise os dados e informe a confirmacao adicional.",
-      lowCompatibilityConfirmationRequired: true,
-      compatibility
+      }
     };
   }
 
-  if (input.fields.ean !== undefined && !isValidGtin(normalizeGtin(input.fields.ean))) {
-    return { ok: false as const, status: 400, error: "GTIN/EAN invalido." };
-  }
-
-  const imageUrl = text(input.fields.imageUrl);
-  const additionalImageUrls = uniqueTexts(input.fields.additionalImageUrls).filter((url) => url !== imageUrl).slice(0, 12);
-  const mercadoLivreCategory = normalizeMercadoLivreCategory(input.fields.mercadoLivreCategory);
-  const mercadoLivreAttributes = normalizeMercadoLivreAttributes(input.fields.mercadoLivreAttributes);
-  const referenceImportId = text(input.fields.referenceImportId);
-  const { data, changedFields } = allowedProductFields(input.fields);
-  if (imageUrl) changedFields.push("imageUrl");
-  if (additionalImageUrls.length) changedFields.push("additionalImageUrls");
-  const currentMercadoLivreMapping = product.marketplaceCategoryMappings[0] ?? null;
-  const historyValues = buildHistoryValues({
-    product,
-    inputFields: input.fields,
-    productData: data,
-    imageUrl,
-    additionalImageUrls,
-    mercadoLivreCategory,
-    mercadoLivreAttributes,
-    currentMercadoLivreMapping
-  });
-  const sourceExternalId =
-    text(input.sourceSuggestion?.sourceExternalId) ??
-    text(input.fields.mercadoLivreCategory?.sourceItemId) ??
-    text(input.fields.referenceImportId);
-  const sourceUrl = text(input.sourceSuggestion?.sourceUrl);
-  const sourceProvider = input.sourceSuggestion || mercadoLivreCategory || mercadoLivreAttributes.length || referenceImportId ? "MERCADO_LIVRE" : "GTIN_CATALOG";
-
-  if (!changedFields.length && !mercadoLivreCategory && !mercadoLivreAttributes.length && !referenceImportId) {
-    return { ok: false as const, status: 400, error: "Nenhum campo revisado foi selecionado para salvar." };
-  }
-
-  const skippedFields: string[] = [];
   let historyId: string | null = null;
   await prisma.$transaction(async (tx) => {
-    if (Object.keys(data).length) {
+    if (Object.keys(productData).length) {
       await tx.product.update({
         where: { id: product.id },
-        data
+        data: productData
       });
     }
 
-    if (imageUrl) {
-      if (product.images[0]) {
-        await tx.productImage.update({ where: { id: product.images[0].id }, data: { url: imageUrl } });
-      } else {
-        await tx.productImage.create({
-          data: {
-            organizationId: input.authContext.organizationId,
-            productId: product.id,
-            url: imageUrl,
-            position: 0
+    if (imagesChanged) {
+      for (const [index, url] of finalImageUrls.entries()) {
+        const existingImage = product.images[index];
+        if (existingImage) {
+          if (existingImage.url !== url || existingImage.position !== index) {
+            await tx.productImage.update({
+              where: { id: existingImage.id },
+              data: { url, position: index }
+            });
           }
-        });
-      }
-    }
-
-    if (additionalImageUrls.length) {
-      const existingUrls = new Set(product.images.map((image) => image.url).filter(Boolean));
-      let nextPosition = product.images.reduce((position, image) => Math.max(position, image.position), 0) + 1;
-      for (const url of additionalImageUrls) {
-        if (existingUrls.has(url)) continue;
-        existingUrls.add(url);
-        await tx.productImage.create({
-          data: {
-            organizationId: input.authContext.organizationId,
-            productId: product.id,
-            url,
-            position: nextPosition
-          }
-        });
-        nextPosition += 1;
-      }
-    }
-
-    let mercadoLivreMapping = await tx.marketplaceCategoryMapping.findUnique({
-      where: {
-        organizationId_productId_provider: {
-          organizationId: input.authContext.organizationId,
-          productId: product.id,
-          provider: "MERCADO_LIVRE"
-        }
-      }
-    });
-
-    if (mercadoLivreCategory) {
-      if (mercadoLivreMapping?.status === "CONFIRMED") {
-        skippedFields.push("mercadoLivreCategory");
-      } else {
-        mercadoLivreMapping = await tx.marketplaceCategoryMapping.upsert({
-          where: {
-            organizationId_productId_provider: {
+        } else {
+          await tx.productImage.create({
+            data: {
               organizationId: input.authContext.organizationId,
               productId: product.id,
-              provider: "MERCADO_LIVRE"
-            }
-          },
-          create: {
-            organizationId: input.authContext.organizationId,
-            productId: product.id,
-            provider: "MERCADO_LIVRE",
-            marketplaceCategoryId: mercadoLivreCategory.categoryId,
-            marketplaceCategoryName: mercadoLivreCategory.categoryName,
-            marketplaceCategoryPath: mercadoLivreCategory.categoryPath,
-            confidenceScore: 70,
-            source: "MARKETPLACE_API",
-            status: "SUGGESTED",
-            metadata: {
-              source: "CADASTRO_INTELIGENTE_MERCADO_LIVRE",
-              sourceItemId: mercadoLivreCategory.sourceItemId,
-              sourceType: mercadoLivreCategory.source,
-              priceReference: mercadoLivreCategory.priceReference,
-              externalWrite: false,
-              marketplaceWrite: false
-            }
-          },
-          update: {
-            marketplaceCategoryId: mercadoLivreCategory.categoryId,
-            marketplaceCategoryName: mercadoLivreCategory.categoryName,
-            marketplaceCategoryPath: mercadoLivreCategory.categoryPath,
-            confidenceScore: 70,
-            source: "MARKETPLACE_API",
-            status: "SUGGESTED",
-            metadata: {
-              source: "CADASTRO_INTELIGENTE_MERCADO_LIVRE",
-              sourceItemId: mercadoLivreCategory.sourceItemId,
-              sourceType: mercadoLivreCategory.source,
-              priceReference: mercadoLivreCategory.priceReference,
-              externalWrite: false,
-              marketplaceWrite: false
-            }
-          }
-        });
-        changedFields.push("mercadoLivreCategory");
-      }
-    }
-
-    if (mercadoLivreAttributes.length) {
-      if (!mercadoLivreMapping?.marketplaceCategoryId) {
-        skippedFields.push("mercadoLivreAttributes");
-      } else {
-        for (const attribute of mercadoLivreAttributes) {
-          await tx.marketplaceProductAttributeValue.upsert({
-            where: {
-              mappingId_attributeId: {
-                mappingId: mercadoLivreMapping.id,
-                attributeId: attribute.attributeId
-              }
-            },
-            create: {
-              organizationId: input.authContext.organizationId,
-              productId: product.id,
-              mappingId: mercadoLivreMapping.id,
-              provider: "MERCADO_LIVRE",
-              marketplaceCategoryId: mercadoLivreMapping.marketplaceCategoryId,
-              attributeId: attribute.attributeId,
-              attributeName: attribute.attributeName,
-              value: attribute.value,
-              valueId: null,
-              source: "RULE",
-              status: "SUGGESTED"
-            },
-            update: {
-              marketplaceCategoryId: mercadoLivreMapping.marketplaceCategoryId,
-              attributeName: attribute.attributeName,
-              value: attribute.value,
-              valueId: null,
-              source: "RULE",
-              status: "SUGGESTED"
+              url,
+              position: index
             }
           });
         }
-        changedFields.push("mercadoLivreAttributes");
       }
-    }
 
-    if (referenceImportId) {
-      const updated = await tx.mercadoLivreReferenceImport.updateMany({
-        where: {
-          id: referenceImportId,
-          organizationId: input.authContext.organizationId,
-          OR: [{ productId: product.id }, { productId: null }]
-        },
-        data: {
-          productId: product.id,
-          status: "APPLIED"
-        }
-      });
-      if (updated.count) changedFields.push("mercadoLivreReferenceImportStatus");
-      else skippedFields.push("mercadoLivreReferenceImport");
+      const removedImageIds = product.images.slice(finalImageUrls.length).map((image) => image.id);
+      if (removedImageIds.length) {
+        await tx.productImage.deleteMany({
+          where: {
+            id: { in: removedImageIds },
+            organizationId: input.authContext.organizationId,
+            productId: product.id
+          }
+        });
+      }
     }
 
     const history = await tx.productEnrichmentHistory.create({
@@ -1062,16 +666,16 @@ export async function applyIntelligentProductRegistration(input: {
         organizationId: input.authContext.organizationId,
         productId: product.id,
         userId: input.authContext.user.id,
-        sourceProvider,
-        sourceExternalId,
-        sourceUrl,
-        compatibilityLevel: compatibility?.level ?? null,
-        compatibilityScore: compatibility?.score ?? null,
-        confirmationMainUsed: input.confirm === INTELLIGENT_PRODUCT_ENRICHMENT_CONFIRMATION,
-        confirmationLowCompatibilityUsed: compatibility?.level === "LOW" && input.lowCompatibilityConfirm === LOW_COMPATIBILITY_CONFIRMATION,
+        sourceProvider: "LOCAL_PREVIEW",
+        sourceExternalId: null,
+        sourceUrl: null,
+        compatibilityLevel: null,
+        compatibilityScore: null,
+        confirmationMainUsed: false,
+        confirmationLowCompatibilityUsed: false,
         fieldsChangedJson: changedFields,
-        oldValuesJson: historyValues.oldValues as Prisma.InputJsonObject,
-        newValuesJson: historyValues.newValues as Prisma.InputJsonObject
+        oldValuesJson: oldValues as Prisma.InputJsonObject,
+        newValuesJson: newValues as Prisma.InputJsonObject
       }
     });
     historyId = history.id;
@@ -1082,19 +686,16 @@ export async function applyIntelligentProductRegistration(input: {
     userId: input.authContext.user.id,
     userEmail: input.authContext.user.email,
     userRole: input.authContext.role,
-    action: "PRODUCT_ENRICHMENT_DRAFT_APPLIED",
+    action: "PRODUCT_INTELLIGENT_PREVIEW_APPLIED",
     entityType: "Product",
     entityId: product.id,
     route: "/api/products/intelligent-registration/apply",
     method: "POST",
-    confirmation: input.confirm,
     status: "SUCCESS",
     riskLevel: "MEDIUM",
-    summary: "Dados revisados do Cadastro Inteligente salvos localmente.",
+    summary: "Titulo, marca ou imagens revisadas foram salvos localmente.",
     metadata: {
       fields: changedFields,
-      skippedFields,
-      compatibility: serializeCompatibilityForAudit(compatibility),
       externalWrite: false,
       blingApiCall: false,
       marketplaceApiCall: false,
@@ -1104,35 +705,6 @@ export async function applyIntelligentProductRegistration(input: {
     request: input.request
   });
 
-  if (compatibility?.level === "LOW") {
-    await createAuditLog({
-      organizationId: input.authContext.organizationId,
-      userId: input.authContext.user.id,
-      userEmail: input.authContext.user.email,
-      userRole: input.authContext.role,
-      action: "PRODUCT_ENRICHMENT_APPLIED_WITH_LOW_COMPATIBILITY_CONFIRMATION",
-      entityType: "Product",
-      entityId: product.id,
-      route: "/api/products/intelligent-registration/apply",
-      method: "POST",
-      confirmation: input.lowCompatibilityConfirm,
-      status: "SUCCESS",
-      riskLevel: "HIGH",
-      summary: "Sugestao de baixa compatibilidade aplicada localmente com confirmacao adicional.",
-      metadata: {
-        fields: changedFields,
-        skippedFields,
-        compatibility: serializeCompatibilityForAudit(compatibility),
-        externalWrite: false,
-        blingApiCall: false,
-        marketplaceApiCall: false,
-        stockChanged: false,
-        financeChanged: false
-      },
-      request: input.request
-    });
-  }
-
   return {
     ok: true as const,
     status: 200,
@@ -1140,8 +712,6 @@ export async function applyIntelligentProductRegistration(input: {
       productId: product.id,
       historyId,
       changedFields,
-      skippedFields,
-      compatibility: serializeCompatibilityForAudit(compatibility),
       externalWrite: false,
       blingApiCall: false,
       marketplaceApiCall: false,
@@ -1150,6 +720,7 @@ export async function applyIntelligentProductRegistration(input: {
     }
   };
 }
+
 
 function jsonArray(value: Prisma.JsonValue | null) {
   return Array.isArray(value) ? value : [];

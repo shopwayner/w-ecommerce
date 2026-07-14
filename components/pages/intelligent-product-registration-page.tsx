@@ -4,19 +4,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { AlertTriangle, ArrowLeft, Check, Copy, Database, ExternalLink, ImageIcon, PackageSearch, RotateCcw, Save, Search, ShieldCheck, SlidersHorizontal, WandSparkles } from "lucide-react";
+import { ArrowLeft, Check, Copy, Database, ExternalLink, ImageIcon, PackageSearch, RotateCcw, Search, SlidersHorizontal, WandSparkles, X } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import { IntelligentProductPreview } from "@/components/intelligent-product-preview";
 import { Badge, Button, Card, PageHeader } from "@/components/ui";
 import {
   calculateProductSuggestionCompatibility,
-  LOW_COMPATIBILITY_CONFIRMATION,
   type ProductCompatibilitySuggestion,
   type ProductSuggestionCompatibilityLevel,
   type ProductSuggestionCompatibilityResult
 } from "@/lib/intelligent-product-compatibility";
 import {
   AMAZON_DRAFT_FIELDS,
-  amazonDraftPersistableValues,
   amazonDraftValueHasContent,
   amazonDraftValuesEqual,
   amazonReferenceSuggestion,
@@ -28,8 +27,13 @@ import {
   type AmazonDraftField,
   type AmazonReferenceDraft
 } from "@/lib/amazon-reference-draft";
+import {
+  buildIntelligentProductPreviewFields,
+  normalizeIntelligentProductPreviewBrand,
+  normalizeIntelligentProductPreviewImages,
+  normalizeIntelligentProductPreviewTitle
+} from "@/lib/intelligent-product-preview";
 
-const SAVE_CONFIRMATION = "APLICAR_SUGESTAO_MERCADO_LIVRE_LOCALMENTE";
 const AMAZON_LOGO_SRC = "/marketplaces/amazon.png";
 const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre.png";
 const MERCADO_LIVRE_DETAIL_CONCURRENCY = 4;
@@ -744,35 +748,6 @@ function mercadoLivreItemToCompatibilitySuggestion(item: MercadoLivreSearchItem)
   };
 }
 
-function referenceToCompatibilitySuggestion(reference: MercadoLivreReferenceImport): ProductCompatibilitySuggestion {
-  const attributes = Array.isArray(reference.attributes)
-    ? reference.attributes
-        .map((attribute) => {
-          if (!attribute || typeof attribute !== "object" || Array.isArray(attribute)) return null;
-          const fields = attribute as Record<string, unknown>;
-          return {
-            id: typeof fields.id === "string" ? fields.id : null,
-            name: typeof fields.name === "string" ? fields.name : null,
-            value: typeof fields.value_name === "string" ? fields.value_name : typeof fields.value === "string" ? fields.value : null
-          };
-        })
-        .filter((attribute): attribute is { id: string | null; name: string | null; value: string | null } => Boolean(attribute))
-    : undefined;
-
-  return {
-    sourceType: reference.source,
-    sourceExternalId: reference.externalItemId,
-    sourceUrl: reference.permalink,
-    title: reference.title,
-    gtin: reference.gtin,
-    brand: reference.brand,
-    categoryId: reference.categoryId,
-    categoryName: reference.categoryName,
-    categoryPath: reference.categoryName ?? reference.categoryId,
-    attributes
-  };
-}
-
 function CompatibilityDetails({
   compatibility,
   localProduct,
@@ -810,15 +785,6 @@ function CompatibilityDetails({
       ) : null}
     </div>
   );
-}
-
-function fieldPayloadValue(field: FieldSuggestion) {
-  if (field.suggestedValue === null || field.suggestedValue === undefined || field.suggestedValue === "") return undefined;
-  if (["weight", "height", "width", "depth"].includes(field.field)) {
-    const numeric = Number(field.suggestedValue);
-    return Number.isFinite(numeric) ? numeric : undefined;
-  }
-  return String(field.suggestedValue);
 }
 
 function ProductImage({ src, alt, size = "md" }: { src: string | null | undefined; alt: string; size?: "sm" | "md" }) {
@@ -1231,9 +1197,6 @@ export function IntelligentProductRegistrationPage() {
   const [selectedFields, setSelectedFields] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [showConfirmation, setShowConfirmation] = useState(false);
-  const [confirmation, setConfirmation] = useState("");
-  const [compatibilityConfirmation, setCompatibilityConfirmation] = useState("");
   const [message, setMessage] = useState("Busque pelo SKU, GTIN ou titulo. O W Ecommerce consulta o Product local e o banco GTIN interno antes de qualquer fonte futura.");
   const [selectedProduct, setSelectedProduct] = useState<SafeProduct | null>(null);
   const [selectedProductSku, setSelectedProductSku] = useState<string | null>(null);
@@ -1293,17 +1256,17 @@ export function IntelligentProductRegistrationPage() {
   const [enrichmentHistory, setEnrichmentHistory] = useState<ProductEnrichmentHistoryItem[]>([]);
   const [selectedHistory, setSelectedHistory] = useState<ProductEnrichmentHistoryItem | null>(null);
   const [activePanel, setActivePanel] = useState<AuxiliaryPanel>(null);
+  const [previewTitle, setPreviewTitle] = useState("");
+  const [previewBrand, setPreviewBrand] = useState("");
+  const [previewBrandVisible, setPreviewBrandVisible] = useState(false);
+  const [previewImages, setPreviewImages] = useState<string[]>([]);
+  const [previewSelectedIndex, setPreviewSelectedIndex] = useState(0);
+  const saveInFlightRef = useRef(false);
   const mercadoLivreDetailRequestsRef = useRef<Set<string>>(new Set());
   const mercadoLivreLoadedRawPagesRef = useRef<Set<number>>(new Set());
 
   const product = selectedProduct;
   const selectedAmazonReferenceAsin = selectedAmazonReference?.asin ?? null;
-  const amazonPersistableValues = amazonDraftPersistableValues(amazonDraft);
-  const selectedCount =
-    selectedFields.size +
-    selectedReferenceFields.size +
-    selectedMercadoLivreFields.size +
-    Object.keys(amazonPersistableValues).length;
   const lookupGtinCatalog = lookup?.gtinCatalog ?? null;
   const gtinCatalog = internalGtinCatalog ?? lookupGtinCatalog;
   const suggestions = lookup?.fieldSuggestions ?? [];
@@ -1462,18 +1425,6 @@ export function IntelligentProductRegistrationPage() {
   const selectedMercadoLivreDetailCategory = selectedMercadoLivreDetailItem ? mercadoLivreCategoryLabel(selectedMercadoLivreDetailItem) : null;
   const selectedMercadoLivreDetailUrl = selectedMercadoLivreDetailItem ? mercadoLivreItemPublicUrl(selectedMercadoLivreDetailItem) : null;
   const selectedMercadoLivreDataCompleteness = selectedMercadoLivreDetailItem ? mercadoLivreDataCompleteness(selectedMercadoLivreDetailItem) : null;
-  const selectedMercadoLivreCompatibility =
-    product && selectedMercadoLivreSuggestion
-      ? calculateProductSuggestionCompatibility(product, mercadoLivreItemToCompatibilitySuggestion(selectedMercadoLivreSuggestion))
-      : null;
-  const selectedReferenceCompatibility =
-    product && referenceImport
-      ? calculateProductSuggestionCompatibility(product, referenceToCompatibilitySuggestion(referenceImport))
-      : null;
-  const activeCompatibility = selectedMercadoLivreCompatibility ?? selectedReferenceCompatibility;
-  const hasMarketplaceSelection = selectedMercadoLivreFields.size > 0 || selectedReferenceFields.size > 0;
-  const requiresLowCompatibilityConfirmation = activeCompatibility?.level === "LOW" && hasMarketplaceSelection;
-
   useEffect(() => {
     if (!filteredMercadoLivreItems.length) {
       if (selectedMercadoLivreResultKey) setSelectedMercadoLivreResultKey(null);
@@ -1684,6 +1635,11 @@ export function IntelligentProductRegistrationPage() {
     setAmazonDraftReviewOpen(false);
     setAmazonCatalogMessage("Referência Amazon selecionada.");
     setMessage("Referência Amazon selecionada. As alterações ainda não foram salvas.");
+    openProductPreview({
+      title: item.title,
+      brand: item.brand,
+      images: item.imageUrl ? [item.imageUrl] : []
+    });
   }
 
   function openAmazonDraftReview() {
@@ -1949,9 +1905,6 @@ export function IntelligentProductRegistrationPage() {
     }
 
     setLoading(true);
-    setShowConfirmation(false);
-    setConfirmation("");
-    setCompatibilityConfirmation("");
     updateSelectedProductState(null);
     setInternalGtinChecked(false);
     setInternalGtinState("idle");
@@ -2083,7 +2036,6 @@ export function IntelligentProductRegistrationPage() {
     setSelectedReferenceFields(new Set());
     setSelectedMercadoLivreSuggestion(null);
     setSelectedMercadoLivreFields(new Set());
-    setCompatibilityConfirmation("");
     try {
       const params = new URLSearchParams({
         q: searchValue,
@@ -2483,11 +2435,15 @@ export function IntelligentProductRegistrationPage() {
       setReferenceImport(payload.reference);
       setSelectedMercadoLivreSuggestion(null);
       setSelectedMercadoLivreFields(new Set());
-      setCompatibilityConfirmation("");
       setReferenceImportInput(payload.normalizedItemId ?? payload.reference.externalItemId);
       setReferenceImportErrorDetails(null);
       setReferenceImportOpen(false);
       setMessage("Referencia Mercado Livre importada como DRAFT local. Nada foi salvo no Product e nada foi publicado.");
+      openProductPreview({
+        title: payload.reference.title,
+        brand: payload.reference.brand,
+        images: [payload.reference.thumbnail, ...imageUrlsFromUnknown(payload.reference.pictures)]
+      });
     } catch {
       setReferenceImportError("Erro ao importar referencia Mercado Livre. Nenhuma escrita externa foi executada.");
       setReferenceImportErrorDetails(null);
@@ -2496,43 +2452,23 @@ export function IntelligentProductRegistrationPage() {
     }
   }
 
-  function toggleField(field: string, checked: boolean) {
-    setSelectedFields((current) => {
-      const next = new Set(current);
-      if (checked) {
-        next.add(field);
-      } else {
-        next.delete(field);
-      }
-      return next;
-    });
-  }
+  function openProductPreview(input: {
+    title?: string | null;
+    brand?: string | null;
+    images?: Array<string | null | undefined>;
+  }) {
+    const title = normalizeIntelligentProductPreviewTitle(input.title) || product?.name || "";
+    const brand = normalizeIntelligentProductPreviewBrand(input.brand) ?? normalizeIntelligentProductPreviewBrand(product?.brand);
+    const suggestionImages = normalizeIntelligentProductPreviewImages(input.images);
+    const images = suggestionImages.length
+      ? suggestionImages
+      : normalizeIntelligentProductPreviewImages(product?.imageUrl ? [product.imageUrl] : []);
 
-  function toggleReferenceField(field: string, checked: boolean) {
-    setSelectedReferenceFields((current) => {
-      const next = new Set(current);
-      if (checked) {
-        next.add(field);
-      } else {
-        next.delete(field);
-      }
-      return next;
-    });
-  }
-
-  function toggleMercadoLivreField(field: string, checked: boolean) {
-    setSelectedMercadoLivreFields((current) => {
-      const next = new Set(current);
-      if (checked) {
-        next.add(field);
-      } else {
-        next.delete(field);
-      }
-      return next;
-    });
-  }
-
-  function focusReviewPanel() {
+    setPreviewTitle(title);
+    setPreviewBrand(brand ?? "");
+    setPreviewBrandVisible(Boolean(brand));
+    setPreviewImages(images);
+    setPreviewSelectedIndex(0);
     setActivePanel("extracted");
   }
 
@@ -2542,132 +2478,72 @@ export function IntelligentProductRegistrationPage() {
     setSelectedMercadoLivreSuggestion(item);
     setReferenceImport(null);
     setSelectedReferenceFields(new Set());
-    setCompatibilityConfirmation("");
     const defaultFields = new Set<string>();
     if (item.title && !product?.name) defaultFields.add("name");
     if (item.brand && !product?.brand) defaultFields.add("brand");
     if (item.gtin && !product?.gtin) defaultFields.add("ean");
     if (item.imageUrl && !product?.imageUrl) defaultFields.add("imageUrl");
     setSelectedMercadoLivreFields(defaultFields);
-    setMessage("Sugestao Mercado Livre carregada para revisao. Nada foi salvo; marque os campos e confirme para aplicar localmente.");
-    focusReviewPanel();
+    setMessage("Sugestao Mercado Livre carregada para revisao.");
+    openProductPreview({
+      title: item.title,
+      brand: item.brand,
+      images: mercadoLivreDetailImageUrls(item)
+    });
   }
 
-  function referencePayloadValue(row: (typeof referenceReviewRows)[number]) {
-    if (!row.selectable || row.suggested === null || row.suggested === undefined || row.suggested === "") return undefined;
-    if (row.field === "mercadoLivreCategory") {
-      return {
-        categoryId: referenceImport?.categoryId ?? null,
-        categoryName: referenceImport?.categoryName ?? null,
-        categoryPath: referenceImport?.categoryName ?? referenceImport?.categoryId ?? null,
-        sourceItemId: referenceImport?.externalItemId ?? null,
-        source: referenceImport?.source ?? "MERCADO_LIVRE_REFERENCE_IMPORT",
-        priceReference: referenceImport?.price ?? null
-      };
-    }
-    if (row.field === "additionalImageUrls") {
-      if (!Array.isArray(referenceImport?.pictures)) return undefined;
-      return referenceImport.pictures
-        .map((item) => {
-          if (typeof item === "string") return item;
-          if (item && typeof item === "object" && !Array.isArray(item)) {
-            const fields = item as Record<string, unknown>;
-            return typeof fields.secure_url === "string" ? fields.secure_url : typeof fields.url === "string" ? fields.url : null;
-          }
-          return null;
-        })
-        .filter((url): url is string => Boolean(url));
-    }
-    return String(row.suggested);
+  function closeProductPreview() {
+    setActivePanel(null);
+    setPreviewTitle("");
+    setPreviewBrand("");
+    setPreviewBrandVisible(false);
+    setPreviewImages([]);
+    setPreviewSelectedIndex(0);
   }
 
-  function mercadoLivrePayloadValue(row: (typeof mercadoLivreSuggestionReviewRows)[number]) {
-    if (!row.selectable || row.suggested === null || row.suggested === undefined || row.suggested === "") return undefined;
-    if (row.field === "mercadoLivreCategory") {
-      return {
-        categoryId: selectedMercadoLivreSuggestion?.categoryId ?? null,
-        categoryName: selectedMercadoLivreSuggestion?.categoryName ?? null,
-        categoryPath: selectedMercadoLivreSuggestion?.categoryName ?? selectedMercadoLivreSuggestion?.categoryId ?? null,
-        sourceItemId: selectedMercadoLivreSuggestion?.externalItemId ?? null,
-        source: selectedMercadoLivreSuggestion?.source ?? "MERCADO_LIVRE_PRODUCT_SEARCH",
-        priceReference: selectedMercadoLivreSuggestion?.price ?? null
-      };
-    }
-    if (row.field === "additionalImageUrls") {
-      return selectedMercadoLivreSuggestion?.imageUrls ?? [];
-    }
-    if (row.field === "mercadoLivreAttributes") {
-      return selectedMercadoLivreSuggestion?.attributes
-        ?.filter((attribute) => attribute.id && attribute.value)
-        .map((attribute) => ({
-          attributeId: attribute.id,
-          attributeName: attribute.name,
-          value: attribute.value
-        }));
-    }
-    return String(row.suggested);
+  function navigatePreviewImage(direction: -1 | 1) {
+    if (previewImages.length < 2) return;
+    setPreviewSelectedIndex((current) =>
+      (current + direction + previewImages.length) % previewImages.length
+    );
   }
 
-  async function saveLocalValues() {
+  function removeSelectedPreviewImage() {
+    setPreviewImages((current) => {
+      const next = current.filter((_, index) => index !== previewSelectedIndex);
+      setPreviewSelectedIndex((selectedIndex) => Math.min(selectedIndex, Math.max(0, next.length - 1)));
+      return next;
+    });
+  }
+
+  function makeSelectedPreviewImagePrimary() {
+    if (previewSelectedIndex <= 0) return;
+    setPreviewImages((current) => {
+      const selected = current[previewSelectedIndex];
+      if (!selected) return current;
+      return [selected, ...current.filter((_, index) => index !== previewSelectedIndex)];
+    });
+    setPreviewSelectedIndex(0);
+  }
+
+  async function saveProductPreview() {
+    if (saveInFlightRef.current || saving) return;
     if (!product) {
-      setMessage("Nenhum Product interno localizado para salvar.");
-      return;
-    }
-    if (!selectedCount) {
-      setMessage("Selecione pelo menos um campo sugerido antes de salvar.");
-      return;
-    }
-    if (!showConfirmation) {
-      setShowConfirmation(true);
-      setMessage("Confirme o salvamento local. Nada sera enviado ao Bling, Mercado Livre ou outros marketplaces.");
-      return;
-    }
-    if (confirmation.trim() !== SAVE_CONFIRMATION) {
-      setMessage(`Digite exatamente ${SAVE_CONFIRMATION} para salvar localmente.`);
-      return;
-    }
-    if (requiresLowCompatibilityConfirmation && compatibilityConfirmation.trim() !== LOW_COMPATIBILITY_CONFIRMATION) {
-      setMessage(`Esta sugestao tem baixa compatibilidade. Digite exatamente ${LOW_COMPATIBILITY_CONFIRMATION} para confirmar que ela corresponde ao produto.`);
+      setMessage("Não foi possível salvar o produto agora.");
       return;
     }
 
-    const gtinFields = Object.fromEntries(
-      suggestions
-        .filter((field) => selectedFields.has(field.field))
-        .map((field) => [field.field, fieldPayloadValue(field)])
-        .filter(([, value]) => value !== undefined)
-    );
-    const referenceFields = Object.fromEntries(
-      referenceReviewRows
-        .filter((row) => selectedReferenceFields.has(row.field))
-        .map((row) => [row.field, referencePayloadValue(row)])
-        .filter(([, value]) => value !== undefined)
-    );
-    const mercadoLivreFields = Object.fromEntries(
-      mercadoLivreSuggestionReviewRows
-        .filter((row) => selectedMercadoLivreFields.has(row.field))
-        .map((row) => [row.field, mercadoLivrePayloadValue(row)])
-        .filter(([, value]) => value !== undefined)
-    );
-    const fields = {
-      ...gtinFields,
-      ...referenceFields,
-      ...mercadoLivreFields,
-      ...amazonPersistableValues,
-      ...(referenceImport ? { referenceImportId: referenceImport.id } : {})
-    };
-
-    if (!Object.keys(fields).length) {
-      setMessage("Nenhum campo aplicavel foi selecionado para salvar localmente.");
+    const fields = buildIntelligentProductPreviewFields({
+      name: previewTitle,
+      brand: previewBrandVisible ? previewBrand : undefined,
+      images: previewImages
+    });
+    if (!fields.name) {
+      setMessage("Informe um título para salvar o produto.");
       return;
     }
 
-    const sourceSuggestion = selectedMercadoLivreSuggestion
-      ? mercadoLivreItemToCompatibilitySuggestion(selectedMercadoLivreSuggestion)
-      : referenceImport
-        ? referenceToCompatibilitySuggestion(referenceImport)
-        : undefined;
-
+    saveInFlightRef.current = true;
     setSaving(true);
     try {
       const response = await fetch("/api/products/intelligent-registration/apply", {
@@ -2675,46 +2551,32 @@ export function IntelligentProductRegistrationPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           productId: product.productId,
-          fields,
-          confirm: confirmation.trim(),
-          lowCompatibilityConfirm: compatibilityConfirmation.trim() || undefined,
-          sourceSuggestion
+          fields
         })
       });
-      const payload = (await response.json()) as { changedFields?: string[]; error?: string; lowCompatibilityConfirmationRequired?: string };
+
       if (!response.ok) {
-        setMessage(
-          payload.lowCompatibilityConfirmationRequired
-            ? `${payload.error ?? "Baixa compatibilidade detectada."} Confirme tambem: ${payload.lowCompatibilityConfirmationRequired}`
-            : payload.error ?? "Nao foi possivel salvar os dados revisados."
-        );
+        setMessage("Não foi possível salvar o produto agora.");
         return;
       }
 
-      setMessage(`Produto atualizado localmente no W Ecommerce. Campos: ${(payload.changedFields ?? []).join(", ") || "campos revisados"}. Nada foi enviado ao Bling e nada foi publicado no Mercado Livre.`);
-      setShowConfirmation(false);
-      setConfirmation("");
-      setCompatibilityConfirmation("");
-      setSelectedReferenceFields(new Set());
-      setSelectedMercadoLivreFields(new Set());
+      closeProductPreview();
       setSelectedMercadoLivreSuggestion(null);
+      setSelectedMercadoLivreFields(new Set());
+      setReferenceImport(null);
+      setSelectedReferenceFields(new Set());
+      resetAmazonReferenceState(product);
       await search();
+      setMessage("Produto atualizado com sucesso.");
     } catch {
-      setMessage("Erro ao salvar localmente. Nenhuma escrita externa foi executada.");
+      setMessage("Não foi possível salvar o produto agora.");
     } finally {
+      saveInFlightRef.current = false;
       setSaving(false);
     }
   }
 
-  const checklist = [
-    ["Product interno localizado", Boolean(product)],
-    ["GTIN/EAN no Product", Boolean(product?.gtin)],
-    ["Banco GTIN do SaaS consultado", Boolean(lookup)],
-    ["GTIN encontrado no catalogo", Boolean(gtinCatalog)],
-    ["Campos revisados selecionados", selectedCount > 0],
-    ["Escrita externa bloqueada", true]
-  ] as const;
-  const checklistScore = Math.round((checklist.filter(([, ok]) => ok).length / checklist.length) * 100);
+
   const auxiliaryPanelTitle =
     activePanel === "product"
       ? "Produto interno"
@@ -2819,250 +2681,25 @@ export function IntelligentProductRegistrationPage() {
   );
 
   const extractedPanelContent = (
-    <div className="space-y-4">
-      <div className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3">
-        <div className="flex items-center justify-between gap-3">
-          <p className="font-semibold text-matrix-fg">Checklist da revisao</p>
-          <Badge tone={checklistScore >= 80 ? "success" : checklistScore >= 50 ? "warning" : "danger"}>{checklistScore}/100</Badge>
-        </div>
-        <div className="mt-3 grid gap-2">
-          {checklist.map(([label, ok]) => (
-            <div key={label} className="flex items-center justify-between gap-2 text-sm">
-              <span className="text-matrix-muted">{label}</span>
-              <Badge tone={ok ? "success" : "warning"}>{ok ? "OK" : "Pendente"}</Badge>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {product?.mercadoLivre ? (
-        <div className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3 text-sm">
-          <p className="font-semibold text-matrix-fg">Categoria Mercado Livre local</p>
-          <p className="mt-2 text-matrix-muted">Status: {product.mercadoLivre.status}</p>
-          <p className="text-matrix-muted">CategoryId: {formatValue(product.mercadoLivre.marketplaceCategoryId)}</p>
-          <p className="text-matrix-muted">Caminho: {formatValue(product.mercadoLivre.marketplaceCategoryPath)}</p>
-          <p className="text-matrix-muted">Atributos sincronizados: {product.mercadoLivre.requiredAttributesSynced ? "Sim" : "Nao"}</p>
-        </div>
-      ) : null}
-
-      {referenceImport ? (
-        <div className="rounded-lg border border-matrix-gold/35 bg-matrix-goldSoft/18 p-3 text-sm">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <p className="font-semibold text-matrix-fg">Revisar dados</p>
-              <p className="mt-1 text-xs text-matrix-muted">Compare a referencia ML com o Product local antes de aplicar qualquer dado.</p>
-            </div>
-            {selectedReferenceCompatibility ? (
-              <Badge tone={compatibilityTone(selectedReferenceCompatibility.level)}>{selectedReferenceCompatibility.label}</Badge>
-            ) : (
-              <Badge tone="warning">Revisao manual</Badge>
-            )}
-          </div>
-          {selectedReferenceCompatibility ? (
-            <CompatibilityDetails compatibility={selectedReferenceCompatibility} localProduct={product} />
-          ) : null}
-          {selectedReferenceCompatibility?.level === "LOW" ? (
-            <div className="mt-3 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-100">
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                <p>A referencia pode nao corresponder ao produto local. Revise titulo, aplicacao, marca, GTIN e imagens antes de salvar.</p>
-              </div>
-            </div>
-          ) : null}
-          <div className="mt-3 space-y-2">
-            {referenceReviewRows.map((row) => (
-              <div key={row.field} className="rounded-md border border-matrix-border bg-matrix-panel2/70 p-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="font-semibold text-matrix-fg">{row.label}</p>
-                  <span className="text-[11px] text-matrix-muted">{row.origin}</span>
-                </div>
-                <div className="mt-2 grid gap-2 text-xs md:grid-cols-2">
-                  <span className="rounded border border-matrix-border bg-matrix-panel p-2 text-matrix-muted">
-                    Atual: <span className="text-matrix-fg">{formatValue(row.current)}</span>
-                  </span>
-                  <span className="rounded border border-matrix-border bg-matrix-panel p-2 text-matrix-muted">
-                    Sugestao: <span className="text-matrix-fg">{formatValue(row.suggested)}</span>
-                  </span>
-                </div>
-                {row.note ? <p className="mt-2 text-xs text-matrix-muted">{row.note}</p> : null}
-                <label className={`mt-2 flex items-center gap-2 text-xs ${row.selectable ? "text-matrix-fg" : "text-matrix-muted"}`}>
-                  <input
-                    checked={selectedReferenceFields.has(row.field)}
-                    className="h-4 w-4 rounded border-matrix-border bg-matrix-panel2 accent-matrix-gold"
-                    disabled={!row.selectable}
-                    onChange={(event) => toggleReferenceField(row.field, event.target.checked)}
-                    type="checkbox"
-                  />
-                  Usar sugestao no salvamento local
-                </label>
-              </div>
-            ))}
-          </div>
-          <p className="mt-2 text-xs text-matrix-muted">
-            Salvar no W Ecommerce exige confirmacao: {SAVE_CONFIRMATION}. Nada sera enviado ao Bling ou Mercado Livre.
-          </p>
-        </div>
-      ) : null}
-
-      {selectedMercadoLivreSuggestion ? (
-        <div className="rounded-lg border border-matrix-gold/35 bg-matrix-goldSoft/18 p-3 text-sm">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <p className="font-semibold text-matrix-fg">Revisar sugestao Mercado Livre</p>
-              <p className="mt-1 text-xs text-matrix-muted">Resultado escolhido na busca por GTIN/titulo. Nada foi salvo ainda.</p>
-            </div>
-            {selectedMercadoLivreCompatibility ? (
-              <Badge tone={compatibilityTone(selectedMercadoLivreCompatibility.level)}>{selectedMercadoLivreCompatibility.label}</Badge>
-            ) : (
-              <Badge tone="warning">Revisao manual</Badge>
-            )}
-          </div>
-          <div className="mt-3 flex gap-3">
-            <ProductImage alt={selectedMercadoLivreSuggestion.title ?? "Sugestao Mercado Livre"} src={selectedMercadoLivreSuggestion.imageUrl} />
-            <div className="min-w-0 text-xs text-matrix-muted">
-              <p className="font-semibold text-matrix-fg">{formatValue(selectedMercadoLivreSuggestion.title)}</p>
-              <p className="mt-1">Fonte: {mercadoLivreSourceLabel(selectedMercadoLivreSuggestion.source)}</p>
-              <p>Preco referencia: {formatCurrency(selectedMercadoLivreSuggestion.price)}</p>
-              <p>CategoryId: {formatValue(selectedMercadoLivreSuggestion.categoryId)}</p>
-            </div>
-          </div>
-          {selectedMercadoLivreCompatibility ? (
-            <CompatibilityDetails compatibility={selectedMercadoLivreCompatibility} localProduct={product} />
-          ) : null}
-          {selectedMercadoLivreCompatibility?.level === "LOW" ? (
-            <div className="mt-3 rounded-md border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-100">
-              <div className="flex items-start gap-2">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                <p>A sugestao selecionada pode nao corresponder ao produto local. Revise titulo, aplicacao, marca, GTIN e imagens antes de salvar.</p>
-              </div>
-            </div>
-          ) : null}
-          <div className="mt-3 space-y-2">
-            {mercadoLivreSuggestionReviewRows.map((row) => (
-              <div key={row.field} className="rounded-md border border-matrix-border bg-matrix-panel2/70 p-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="font-semibold text-matrix-fg">{row.label}</p>
-                  <span className="text-[11px] text-matrix-muted">{row.origin}</span>
-                </div>
-                <div className="mt-2 grid gap-2 text-xs md:grid-cols-2">
-                  <span className="rounded border border-matrix-border bg-matrix-panel p-2 text-matrix-muted">
-                    Atual: <span className="text-matrix-fg">{formatValue(row.current)}</span>
-                  </span>
-                  <span className="rounded border border-matrix-border bg-matrix-panel p-2 text-matrix-muted">
-                    Sugestao: <span className="text-matrix-fg">{formatValue(row.suggested)}</span>
-                  </span>
-                </div>
-                {row.note ? <p className="mt-2 text-xs text-matrix-muted">{row.note}</p> : null}
-                <label className={`mt-2 flex items-center gap-2 text-xs ${row.selectable ? "text-matrix-fg" : "text-matrix-muted"}`}>
-                  <input
-                    checked={selectedMercadoLivreFields.has(row.field)}
-                    className="h-4 w-4 rounded border-matrix-border bg-matrix-panel2 accent-matrix-gold"
-                    disabled={!row.selectable}
-                    onChange={(event) => toggleMercadoLivreField(row.field, event.target.checked)}
-                    type="checkbox"
-                  />
-                  Usar sugestao no salvamento local
-                </label>
-              </div>
-            ))}
-          </div>
-          <p className="mt-2 text-xs text-matrix-muted">
-            Salvar no W Ecommerce exige confirmacao: {SAVE_CONFIRMATION}. Preco fica apenas como referencia e nao altera ProductPrice.
-          </p>
-        </div>
-      ) : null}
-
-      <div className="matrix-scroll max-h-[44vh] space-y-3 overflow-y-auto pr-1">
-        {suggestions.length ? (
-          suggestions.map((field) => (
-            <div key={field.field} className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="font-semibold text-matrix-fg">{field.label}</p>
-                  <p className="text-xs text-matrix-muted">Fonte: {formatValue(field.source)}</p>
-                </div>
-                {field.selectable ? (
-                  <label className="flex items-center gap-2 text-xs text-matrix-muted">
-                    <input
-                      checked={selectedFields.has(field.field)}
-                      className="h-4 w-4 rounded border-matrix-border bg-matrix-panel2 accent-matrix-gold"
-                      onChange={(event) => toggleField(field.field, event.target.checked)}
-                      type="checkbox"
-                    />
-                    usar este valor
-                  </label>
-                ) : (
-                  <Badge tone="muted">Bloqueado</Badge>
-                )}
-              </div>
-              <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
-                <div className="rounded-md border border-matrix-border bg-matrix-panel p-2">
-                  <p className="text-matrix-muted">Atual no Product</p>
-                  <p className="mt-1 break-words text-matrix-fg">{formatValue(field.currentValue)}</p>
-                </div>
-                <div className="rounded-md border border-matrix-border bg-matrix-panel p-2">
-                  <p className="text-matrix-muted">Sugerido</p>
-                  <p className="mt-1 break-words text-matrix-fg">{formatValue(field.suggestedValue)}</p>
-                </div>
-              </div>
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <Badge tone={confidenceTone(field.confidence)}>{field.confidence === null ? "Sem confianca" : `${field.confidence}%`}</Badge>
-                {field.warning ? <span className="text-xs text-matrix-muted">{field.warning}</span> : null}
-              </div>
-            </div>
-          ))
-        ) : (
-          <div className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-5 text-center">
-            <ImageIcon className="mx-auto h-10 w-10 text-matrix-muted" />
-            <p className="mt-3 font-semibold text-matrix-fg">Nenhum dado extraido ainda</p>
-            <p className="mt-1 text-sm text-matrix-muted">A comparacao aparece depois da busca.</p>
-          </div>
-        )}
-      </div>
-
-      {showConfirmation ? (
-        <div className="rounded-lg border border-matrix-gold/35 bg-matrix-goldSoft/18 p-3">
-          <p className="text-sm font-semibold text-matrix-fg">Confirmar salvamento local</p>
-          <p className="mt-1 text-xs text-matrix-muted">Salvar dados revisados localmente. Nada sera enviado ao Bling, Mercado Livre ou outros marketplaces.</p>
-          <input
-            className="mt-3 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm text-matrix-fg outline-none focus:border-matrix-gold/60"
-            onChange={(event) => setConfirmation(event.target.value)}
-            placeholder={SAVE_CONFIRMATION}
-            value={confirmation}
-          />
-          {requiresLowCompatibilityConfirmation ? (
-            <div className="mt-3 rounded-md border border-red-500/40 bg-red-500/10 p-3">
-              <div className="flex items-start gap-2 text-sm text-red-100">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                <p>Baixa compatibilidade detectada. Confirme manualmente que a sugestao corresponde ao produto antes de salvar qualquer campo local.</p>
-              </div>
-              <input
-                className="mt-3 w-full rounded-md border border-red-500/35 bg-matrix-panel px-3 py-2 text-sm text-matrix-fg outline-none focus:border-red-300"
-                onChange={(event) => setCompatibilityConfirmation(event.target.value)}
-                placeholder={LOW_COMPATIBILITY_CONFIRMATION}
-                value={compatibilityConfirmation}
-              />
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      <div className="space-y-2">
-        <Button className="w-full justify-center" disabled={!product || saving || selectedCount === 0} onClick={saveLocalValues} type="button">
-          <Save className="h-4 w-4" />
-          {saving ? "Salvando..." : "Salvar no W Ecommerce"}
-        </Button>
-        <Button className="w-full justify-center" disabled title="Envio para Bling sera ativado em fluxo seguro futuro com confirmacao." type="button" variant="secondary">
-          <ShieldCheck className="h-4 w-4" />
-          Enviar para Bling
-        </Button>
-      </div>
-
-      <p className="rounded-md border border-matrix-border bg-matrix-panel2/58 p-3 text-xs text-matrix-muted">
-        Mercado Livre, Amazon, Bling e marketplaces nao recebem nenhuma escrita nesta tela. Preco e estoque ficam fora do salvamento inteligente.
-      </p>
-    </div>
+    <IntelligentProductPreview
+      brand={previewBrand}
+      canSave={Boolean(product)}
+      images={previewImages}
+      onBack={closeProductPreview}
+      onBrandChange={setPreviewBrand}
+      onMakePrimary={makeSelectedPreviewImagePrimary}
+      onNavigateImage={navigatePreviewImage}
+      onRemoveImage={removeSelectedPreviewImage}
+      onSave={saveProductPreview}
+      onSelectImage={setPreviewSelectedIndex}
+      onTitleChange={setPreviewTitle}
+      saving={saving}
+      selectedIndex={previewSelectedIndex}
+      showBrand={previewBrandVisible}
+      title={previewTitle}
+    />
   );
+
 
   const historyPanelContent = (
     <div className="space-y-4">
@@ -3419,20 +3056,6 @@ export function IntelligentProductRegistrationPage() {
                   Referencias de cadastro
                 </h3>
                 <p className="text-sm text-matrix-muted">Resultados Amazon e Mercado Livre para revisao antes de qualquer uso local.</p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button onClick={() => setActivePanel("product")} type="button" variant="secondary">
-                  <PackageSearch className="h-4 w-4" />
-                  Produto interno
-                </Button>
-                <Button onClick={() => setActivePanel("extracted")} type="button" variant="secondary">
-                  <Database className="h-4 w-4" />
-                  Dados extraidos
-                </Button>
-                <Button onClick={() => setActivePanel("history")} type="button" variant="secondary">
-                  <ShieldCheck className="h-4 w-4" />
-                  Historico / Revisao
-                </Button>
               </div>
             </div>
           </div>
@@ -4223,19 +3846,33 @@ export function IntelligentProductRegistrationPage() {
       </div>
 
       {activePanel ? (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/70 p-0 sm:p-4">
-          <div className="flex h-full w-full max-w-3xl flex-col border border-matrix-border bg-matrix-panel shadow-glow sm:rounded-lg">
-            <div className="flex flex-wrap items-start justify-between gap-3 border-b border-matrix-border px-4 py-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-matrix-goldDark">Cadastro Inteligente</p>
-                <h3 className="mt-1 text-xl font-semibold text-matrix-fg">{auxiliaryPanelTitle}</h3>
-                <p className="mt-1 text-sm text-matrix-muted">Informacoes locais para revisao. Nada sera publicado automaticamente.</p>
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/80 p-0 sm:p-4">
+          <div className="flex h-[100dvh] w-full max-w-6xl flex-col overflow-hidden border border-matrix-gold/40 bg-matrix-panel shadow-glow sm:h-[min(94dvh,960px)] sm:rounded-lg">
+            <div className="flex items-start justify-between gap-3 border-b border-matrix-border px-4 py-4 sm:px-6">
+              <div className="flex min-w-0 items-start gap-3">
+                <WandSparkles className="mt-1 h-5 w-5 shrink-0 text-matrix-gold" />
+                <div className="min-w-0">
+                  <h3 className="text-xl font-semibold text-matrix-fg">
+                    {activePanel === "extracted" ? "Cadastro inteligente" : auxiliaryPanelTitle}
+                  </h3>
+                  <p className="mt-1 text-sm text-matrix-muted">
+                    {activePanel === "extracted"
+                      ? "Revise as informações e salve o produto."
+                      : "Informações locais para revisão."}
+                  </p>
+                </div>
               </div>
-              <Button onClick={() => setActivePanel(null)} type="button" variant="secondary">
-                Fechar
-              </Button>
+              <button
+                aria-label="Fechar"
+                className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-matrix-border bg-matrix-panel2 text-matrix-muted transition hover:border-matrix-gold/50 hover:text-matrix-fg"
+                onClick={activePanel === "extracted" ? closeProductPreview : () => setActivePanel(null)}
+                title="Fechar"
+                type="button"
+              >
+                <X className="h-5 w-5" />
+              </button>
             </div>
-            <div className="matrix-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-4">
+            <div className={`min-h-0 flex-1 overflow-x-hidden p-4 sm:p-6 ${activePanel === "extracted" ? "overflow-hidden" : "matrix-scroll overflow-y-auto"}`}>
               {activePanel === "product" ? productPanelContent : activePanel === "extracted" ? extractedPanelContent : historyPanelContent}
             </div>
           </div>
