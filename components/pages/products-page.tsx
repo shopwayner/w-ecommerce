@@ -167,7 +167,8 @@ const statusLabel: Record<string, string> = {
 
 type ImageFilter = "all" | "yes" | "no";
 type StockFilter = "all" | "positive" | "negative" | "zero";
-type ProductFilterMenu = "images" | "stock" | null;
+type BlingStatusFilter = "all" | "active" | "inactive" | "excluded";
+type ProductFilterMenu = "images" | "stock" | "blingStatus" | null;
 
 const pageSizeOptions = [20, 50, 100];
 
@@ -183,6 +184,29 @@ const stockFilterLabels: Record<StockFilter, string> = {
   negative: "Menor que zero",
   zero: "Igual a zero"
 };
+
+const blingStatusFilterLabels: Record<BlingStatusFilter, string> = {
+  all: "Todos",
+  active: "Ativos no Bling",
+  inactive: "Inativos no Bling",
+  excluded: "Excluidos no Bling"
+};
+
+function getBlingCatalogStatusLabel(status: string | null | undefined) {
+  const normalized = status?.trim().toUpperCase();
+  if (normalized === "ACTIVE") return "Ativo no Bling";
+  if (normalized === "INACTIVE") return "Inativo no Bling";
+  if (normalized === "DELETED") return "Excluido no Bling";
+  return "Status do Bling nao confirmado";
+}
+
+function getBlingCatalogStatusMessage(status: string | null | undefined) {
+  const normalized = status?.trim().toUpperCase();
+  if (normalized === "INACTIVE") return "Este produto esta inativo no Bling.";
+  if (normalized === "DELETED") return "Este produto foi excluido no Bling e permanece no sistema para preservar o historico.";
+  if (normalized === "UNKNOWN") return "O status deste produto ainda nao foi atualizado.";
+  return null;
+}
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("pt-BR", {
@@ -432,6 +456,7 @@ export function ProductsPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [imageFilter, setImageFilter] = useState<ImageFilter>("all");
   const [stockFilter, setStockFilter] = useState<StockFilter>("all");
+  const [blingStatusFilter, setBlingStatusFilter] = useState<BlingStatusFilter>("all");
   const [openFilterMenu, setOpenFilterMenu] = useState<ProductFilterMenu>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -499,9 +524,13 @@ export function ProductsPage() {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [imageFilter, pageSize, searchQuery, stockFilter]);
+  }, [blingStatusFilter, imageFilter, pageSize, searchQuery, stockFilter]);
 
   const importedFromBlingCount = useMemo(() => products.filter((product) => product.blingAccount).length, [products]);
+  const unknownBlingStatusCount = useMemo(
+    () => products.filter((product) => product.blingStatus?.trim().toUpperCase() === "UNKNOWN").length,
+    [products]
+  );
 
   const filteredProducts = useMemo(() => {
     const normalizedSearch = searchQuery.trim().toLowerCase();
@@ -523,9 +552,15 @@ export function ProductsPage() {
           .join(" ")
           .toLowerCase()
           .includes(normalizedSearch);
-      return matchesSearch && matchesImage && matchesStock;
+      const blingStatus = product.blingStatus?.trim().toUpperCase();
+      const matchesBlingStatus =
+        blingStatusFilter === "all" ||
+        (blingStatusFilter === "active" && blingStatus === "ACTIVE") ||
+        (blingStatusFilter === "inactive" && blingStatus === "INACTIVE") ||
+        (blingStatusFilter === "excluded" && blingStatus === "DELETED");
+      return matchesSearch && matchesImage && matchesStock && matchesBlingStatus;
     });
-  }, [imageFilter, products, searchQuery, stockFilter]);
+  }, [blingStatusFilter, imageFilter, products, searchQuery, stockFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
 
@@ -793,6 +828,39 @@ export function ProductsPage() {
               ) : null}
             </div>
 
+            <div className="relative">
+              <Button
+                aria-expanded={openFilterMenu === "blingStatus"}
+                className="min-w-44 justify-between"
+                onClick={() => setOpenFilterMenu((current) => (current === "blingStatus" ? null : "blingStatus"))}
+                type="button"
+                variant="secondary"
+              >
+                {blingStatusFilterLabels[blingStatusFilter]}
+                <ChevronDown className="h-4 w-4" />
+              </Button>
+              {openFilterMenu === "blingStatus" ? (
+                <div className="absolute right-0 top-[calc(100%+0.35rem)] z-30 w-56 rounded-md border border-matrix-border bg-matrix-panel p-1 shadow-glow">
+                  {(["all", "active", "inactive", "excluded"] as BlingStatusFilter[]).map((option) => (
+                    <button
+                      key={option}
+                      className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition hover:bg-matrix-goldSoft/30 ${
+                        blingStatusFilter === option ? "text-matrix-goldDark" : "text-matrix-fg"
+                      }`}
+                      onClick={() => {
+                        setBlingStatusFilter(option);
+                        setOpenFilterMenu(null);
+                      }}
+                      type="button"
+                    >
+                      {blingStatusFilterLabels[option]}
+                      {blingStatusFilter === option ? <span className="text-xs">Ativo</span> : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
             <span className="inline-flex h-10 items-center rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 text-sm font-semibold text-matrix-fg">
               Pagina {currentPage} de {totalPages}
             </span>
@@ -817,6 +885,14 @@ export function ProductsPage() {
             <span className="text-xs text-matrix-muted">{visibleProductsLabel}</span>
           </div>
         </div>
+        {unknownBlingStatusCount > 0 ? (
+          <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              O status de {unknownBlingStatusCount} {unknownBlingStatusCount === 1 ? "produto ainda nao foi atualizado" : "produtos ainda nao foi atualizado"}.
+            </span>
+          </div>
+        ) : null}
         {selectedProducts.length ? (
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-matrix-gold/25 bg-matrix-goldSoft/28 px-3 py-2">
             <p className="text-sm font-semibold text-matrix-goldDark">
@@ -869,9 +945,16 @@ export function ProductsPage() {
                   <ImageIcon className="h-4 w-4 text-matrix-muted" />
                 )}
               </div>
-              <div className="flex min-w-0 items-center gap-1">
-                <span className="min-w-0 truncate">{product.name}</span>
-                <ProductCopyButton label="Copiar titulo" text={product.name} />
+              <div className="min-w-0">
+                <div className="flex min-w-0 items-center gap-1">
+                  <span className="min-w-0 truncate">{product.name}</span>
+                  <ProductCopyButton label="Copiar titulo" text={product.name} />
+                </div>
+                {getBlingCatalogStatusMessage(product.blingStatus) ? (
+                  <p className="mt-1 max-w-[360px] truncate text-xs text-amber-500">
+                    {getBlingCatalogStatusMessage(product.blingStatus)}
+                  </p>
+                ) : null}
               </div>
             </div>,
             <div key={`${product.id}-sku`} className="flex min-w-0 items-center gap-1">
@@ -1144,6 +1227,7 @@ function ProductDetailsModal({
     { label: "Unidade", value: product.unit, Icon: ClipboardList },
     { label: "Categoria", value: product.category, Icon: Folder },
     { label: "Origem", value: originText, Icon: Globe2 },
+    { label: "Status no Bling", value: getBlingCatalogStatusLabel(product.blingStatus), Icon: ShieldCheck },
     { label: "Custo", value: formatCurrencyDisplay(product.costPriceDisplay ?? product.displayValue), Icon: DollarSign },
     { label: "Preco de venda", value: formatCurrencyDisplay(product.salePriceDisplay), Icon: Tag },
     { label: "Estoque", value: product.stock, Icon: Box },
@@ -1360,6 +1444,13 @@ function ProductDetailsModal({
             </div>
           </div>
         </div>
+
+        {getBlingCatalogStatusMessage(product.blingStatus) ? (
+          <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{getBlingCatalogStatusMessage(product.blingStatus)}</span>
+          </div>
+        ) : null}
 
         {feedback ? (
           <div className="mt-4 flex items-center gap-2 rounded-lg border border-green-500/25 bg-green-500/10 px-3 py-2 text-sm font-semibold text-green-700">

@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
 import { getUserAccountContext } from "@/lib/services/account-context-service";
+import { readCanonicalBlingStatusFromAttributes } from "@/lib/services/bling-product-import-service";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { productCreateSchema } from "@/lib/validation";
 
@@ -325,7 +326,7 @@ function serializeProduct(product: ProductListRecord) {
     marketplaceStores: {
       mercadoLivre: false
     },
-    blingStatus: getStringAttribute(attributes, "blingStatus"),
+    blingStatus: readCanonicalBlingStatusFromAttributes(attributes),
     confidenceScore: product.confidenceScore,
     weight: product.weight?.toString() ?? null,
     height: product.height?.toString() ?? null,

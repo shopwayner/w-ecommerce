@@ -40,6 +40,34 @@ type NormalizedBlingProduct = {
   isVariation: boolean;
 };
 
+export type CanonicalBlingProductStatus = "ACTIVE" | "INACTIVE" | "DELETED" | "UNKNOWN";
+
+type NormalizedBlingProductStatus = {
+  status: CanonicalBlingProductStatus;
+  externalStatus: "A" | "I" | "E" | null;
+};
+
+export type BlingProductStatusBackfillReport = {
+  mode: "DRY_RUN" | "CONFIRMED";
+  catalogProductsFound: number;
+  catalogPagesFound: number;
+  linkedProducts: number;
+  externalIdsLocated: number;
+  active: number;
+  inactive: number;
+  deleted: number;
+  unknown: number;
+  divergences: number;
+  recordsWouldChange: number;
+  recordsAlreadyCorrect: number;
+  linkedRecordsWithoutCatalogStatus: number;
+  catalogRecordsWithoutLink: number;
+  conflictingExternalIds: number;
+  errors: number;
+  completed: boolean;
+  writesPerformed: number;
+};
+
 export type BlingProductDryRun = {
   connectionReady: true;
   totalReportedByBling: number | null;
@@ -107,6 +135,30 @@ function firstNumber(...values: unknown[]) {
     if (normalized !== null) return normalized;
   }
   return null;
+}
+
+export function normalizeBlingProductStatus(value: unknown): NormalizedBlingProductStatus {
+  const normalized = text(value).toUpperCase();
+  if (normalized === "A" || normalized === "ACTIVE") return { status: "ACTIVE", externalStatus: "A" };
+  if (normalized === "I" || normalized === "INACTIVE") return { status: "INACTIVE", externalStatus: "I" };
+  if (normalized === "E" || normalized === "DELETED") return { status: "DELETED", externalStatus: "E" };
+  return { status: "UNKNOWN", externalStatus: null };
+}
+
+export function readCanonicalBlingStatusFromAttributes(attributes: unknown): CanonicalBlingProductStatus {
+  const bling = record(record(attributes).bling);
+  const normalized = normalizeBlingProductStatus(bling.status);
+  const externalStatus = text(bling.externalStatus).toUpperCase();
+  const statusCheckedAt = text(bling.statusCheckedAt);
+  const checkedAtTimestamp = statusCheckedAt ? Date.parse(statusCheckedAt) : Number.NaN;
+  if (
+    normalized.status === "UNKNOWN" ||
+    normalized.externalStatus !== externalStatus ||
+    !Number.isFinite(checkedAtTimestamp)
+  ) {
+    return "UNKNOWN";
+  }
+  return normalized.status;
 }
 
 function extractReportedTotal(payload: BlingCatalogResponse) {
@@ -187,14 +239,20 @@ function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchCatalogPage(input: { organizationId: string; connectionId: string; page: number; readOnly: boolean }) {
+async function fetchCatalogPage(input: {
+  organizationId: string;
+  connectionId: string;
+  page: number;
+  readOnly: boolean;
+  criterion?: 1 | 5;
+}) {
   for (let attempt = 1; attempt <= maxRetryAttempts; attempt += 1) {
     try {
       const request = {
         organizationId: input.organizationId,
         connectionId: input.connectionId,
         path: "/produtos",
-        query: { pagina: input.page, limite: pageSize }
+        query: { pagina: input.page, limite: pageSize, criterio: input.criterion ?? 1 }
       };
       return input.readOnly
         ? await blingApiClient.requestReadOnly<BlingCatalogResponse>(request)
@@ -249,7 +307,12 @@ async function validateConnection(organizationId: string, connectionId: string) 
   return connection;
 }
 
-async function fetchAllProducts(input: { organizationId: string; connectionId: string; readOnly: boolean }) {
+async function fetchAllProducts(input: {
+  organizationId: string;
+  connectionId: string;
+  readOnly: boolean;
+  criterion?: 1 | 5;
+}) {
   const products: NormalizedBlingProduct[] = [];
   let page = 1;
   let pagesFound = 0;
@@ -284,19 +347,155 @@ async function fetchAllProducts(input: { organizationId: string; connectionId: s
   return { products, pagesFound, totalReportedByBling, errors, completed };
 }
 
-function safeProductAttributes(current: Prisma.JsonValue | null, product: NormalizedBlingProduct) {
+function safeProductAttributes(
+  current: Prisma.JsonValue | null,
+  product: NormalizedBlingProduct,
+  connectionId: string,
+  statusCheckedAt = new Date().toISOString()
+) {
   const existing = record(current);
+  const normalizedStatus = normalizeBlingProductStatus(product.status);
   return {
     ...existing,
     bling: {
+      ...record(existing.bling),
       externalProductId: product.externalProductId,
       parentExternalProductId: product.parentExternalProductId,
       sku: product.sku,
-      status: product.status,
+      connectionId,
+      status: normalizedStatus.status,
+      externalStatus: normalizedStatus.externalStatus,
+      statusCheckedAt,
       format: product.format,
       source: "CATALOG_READ"
     }
   } as Prisma.InputJsonValue;
+}
+
+export function mergeBlingProductStatusAttributes(
+  current: Prisma.JsonValue | null,
+  status: CanonicalBlingProductStatus,
+  externalStatus: "A" | "I" | "E" | null,
+  statusCheckedAt: string
+) {
+  const existing = record(current);
+  return {
+    ...existing,
+    bling: {
+      ...record(existing.bling),
+      status,
+      externalStatus,
+      statusCheckedAt
+    }
+  } as Prisma.InputJsonValue;
+}
+
+function productStatusMetadataMatches(
+  attributes: Prisma.JsonValue | null,
+  expected: NormalizedBlingProductStatus
+) {
+  const bling = record(record(attributes).bling);
+  return (
+    readCanonicalBlingStatusFromAttributes(attributes) === expected.status &&
+    text(bling.externalStatus).toUpperCase() === expected.externalStatus
+  );
+}
+
+async function reconcileLinkedStatusSnapshot(input: {
+  organizationId: string;
+  connectionId: string;
+  products: NormalizedBlingProduct[];
+  confirm: boolean;
+  fetched: { pagesFound: number; errors: number; completed: boolean };
+}) {
+  const statusByExternalId = new Map<string, NormalizedBlingProductStatus>();
+  const conflictingExternalIds = new Set<string>();
+  for (const product of input.products) {
+    const nextStatus = normalizeBlingProductStatus(product.status);
+    const currentStatus = statusByExternalId.get(product.externalProductId);
+    if (!currentStatus) {
+      statusByExternalId.set(product.externalProductId, nextStatus);
+    } else if (
+      currentStatus.status !== nextStatus.status ||
+      currentStatus.externalStatus !== nextStatus.externalStatus
+    ) {
+      conflictingExternalIds.add(product.externalProductId);
+    }
+  }
+
+  const mappings = await prisma.productExternalMapping.findMany({
+    where: { organizationId: input.organizationId, connectionId: input.connectionId },
+    select: {
+      externalProductId: true,
+      product: { select: { id: true, attributes: true } }
+    }
+  });
+  const mappedExternalIds = new Set(mappings.map((mapping) => mapping.externalProductId));
+  const changes = mappings.flatMap((mapping) => {
+    const status = statusByExternalId.get(mapping.externalProductId);
+    if (!status || conflictingExternalIds.has(mapping.externalProductId)) return [];
+    if (productStatusMetadataMatches(mapping.product.attributes, status)) return [];
+    return [{ product: mapping.product, status }];
+  });
+  const linkedStatuses = mappings.map((mapping) => statusByExternalId.get(mapping.externalProductId));
+  const linkedRecordsWithoutCatalogStatus = linkedStatuses.filter((status) => !status).length;
+  const linkedConflicts = mappings.filter((mapping) => conflictingExternalIds.has(mapping.externalProductId)).length;
+  const linkedUnknownStatuses = linkedStatuses.filter((status) => status?.status === "UNKNOWN").length;
+
+  let writesPerformed = 0;
+  if (input.confirm) {
+    if (!input.fetched.completed || input.fetched.errors || linkedConflicts || linkedUnknownStatuses) {
+      throw new Error("O catalogo Bling apresentou divergencias; nenhuma atualizacao de status foi executada.");
+    }
+    if (linkedRecordsWithoutCatalogStatus > 0) {
+      throw new Error("Nem todos os produtos vinculados possuem status confirmado; nenhuma atualizacao foi executada.");
+    }
+
+    const statusCheckedAt = new Date().toISOString();
+    for (let start = 0; start < changes.length; start += 100) {
+      const batch = changes.slice(start, start + 100);
+      await prisma.$transaction(
+        batch.map((change) =>
+          prisma.product.update({
+            where: { id: change.product.id },
+            data: {
+              attributes: mergeBlingProductStatusAttributes(
+                change.product.attributes,
+                change.status.status,
+                change.status.externalStatus,
+                statusCheckedAt
+              )
+            }
+          })
+        )
+      );
+      writesPerformed += batch.length;
+    }
+  }
+
+  const countStatus = (status: CanonicalBlingProductStatus) =>
+    linkedStatuses.filter((candidate) => candidate?.status === status).length;
+
+  return {
+    mode: input.confirm ? "CONFIRMED" : "DRY_RUN",
+    catalogProductsFound: statusByExternalId.size,
+    catalogPagesFound: input.fetched.pagesFound,
+    linkedProducts: mappings.length,
+    externalIdsLocated: mappings.length - linkedRecordsWithoutCatalogStatus,
+    active: countStatus("ACTIVE"),
+    inactive: countStatus("INACTIVE"),
+    deleted: countStatus("DELETED"),
+    unknown: linkedUnknownStatuses + linkedRecordsWithoutCatalogStatus + linkedConflicts,
+    divergences: changes.length + linkedRecordsWithoutCatalogStatus + linkedConflicts,
+    recordsWouldChange: changes.length,
+    recordsAlreadyCorrect: mappings.length - changes.length - linkedRecordsWithoutCatalogStatus - linkedConflicts,
+    linkedRecordsWithoutCatalogStatus,
+    catalogRecordsWithoutLink: [...statusByExternalId.keys()].filter((externalId) => !mappedExternalIds.has(externalId)).length,
+    conflictingExternalIds: conflictingExternalIds.size,
+    errors: input.fetched.errors,
+    completed: input.fetched.completed,
+    writesPerformed
+  } satisfies BlingProductStatusBackfillReport;
 }
 
 function draftData(product: NormalizedBlingProduct, organizationId: string, erpConnectionId: string, connectionId: string) {
@@ -421,7 +620,7 @@ async function applyPage(input: {
               width: product.width,
               depth: product.depth,
               source: "BLING",
-              attributes: safeProductAttributes(mapping.product.attributes, product)
+              attributes: safeProductAttributes(mapping.product.attributes, product, input.connectionId)
             }
         });
         await updateLocalPrice(transaction, input.organizationId, mapping.product.id, product);
@@ -462,7 +661,7 @@ async function applyPage(input: {
             height: product.height,
             width: product.width,
             depth: product.depth,
-            attributes: safeProductAttributes(null, product),
+            attributes: safeProductAttributes(null, product, input.connectionId),
             mappings: {
               create: {
                 organizationId: input.organizationId,
@@ -547,17 +746,57 @@ export class BlingProductImportService {
     });
     if (!erpConnection) throw new Error("A integracao Bling precisa ser configurada antes da sincronizacao.");
 
-    return prisma.erpSyncJob.create({
-      data: {
-        organizationId: input.organizationId,
-        erpConnectionId: erpConnection.id,
-        blingConnectionId: input.connectionId,
-        provider: ERPProvider.BLING,
-        type: "PRODUCTS_FULL_SYNC",
-        status: "PENDING",
-        currentPage: 1
-      },
-      select: { id: true, status: true, currentPage: true }
+    const recentLease = new Date(Date.now() - staleJobLeaseMs);
+    const lockKey = `bling-products:${input.organizationId}:${input.connectionId}`;
+    return prisma.$transaction(async (transaction) => {
+      await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+      const existingJob = await transaction.erpSyncJob.findFirst({
+        where: {
+          organizationId: input.organizationId,
+          blingConnectionId: input.connectionId,
+          type: "PRODUCTS_FULL_SYNC",
+          OR: [
+            { status: "PENDING", createdAt: { gte: recentLease } },
+            { status: "PROCESSING", updatedAt: { gte: recentLease } }
+          ]
+        },
+        select: { id: true }
+      });
+      if (existingJob) throw new Error("Ja existe uma sincronizacao de produtos em andamento para esta conta.");
+
+      return transaction.erpSyncJob.create({
+        data: {
+          organizationId: input.organizationId,
+          erpConnectionId: erpConnection.id,
+          blingConnectionId: input.connectionId,
+          provider: ERPProvider.BLING,
+          type: "PRODUCTS_FULL_SYNC",
+          status: "PENDING",
+          currentPage: 1
+        },
+        select: { id: true, status: true, currentPage: true }
+      });
+    });
+  }
+
+  async reconcileProductStatuses(input: {
+    organizationId: string;
+    connectionId: string;
+    confirm: boolean;
+  }): Promise<BlingProductStatusBackfillReport> {
+    await validateConnection(input.organizationId, input.connectionId);
+    const fetched = await fetchAllProducts({
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      readOnly: true,
+      criterion: 5
+    });
+    return reconcileLinkedStatusSnapshot({
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      products: fetched.products,
+      confirm: input.confirm,
+      fetched
     });
   }
 
@@ -578,24 +817,46 @@ export class BlingProductImportService {
     if (!job) throw new Error("Sincronizacao nao encontrada, ja concluida ou em andamento.");
     await validateConnection(input.organizationId, input.connectionId);
 
-    const claimed = await prisma.erpSyncJob.updateMany({
-      where: {
-        id: job.id,
-        organizationId: input.organizationId,
-        blingConnectionId: input.connectionId,
-        type: "PRODUCTS_FULL_SYNC",
-        OR: [
-          { status: { in: ["PENDING", "FAILED"] } },
-          { status: "PROCESSING", updatedAt: { lt: staleBefore } }
-        ]
-      },
-      data: { status: "PROCESSING", startedAt: job.startedAt ?? new Date(), errorMessage: null }
+    const lockKey = `bling-products:${input.organizationId}:${input.connectionId}`;
+    const claimed = await prisma.$transaction(async (transaction) => {
+      await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+      const competingJob = await transaction.erpSyncJob.findFirst({
+        where: {
+          id: { not: job.id },
+          organizationId: input.organizationId,
+          blingConnectionId: input.connectionId,
+          type: "PRODUCTS_FULL_SYNC",
+          status: "PROCESSING",
+          updatedAt: { gte: staleBefore }
+        },
+        select: { id: true }
+      });
+      if (competingJob) throw new Error("Ja existe uma sincronizacao de produtos em andamento para esta conta.");
+      return transaction.erpSyncJob.updateMany({
+        where: {
+          id: job.id,
+          organizationId: input.organizationId,
+          blingConnectionId: input.connectionId,
+          type: "PRODUCTS_FULL_SYNC",
+          OR: [
+            { status: { in: ["PENDING", "FAILED"] } },
+            { status: "PROCESSING", updatedAt: { lt: staleBefore } }
+          ]
+        },
+        data: { status: "PROCESSING", startedAt: job.startedAt ?? new Date(), errorMessage: null }
+      });
     });
     if (claimed.count !== 1) throw new Error("Esta sincronizacao ja esta em andamento.");
 
     let page = Math.max(1, job.currentPage);
     let totalReportedByBling: number | null = null;
     try {
+      await this.reconcileProductStatuses({
+        organizationId: input.organizationId,
+        connectionId: input.connectionId,
+        confirm: true
+      });
+
       for (; page <= maxSafetyPages; page += 1) {
         const payload = await fetchCatalogPage({ organizationId: input.organizationId, connectionId: input.connectionId, page, readOnly: false });
         const normalized = normalizePage(payload);
