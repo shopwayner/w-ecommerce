@@ -35,6 +35,7 @@ import {
   normalizeIntelligentProductPreviewImages,
   normalizeIntelligentProductPreviewTitle
 } from "@/lib/intelligent-product-preview";
+import { parseMercadoLivreReferenceInput } from "@/lib/mercado-livre-manual-reference";
 
 const AMAZON_LOGO_SRC = "/marketplaces/amazon.png";
 const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre.png";
@@ -279,45 +280,20 @@ type MercadoLivreItemDetailResponse = {
   error?: string;
 };
 
-type MercadoLivreReferenceImport = {
-  id: string;
-  productId: string | null;
-  externalItemId: string;
-  title: string | null;
-  description: string | null;
-  gtin: string | null;
-  brand: string | null;
-  partNumber: string | null;
-  categoryId: string | null;
-  categoryName: string | null;
-  price: number | null;
-  currencyId: string | null;
-  permalink: string | null;
-  thumbnail: string | null;
-  pictures: unknown;
-  attributes: unknown;
-  status: string;
-  source: string;
-};
-
-type MercadoLivreReferenceDiagnostic = {
-  endpoint: string;
-  status: number | null;
-  errorCode: string | null;
-  errorMessage: string | null;
-  requestId: string | null;
-  correlationId: string | null;
-};
-
-type MercadoLivreReferenceImportResponse = {
-  reference?: MercadoLivreReferenceImport;
-  normalizedItemId?: string;
-  warnings?: string[];
-  readOnly?: boolean;
-  externalWrite?: boolean;
-  diagnostic?: MercadoLivreReferenceDiagnostic | null;
-  diagnostics?: MercadoLivreReferenceDiagnostic[];
-  originalUrl?: string | null;
+type MercadoLivreManualReferenceResponse = {
+  item?: {
+    itemId: string;
+    title: string;
+    brand: string | null;
+    images: string[];
+    gtin: string | null;
+    category: {
+      id: string | null;
+      name: string | null;
+      path: string | null;
+    };
+    attributes: Array<{ id: string | null; name: string | null; value: string | null }>;
+  };
   error?: string;
 };
 
@@ -1234,13 +1210,10 @@ export function IntelligentProductRegistrationPage() {
   const [mercadoLivreLocalFilters, setMercadoLivreLocalFilters] = useState<Set<MercadoLivreLocalFilter>>(defaultMercadoLivreLocalFilters);
   const [mercadoLivreFiltersOpen, setMercadoLivreFiltersOpen] = useState(false);
   const mercadoLivreFiltersRef = useRef<HTMLDivElement>(null);
-  const [referenceImportOpen, setReferenceImportOpen] = useState(false);
-  const [referenceImportInput, setReferenceImportInput] = useState("");
-  const [referenceImportLoading, setReferenceImportLoading] = useState(false);
-  const [referenceImportError, setReferenceImportError] = useState<string | null>(null);
-  const [referenceImportErrorDetails, setReferenceImportErrorDetails] = useState<MercadoLivreReferenceImportResponse | null>(null);
-  const [referenceImport, setReferenceImport] = useState<MercadoLivreReferenceImport | null>(null);
-  const [selectedReferenceFields, setSelectedReferenceFields] = useState<Set<string>>(new Set());
+  const [manualReferenceInput, setManualReferenceInput] = useState("");
+  const [manualReferenceLoading, setManualReferenceLoading] = useState(false);
+  const [manualReferenceMessage, setManualReferenceMessage] = useState<string | null>(null);
+  const [manualReferenceError, setManualReferenceError] = useState(false);
   const [selectedMercadoLivreResultKey, setSelectedMercadoLivreResultKey] = useState<string | null>(null);
   const [mercadoLivreDetailLoadingKey, setMercadoLivreDetailLoadingKey] = useState<string | null>(null);
   const [mercadoLivreDetailError, setMercadoLivreDetailError] = useState<{ key: string; message: string } | null>(null);
@@ -1260,6 +1233,7 @@ export function IntelligentProductRegistrationPage() {
   const [previewImages, setPreviewImages] = useState<string[]>([]);
   const [previewSelectedIndex, setPreviewSelectedIndex] = useState(0);
   const saveInFlightRef = useRef(false);
+  const manualReferenceRequestRef = useRef(0);
   const mercadoLivreDetailRequestsRef = useRef<Set<string>>(new Set());
   const mercadoLivreLoadedRawPagesRef = useRef<Set<number>>(new Set());
 
@@ -1459,26 +1433,6 @@ export function IntelligentProductRegistrationPage() {
     };
   }, [mercadoLivreFiltersOpen]);
 
-  const referenceReviewRows = referenceImport
-    ? [
-        { field: "name", label: "Titulo", current: product?.name ?? null, suggested: referenceImport.title, origin: "Anuncio ML", selectable: Boolean(referenceImport.title) },
-        { field: "description", label: "Descricao", current: product?.description ?? null, suggested: referenceImport.description, origin: "Descricao ML", selectable: Boolean(referenceImport.description) },
-        { field: "brand", label: "Marca", current: product?.brand ?? null, suggested: referenceImport.brand, origin: "Atributos ML", selectable: Boolean(referenceImport.brand) },
-        { field: "ean", label: "GTIN", current: product?.gtin ?? null, suggested: referenceImport.gtin, origin: "Atributos ML", selectable: Boolean(referenceImport.gtin) },
-        { field: "partNumber", label: "Part number", current: null, suggested: referenceImport.partNumber, origin: "Atributos ML", selectable: false, note: "Guardado no draft ML; aplicacao em campo proprio vira etapa futura." },
-        {
-          field: "mercadoLivreCategory",
-          label: "Categoria ML",
-          current: product?.mercadoLivre?.marketplaceCategoryPath ?? product?.mercadoLivre?.marketplaceCategoryId ?? null,
-          suggested: referenceImport.categoryName ?? referenceImport.categoryId,
-          origin: "Categoria ML",
-          selectable: Boolean(referenceImport.categoryName || referenceImport.categoryId),
-          note: "Salva como sugestao local Mercado Livre. Nada e publicado."
-        },
-        { field: "imageUrl", label: "Imagem principal", current: product?.imageUrl ?? null, suggested: referenceImport.thumbnail, origin: "Imagem ML", selectable: Boolean(referenceImport.thumbnail) },
-        { field: "additionalImageUrls", label: "Imagens adicionais", current: null, suggested: Array.isArray(referenceImport.pictures) ? `${referenceImport.pictures.length} imagens` : null, origin: "Imagens ML", selectable: Array.isArray(referenceImport.pictures) && referenceImport.pictures.length > 0, note: "Salva URLs adicionais na galeria local do produto." }
-      ]
-    : [];
   const mercadoLivreSuggestionReviewRows = selectedMercadoLivreSuggestion
     ? [
         { field: "name", label: "Titulo", current: product?.name ?? null, suggested: selectedMercadoLivreSuggestion.title, origin: mercadoLivreSourceLabel(selectedMercadoLivreSuggestion.source), selectable: Boolean(selectedMercadoLivreSuggestion.title) },
@@ -1528,7 +1482,7 @@ export function IntelligentProductRegistrationPage() {
   const amazonDraftBase = createAmazonReferenceDraft(product);
   const amazonDraftFieldsSelectedElsewhere = AMAZON_DRAFT_FIELDS.filter((field) => {
     if (field !== "name" && field !== "brand") return false;
-    return selectedFields.has(field) || selectedReferenceFields.has(field) || selectedMercadoLivreFields.has(field);
+    return selectedFields.has(field) || selectedMercadoLivreFields.has(field);
   });
   const amazonReferenceReviewRows = selectedAmazonReference
     ? AMAZON_DRAFT_FIELDS.map((field) => {
@@ -1536,7 +1490,6 @@ export function IntelligentProductRegistrationPage() {
           field === "name" || field === "brand"
             ? [
                 mercadoLivreSuggestionReviewRows.find((row) => row.field === field && selectedMercadoLivreFields.has(field))?.suggested,
-                referenceReviewRows.find((row) => row.field === field && selectedReferenceFields.has(field))?.suggested,
                 suggestions.find((row) => row.field === field && selectedFields.has(field))?.suggestedValue
               ].find((value) => typeof value === "string" && value.trim())
             : undefined;
@@ -1930,10 +1883,11 @@ export function IntelligentProductRegistrationPage() {
     setSelectedMercadoLivreResultKey(null);
     setMercadoLivreDetailLoadingKey(null);
     setMercadoLivreDetailError(null);
-    setReferenceImport(null);
-    setReferenceImportError(null);
-    setReferenceImportErrorDetails(null);
-    setSelectedReferenceFields(new Set());
+    setManualReferenceInput("");
+    setManualReferenceLoading(false);
+    setManualReferenceMessage(null);
+    setManualReferenceError(false);
+    manualReferenceRequestRef.current += 1;
     setSelectedMercadoLivreSuggestion(null);
     setSelectedMercadoLivreFields(new Set());
     setMessage("Consultando somente o produto local. Nenhuma consulta externa sera realizada.");
@@ -2033,8 +1987,8 @@ export function IntelligentProductRegistrationPage() {
     setSelectedMercadoLivreResultKey(null);
     setMercadoLivreDetailLoadingKey(null);
     setMercadoLivreDetailError(null);
-    setReferenceImport(null);
-    setSelectedReferenceFields(new Set());
+    setManualReferenceMessage(null);
+    setManualReferenceError(false);
     setSelectedMercadoLivreSuggestion(null);
     setSelectedMercadoLivreFields(new Set());
     try {
@@ -2402,59 +2356,83 @@ export function IntelligentProductRegistrationPage() {
     if (mode) void searchMercadoLivreReadOnly(mode, { page: 1, pageSize: nextPageSize });
   }
 
-  async function importMercadoLivreReference() {
-    const rawInput = referenceImportInput.trim();
-    if (!rawInput) {
-      setReferenceImportError("Informe um link ou ID valido de anuncio Mercado Livre.");
+  async function loadManualMercadoLivreReference() {
+    const itemId = parseMercadoLivreReferenceInput(manualReferenceInput);
+    if (!itemId) {
+      setManualReferenceError(true);
+      setManualReferenceMessage("Informe um link ou ID válido de anúncio Mercado Livre.");
+      return;
+    }
+    if (!product) {
+      setManualReferenceError(true);
+      setManualReferenceMessage("Selecione um produto antes de carregar o anúncio.");
       return;
     }
     if (!mercadoLivreConnected) {
-      setReferenceImportError("Conecte uma conta Mercado Livre antes de importar uma referencia.");
+      setManualReferenceError(true);
+      setManualReferenceMessage("Conecte uma conta Mercado Livre antes de carregar o anúncio.");
       return;
     }
 
-    setReferenceImportLoading(true);
-    setReferenceImportError(null);
-    setReferenceImportErrorDetails(null);
+    const requestId = manualReferenceRequestRef.current + 1;
+    manualReferenceRequestRef.current = requestId;
+    setManualReferenceLoading(true);
+    setManualReferenceError(false);
+    setManualReferenceMessage("Carregando produto...");
     try {
-      const response = await fetch("/api/marketplaces/mercado-livre/import-by-item", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          input: rawInput,
-          productId: product?.productId ?? undefined
-        })
+      const response = await fetch(`/api/integrations/mercado-livre/reference/${encodeURIComponent(itemId)}`, {
+        cache: "no-store"
       });
-      const payload = (await response.json()) as MercadoLivreReferenceImportResponse;
-      if (!response.ok || payload.error) {
-        setReferenceImportError(payload.error ?? "Nao foi possivel importar a referencia Mercado Livre.");
-        setReferenceImportErrorDetails(payload);
+      const payload = (await response.json().catch(() => null)) as MercadoLivreManualReferenceResponse | null;
+      if (manualReferenceRequestRef.current !== requestId) return;
+      if (!response.ok || !payload?.item) {
+        setManualReferenceError(true);
+        setManualReferenceMessage(payload?.error ?? "Não foi possível carregar este anúncio agora.");
         return;
       }
 
-      if (!payload.reference) {
-        setReferenceImportError("Nao foi possivel importar a referencia Mercado Livre.");
-        setReferenceImportErrorDetails(payload);
+      const item: MercadoLivreSearchItem = {
+        externalItemId: payload.item.itemId,
+        catalogProductId: null,
+        title: payload.item.title,
+        description: null,
+        gtin: payload.item.gtin,
+        price: null,
+        currencyId: null,
+        permalink: null,
+        imageUrl: payload.item.images[0] ?? null,
+        imageUrls: payload.item.images,
+        categoryId: payload.item.category.id,
+        categoryName: payload.item.category.name,
+        categoryPath: payload.item.category.path,
+        brand: payload.item.brand,
+        attributes: payload.item.attributes,
+        source: "MERCADO_LIVRE_PRODUCT_SEARCH"
+      };
+      const compatibility = calculateProductSuggestionCompatibility(
+        product,
+        mercadoLivreItemToCompatibilitySuggestion(item)
+      );
+
+      setManualReferenceInput(payload.item.itemId);
+      if (!isProductSuggestionPreviewAllowed(compatibility)) {
+        setSelectedMercadoLivreSuggestion(null);
+        setSelectedMercadoLivreFields(new Set());
+        setManualReferenceError(true);
+        setManualReferenceMessage("O anúncio informado não parece corresponder a este produto.");
+        setMessage("O anúncio informado não parece corresponder a este produto.");
         return;
       }
 
-      setReferenceImport(payload.reference);
-      setSelectedMercadoLivreSuggestion(null);
-      setSelectedMercadoLivreFields(new Set());
-      setReferenceImportInput(payload.normalizedItemId ?? payload.reference.externalItemId);
-      setReferenceImportErrorDetails(null);
-      setReferenceImportOpen(false);
-      setMessage("Referencia Mercado Livre importada como DRAFT local. Nada foi salvo no Product e nada foi publicado.");
-      openProductPreview({
-        title: payload.reference.title,
-        brand: payload.reference.brand,
-        images: [payload.reference.thumbnail, ...imageUrlsFromUnknown(payload.reference.pictures)]
-      });
+      setManualReferenceError(false);
+      setManualReferenceMessage("Produto compatível carregado para revisão.");
+      selectMercadoLivreSuggestion(item);
     } catch {
-      setReferenceImportError("Erro ao importar referencia Mercado Livre. Nenhuma escrita externa foi executada.");
-      setReferenceImportErrorDetails(null);
+      if (manualReferenceRequestRef.current !== requestId) return;
+      setManualReferenceError(true);
+      setManualReferenceMessage("Não foi possível carregar este anúncio agora.");
     } finally {
-      setReferenceImportLoading(false);
+      if (manualReferenceRequestRef.current === requestId) setManualReferenceLoading(false);
     }
   }
 
@@ -2489,8 +2467,6 @@ export function IntelligentProductRegistrationPage() {
     const resultIndex = rankedMercadoLivreItems.findIndex(({ item: candidate }) => candidate === item || Boolean(item.externalItemId && candidate.externalItemId === item.externalItemId));
     if (resultIndex >= 0) setSelectedMercadoLivreResultKey(mercadoLivreItemKey(item, resultIndex));
     setSelectedMercadoLivreSuggestion(item);
-    setReferenceImport(null);
-    setSelectedReferenceFields(new Set());
     const defaultFields = new Set<string>();
     if (item.title && !product?.name) defaultFields.add("name");
     if (item.brand && !product?.brand) defaultFields.add("brand");
@@ -2576,8 +2552,6 @@ export function IntelligentProductRegistrationPage() {
       closeProductPreview();
       setSelectedMercadoLivreSuggestion(null);
       setSelectedMercadoLivreFields(new Set());
-      setReferenceImport(null);
-      setSelectedReferenceFields(new Set());
       resetAmazonReferenceState(product);
       await search();
       setMessage("Produto atualizado com sucesso.");
@@ -3042,15 +3016,51 @@ export function IntelligentProductRegistrationPage() {
               </Button>
             ) : null}
             {mercadoLivreConnected ? (
-              <div className="mt-3 space-y-2 border-t border-matrix-border pt-3">
+              <div className="mt-3 space-y-3 border-t border-matrix-border pt-3">
                 <Button className="w-full justify-center" disabled={mercadoLivreSearchLoading || (!selectedProductName && !query.trim())} onClick={() => searchMercadoLivreReadOnly("title")} type="button" variant="secondary">
                   <MercadoLivreLogo size={18} />
                   Título
                 </Button>
-                <Button className="w-full justify-center" onClick={() => setReferenceImportOpen(true)} type="button">
-                  <MercadoLivreLogo size={18} />
-                  Importar anuncio por link/ID
-                </Button>
+                <div className="rounded-md border border-matrix-gold/30 bg-matrix-panel/70 p-3">
+                  <p className="text-sm font-semibold text-matrix-fg">Não encontrou o produto?</p>
+                  <label className="mt-3 block text-xs font-semibold text-matrix-muted" htmlFor="mercado-livre-manual-reference">
+                    Cole o link ou ID do anúncio Mercado Livre
+                  </label>
+                  <input
+                    autoComplete="off"
+                    className="mt-2 w-full min-w-0 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm text-matrix-fg outline-none focus:border-matrix-gold/60"
+                    id="mercado-livre-manual-reference"
+                    onChange={(event) => {
+                      manualReferenceRequestRef.current += 1;
+                      setManualReferenceLoading(false);
+                      setManualReferenceInput(event.target.value);
+                      setManualReferenceMessage(null);
+                      setManualReferenceError(false);
+                    }}
+                    placeholder="MLB1234567890 ou link oficial"
+                    value={manualReferenceInput}
+                  />
+                  <Button
+                    className="mt-3 w-full justify-center"
+                    disabled={manualReferenceLoading || !product || !manualReferenceInput.trim()}
+                    onClick={loadManualMercadoLivreReference}
+                    type="button"
+                  >
+                    <MercadoLivreLogo size={18} />
+                    {manualReferenceLoading ? "Carregando produto..." : "Carregar produto"}
+                  </Button>
+                  {manualReferenceMessage ? (
+                    <p
+                      className={`mt-3 rounded-md border p-2 text-xs ${
+                        manualReferenceError
+                          ? "border-red-500/30 bg-red-500/10 text-red-200"
+                          : "border-matrix-gold/25 bg-matrix-goldSoft/20 text-matrix-muted"
+                      }`}
+                    >
+                      {manualReferenceMessage}
+                    </p>
+                  ) : null}
+                </div>
               </div>
             ) : null}
           </div>
@@ -3269,7 +3279,7 @@ export function IntelligentProductRegistrationPage() {
               </section>
             ) : null}
 
-            {!mercadoLivreSearch && !referenceImport && amazonCatalogState === "idle" ? (
+            {!mercadoLivreSearch && amazonCatalogState === "idle" ? (
               <section className="grid min-h-[260px] place-items-center rounded-lg border border-matrix-border bg-matrix-panel2/45 p-8 text-center">
                 <div>
                   <Search className="mx-auto h-10 w-10 text-matrix-goldDark" />
@@ -3286,7 +3296,7 @@ export function IntelligentProductRegistrationPage() {
               </section>
             ) : null}
 
-            {mercadoLivreSearch || referenceImport ? (
+            {mercadoLivreSearch ? (
               <section className="rounded-lg border border-matrix-gold/35 bg-matrix-goldSoft/18">
                 <div className="border-b border-matrix-border px-4 py-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
@@ -3295,13 +3305,9 @@ export function IntelligentProductRegistrationPage() {
                         <MercadoLivreLogo size={18} />
                         Sugestoes Mercado Livre
                       </h4>
-                      {mercadoLivreSearch ? (
-                        <p className="text-sm text-matrix-muted">
-                          {mercadoLivreSearchResultLabel(mercadoLivreSearch, mercadoLivreEffectiveSearchType, mercadoLivreEffectiveSearchValue)}
-                        </p>
-                      ) : (
-                        <p className="text-sm text-matrix-muted">Referencia importada por link/ID para revisao local.</p>
-                      )}
+                      <p className="text-sm text-matrix-muted">
+                        {mercadoLivreSearchResultLabel(mercadoLivreSearch, mercadoLivreEffectiveSearchType, mercadoLivreEffectiveSearchValue)}
+                      </p>
                     </div>
                     <span className="flex shrink-0 flex-col items-end gap-1 text-right">
                       <Badge tone="success">Conectado</Badge>
@@ -3354,41 +3360,6 @@ export function IntelligentProductRegistrationPage() {
                     </div>
                   ) : null}
                 </div>
-                {referenceImport ? (
-                  <div className="border-b border-matrix-border px-4 py-4">
-                    <div className="flex gap-3">
-                      <ProductImage alt={referenceImport.title ?? "Referencia Mercado Livre"} src={referenceImport.thumbnail} />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Badge tone="info">
-                            <span className="inline-flex items-center gap-1">
-                              <MercadoLivreLogo size={14} />
-                              Referencia Mercado Livre
-                            </span>
-                          </Badge>
-                          <Badge tone="warning">DRAFT local</Badge>
-                          {referenceImport.categoryId ? <Badge tone="muted">{referenceImport.categoryId}</Badge> : null}
-                        </div>
-                        <p className="mt-1 font-semibold text-matrix-fg">{formatValue(referenceImport.title)}</p>
-                        <div className="mt-2 grid gap-1 text-sm text-matrix-muted sm:grid-cols-2">
-                          <span>ID: {referenceImport.externalItemId}</span>
-                          <span>Preco: {formatCurrency(referenceImport.price)}</span>
-                          <span>GTIN: {formatValue(referenceImport.gtin)}</span>
-                          <span>Marca: {formatValue(referenceImport.brand)}</span>
-                          <span>Part number: {formatValue(referenceImport.partNumber)}</span>
-                          <span>Categoria: {formatValue(referenceImport.categoryName ?? referenceImport.categoryId)}</span>
-                        </div>
-                        <p className="mt-2 text-xs text-matrix-muted">Origem: Referencia Mercado Livre importada por link/ID. Nada foi salvo no produto e nada foi publicado.</p>
-                        {referenceImport.permalink ? (
-                          <a className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-matrix-goldDark hover:text-matrix-gold" href={referenceImport.permalink} rel="noreferrer" target="_blank">
-                            <MercadoLivreLogo size={14} />
-                            Abrir anuncio
-                          </a>
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
                 {rankedMercadoLivreItems.length ? (
                   <div className="grid min-h-0 gap-4 p-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(360px,1.05fr)]">
                     <div className="flex max-h-[calc(100vh-8rem)] min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-matrix-border bg-matrix-panel/72">
@@ -3891,94 +3862,6 @@ export function IntelligentProductRegistrationPage() {
         </div>
       ) : null}
 
-      {referenceImportOpen ? (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
-          <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-lg border border-matrix-border bg-matrix-panel p-5 shadow-glow">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-matrix-goldDark">
-                  <MercadoLivreLogo size={16} />
-                  Mercado Livre
-                </p>
-                <h3 className="mt-1 text-xl font-semibold text-matrix-fg">Importar referencia Mercado Livre</h3>
-                <p className="mt-1 text-sm text-matrix-muted">Cole o link ou ID do anuncio. A consulta e read-only e cria apenas um DRAFT local para revisao.</p>
-              </div>
-              <Button onClick={() => setReferenceImportOpen(false)} type="button" variant="secondary">
-                Cancelar
-              </Button>
-            </div>
-
-            <label className="mt-5 block text-sm font-semibold text-matrix-fg">
-              Cole o link ou ID do anuncio Mercado Livre
-              <input
-                className="mt-2 w-full rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm text-matrix-fg outline-none focus:border-matrix-gold/60"
-                onChange={(event) => {
-                  setReferenceImportInput(event.target.value);
-                  setReferenceImportError(null);
-                  setReferenceImportErrorDetails(null);
-                }}
-                placeholder="MLB1234567890 ou https://produto.mercadolivre.com.br/MLB-1234567890..."
-                value={referenceImportInput}
-              />
-            </label>
-
-            {referenceImportError ? (
-              <div className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
-                <p className="font-semibold">{referenceImportError}</p>
-                {referenceImportErrorDetails?.normalizedItemId || referenceImportErrorDetails?.diagnostic ? (
-                  <div className="mt-3 space-y-1 text-xs text-red-100/90">
-                    {referenceImportErrorDetails.normalizedItemId ? <p>ID identificado: {referenceImportErrorDetails.normalizedItemId}</p> : null}
-                    {referenceImportErrorDetails.diagnostic?.status ? <p>Status da consulta: {referenceImportErrorDetails.diagnostic.status}</p> : null}
-                    {referenceImportErrorDetails.diagnostic?.endpoint ? <p>Endpoint: {referenceImportErrorDetails.diagnostic.endpoint}</p> : null}
-                    {referenceImportErrorDetails.diagnostic?.errorCode ? <p>Codigo: {referenceImportErrorDetails.diagnostic.errorCode}</p> : null}
-                    {referenceImportErrorDetails.diagnostic?.errorMessage ? <p>Mensagem ML: {referenceImportErrorDetails.diagnostic.errorMessage}</p> : null}
-                    {referenceImportErrorDetails.diagnostic?.requestId ? <p>RequestId: {referenceImportErrorDetails.diagnostic.requestId}</p> : null}
-                    {referenceImportErrorDetails.diagnostic?.correlationId ? <p>CorrelationId: {referenceImportErrorDetails.diagnostic.correlationId}</p> : null}
-                  </div>
-                ) : null}
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {referenceImportErrorDetails?.originalUrl ? (
-                    <a
-                      className="inline-flex items-center gap-2 rounded-md border border-red-400/35 px-3 py-2 text-xs font-semibold text-red-50 transition hover:border-red-200"
-                      href={referenceImportErrorDetails.originalUrl}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      <MercadoLivreLogo size={14} />
-                      Abrir anuncio no Mercado Livre
-                    </a>
-                  ) : null}
-                  <Button
-                    onClick={() => {
-                      setReferenceImportInput("");
-                      setReferenceImportError(null);
-                      setReferenceImportErrorDetails(null);
-                    }}
-                    type="button"
-                    variant="secondary"
-                  >
-                    Tentar outro link/ID
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-
-            <div className="mt-4 rounded-md border border-matrix-border bg-matrix-panel2/58 p-3 text-xs text-matrix-muted">
-              Aceita formatos como MLB1234567890, MLB-1234567890 e links do mercadolivre.com.br que contenham um ID MLB valido.
-              Nenhum Product sera alterado e nada sera publicado.
-            </div>
-
-            <div className="mt-5 flex flex-wrap justify-end gap-2">
-              <Button onClick={() => setReferenceImportOpen(false)} type="button" variant="secondary">
-                Fechar
-              </Button>
-              <Button disabled={referenceImportLoading} onClick={importMercadoLivreReference} type="button">
-                {referenceImportLoading ? "Importando..." : "Importar referencia"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </AppShell>
   );
 }

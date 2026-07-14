@@ -1566,6 +1566,24 @@ export class MercadoLivreOAuthService {
     return { connection, accessToken };
   }
 
+  async getUnexpiredAccessTokenForConnectionReadOnly(organizationId: string, connectionId?: string | null) {
+    const connection = await prisma.mercadoLivreConnection.findFirst({
+      where: {
+        organizationId,
+        ...(connectionId ? { id: connectionId } : {}),
+        status: "ACTIVE",
+        accessTokenEncrypted: { not: null }
+      },
+      orderBy: [{ isDefault: "desc" }, { updatedAt: "desc" }]
+    });
+    if (!connection?.accessTokenEncrypted || !connection.expiresAt) return null;
+    if (connection.expiresAt <= new Date()) {
+      throw new Error("Conta Mercado Livre precisa ser reconectada para consultar este anuncio.");
+    }
+
+    return { connection, accessToken: decryptSecret(connection.accessTokenEncrypted) };
+  }
+
   async searchReadOnly(input: {
     authContext: MercadoLivreSearchAuthContext;
     q?: string | null;
@@ -1835,12 +1853,15 @@ export class MercadoLivreOAuthService {
     catalogProductId?: string | null;
     connectionId?: string | null;
     basicItem?: Partial<NormalizedMercadoLivreSearchItem>;
+    refreshExpiredToken?: boolean;
   }) {
     const normalizedItemId = input.itemId?.trim().toUpperCase() || null;
     const catalogProductId = input.catalogProductId?.trim() || null;
     if (!normalizedItemId && !catalogProductId) throw new Error("Informe itemId ou catalogProductId para carregar detalhes.");
 
-    const token = await this.getAccessTokenForConnection(input.authContext.organizationId, input.connectionId);
+    const token = input.refreshExpiredToken === false
+      ? await this.getUnexpiredAccessTokenForConnectionReadOnly(input.authContext.organizationId, input.connectionId)
+      : await this.getAccessTokenForConnection(input.authContext.organizationId, input.connectionId);
     if (!token) throw new Error("Conecte uma conta Mercado Livre antes de carregar detalhes.");
 
     const startedAt = Date.now();
