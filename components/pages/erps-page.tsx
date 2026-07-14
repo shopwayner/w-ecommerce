@@ -11,6 +11,10 @@ import {
   getBlingReconnectErrorMessage,
   isOfficialBlingAuthorizationUrl
 } from "@/lib/services/bling-oauth-url";
+import {
+  getBlingCallbackResultMessage,
+  parseBlingCallbackResult
+} from "@/lib/services/bling-callback-result";
 
 type ERPKey = "bling" | "olist" | "omie" | "conta-azul" | "custom-api";
 type ERPModalMode = "create" | "manage";
@@ -250,15 +254,14 @@ export function ERPsPage() {
 
   useEffect(() => {
     const url = new URL(window.location.href);
-    const blingResult = url.searchParams.get("bling");
+    const blingResult = parseBlingCallbackResult(url.searchParams.get("bling"));
     if (!blingResult) return;
 
-    if (blingResult === "connected") setMessage("Conta Bling conectada com sucesso.");
-    else if (blingResult === "reconnected") setMessage("Conta Bling reconectada com sucesso.");
-    else if (blingResult === "already-connected") setMessage("Esta conta Bling já está conectada.");
-    else if (blingResult === "wrong-account") setMessage("Autorize a mesma conta Bling que esta sendo reconectada.");
-    else if (blingResult === "error") setMessage("Não foi possível concluir a conexão Bling.");
-    else return;
+    setMessage(getBlingCallbackResultMessage(blingResult));
+    if (blingResult === "connected" || blingResult === "reconnected") {
+      void loadConnections();
+      void loadBlingAccounts();
+    }
 
     url.searchParams.delete("bling");
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);

@@ -6,6 +6,11 @@ import {
   BlingReconnectAccountMismatchError,
   blingOAuthService
 } from "@/lib/services/bling-oauth-service";
+import {
+  getBlingCallbackResultPath,
+  type BlingCallbackResult
+} from "@/lib/services/bling-callback-result";
+import { getPublicRedirectUrl } from "@/lib/url";
 import { sanitizeLogPayload } from "@/lib/utils";
 
 export async function GET(request: NextRequest) {
@@ -14,25 +19,50 @@ export async function GET(request: NextRequest) {
   const state = url.searchParams.get("state");
   const error = url.searchParams.get("error");
 
-  if (error || !code || !state) {
-    await safeCallbackAudit(state, "BLING_OAUTH_CALLBACK_ERROR", { reason: error ? "provider_error" : "missing_code_or_state" });
-    return NextResponse.redirect(new URL("/erps?bling=error", request.url));
+  if (!state) {
+    await safeCallbackAudit(state, "BLING_OAUTH_CALLBACK_ERROR", { reason: "missing_code_or_state" });
+    return publicResultRedirect("connection-error");
+  }
+
+  if (!(await blingOAuthService.validateOAuthState(state))) {
+    return publicResultRedirect("connection-error");
+  }
+
+  if (error) {
+    await safeCallbackAudit(state, "BLING_OAUTH_CALLBACK_ERROR", { reason: "provider_error" });
+    return publicResultRedirect("authorization-denied");
+  }
+
+  if (!code) {
+    await safeCallbackAudit(state, "BLING_OAUTH_CALLBACK_ERROR", { reason: "missing_code_or_state" });
+    return publicResultRedirect("connection-error");
   }
 
   try {
     const result = await blingOAuthService.completeCallback(code, state);
-    return NextResponse.redirect(new URL(result.mode === "reconnect" ? "/erps?bling=reconnected" : "/erps?bling=connected", request.url));
+    return publicResultRedirect(result.mode === "reconnect" ? "reconnected" : "connected");
   } catch (callbackError) {
     if (callbackError instanceof BlingAccountAlreadyConnectedError) {
-      return NextResponse.redirect(new URL("/erps?bling=already-connected", request.url));
+      return publicResultRedirect("already-connected");
     }
     if (callbackError instanceof BlingReconnectAccountMismatchError) {
-      return NextResponse.redirect(new URL("/erps?bling=wrong-account", request.url));
+      return publicResultRedirect("wrong-account");
     }
     await safeCallbackAudit(state, "BLING_OAUTH_CALLBACK_ERROR", {
       reason: "callback_error"
     });
-    return NextResponse.redirect(new URL("/erps?bling=error", request.url));
+    return publicResultRedirect("connection-error");
+  }
+}
+
+function publicResultRedirect(result: BlingCallbackResult) {
+  try {
+    return NextResponse.redirect(getPublicRedirectUrl(getBlingCallbackResultPath(result)));
+  } catch {
+    return NextResponse.json(
+      { error: "Não foi possível concluir a conexão Bling agora." },
+      { status: 500 }
+    );
   }
 }
 
