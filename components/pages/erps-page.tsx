@@ -5,6 +5,12 @@ import Image from "next/image";
 import { AlertTriangle, Braces, CalendarClock, CheckCircle2, Copy, Eye, EyeOff, Link2, MoreVertical, Plus, Power, ReceiptText, RefreshCw, Settings, ShieldCheck, Unplug, X } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { Badge, Button, Card } from "@/components/ui";
+import {
+  BLING_CALLBACK_PATH,
+  canStartBlingReconnect,
+  getBlingReconnectErrorMessage,
+  isOfficialBlingAuthorizationUrl
+} from "@/lib/services/bling-oauth-url";
 
 type ERPKey = "bling" | "olist" | "omie" | "conta-azul" | "custom-api";
 type ERPModalMode = "create" | "manage";
@@ -158,6 +164,7 @@ function tone(status: string, configStatus: string) {
 
 function buildRedirectUri(slug: ERPKey) {
   if (typeof window === "undefined") return "";
+  if (slug === "bling") return `${window.location.origin}${BLING_CALLBACK_PATH}`;
   return `${window.location.origin}/api/erps/connections/${slug}/callback`;
 }
 
@@ -390,17 +397,33 @@ export function ERPsPage() {
   }
 
   async function reconnectSelectedBlingConnection() {
-    if (!selectedConnectionId || blingAction) return;
+    if (!canStartBlingReconnect(selectedConnectionId, blingAction)) return;
     setBlingAction("reconnect");
-    setMessage("");
-    const response = await fetch(`/api/integrations/${selectedConnectionId}/reconnect`, { method: "POST" });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok || !payload.authorizationUrl) {
-      setMessage(payload.error ?? "Nao foi possivel iniciar a reconexao agora.");
+    setMessage("Preparando a conexão com o Bling...");
+
+    try {
+      const response = await fetch(`/api/integrations/${selectedConnectionId}/reconnect`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { Accept: "application/json" }
+      });
+      const payload = await response.json().catch(() => ({}));
+
+      if (
+        !response.ok
+        || payload.success !== true
+        || !isOfficialBlingAuthorizationUrl(payload.authorizationUrl, window.location.origin)
+      ) {
+        setMessage(getBlingReconnectErrorMessage(response.status));
+        setBlingAction(null);
+        return;
+      }
+
+      window.location.assign(payload.authorizationUrl);
+    } catch {
+      setMessage(getBlingReconnectErrorMessage(0));
       setBlingAction(null);
-      return;
     }
-    window.location.assign(payload.authorizationUrl);
   }
 
   async function disconnectSelectedBlingConnection() {
@@ -499,7 +522,7 @@ export function ERPsPage() {
   );
   const selectedBlingStatus = selectedBlingAccount?.status ?? "PENDING";
   const canTestSelectedBling = Boolean(selectedBlingAccount?.hasToken && selectedBlingStatus !== "DISCONNECTED" && !blingAction);
-  const canReconnectSelectedBling = Boolean(selectedConnectionId && !blingAction);
+  const canReconnectSelectedBling = canStartBlingReconnect(selectedConnectionId, blingAction);
 
   return (
     <AppShell>
@@ -712,7 +735,7 @@ export function ERPsPage() {
                     </Button>
                     <Button disabled={!canReconnectSelectedBling} onClick={reconnectSelectedBlingConnection} type="button" variant="secondary">
                       <Power className="h-4 w-4" />
-                      {blingAction === "reconnect" ? "Abrindo autorização..." : selectedBlingStatus === "DISCONNECTED" ? "Conectar conta" : "Reconectar conta"}
+                      {blingAction === "reconnect" ? "Preparando..." : selectedBlingStatus === "DISCONNECTED" ? "Conectar conta" : "Reconectar conta"}
                     </Button>
                     {selectedBlingStatus !== "DISCONNECTED" ? (
                       <Button disabled={Boolean(blingAction)} onClick={disconnectSelectedBlingConnection} type="button" variant="danger">

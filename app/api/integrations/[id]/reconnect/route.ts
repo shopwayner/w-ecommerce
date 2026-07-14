@@ -2,11 +2,12 @@ import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
 import { blingOAuthService } from "@/lib/services/bling-oauth-service";
+import { canManageBlingConnection } from "@/lib/services/bling-oauth-url";
 
 export async function POST(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
-  if (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN") {
+  if (!canManageBlingConnection(auth.context.role)) {
     return NextResponse.json({ error: "Somente administradores podem reconectar uma conta." }, { status: 403 });
   }
 
@@ -18,7 +19,7 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
   if (!connection) return NextResponse.json({ error: "Conta Bling nao encontrada." }, { status: 404 });
   if (!(await blingOAuthService.hasUsableCredentials(connection.id, auth.context.organizationId))) {
     return NextResponse.json(
-      { error: "Cadastre o Client ID e o Client Secret desta conta antes de conectar." },
+      { error: "A configuração da conta precisa ser revisada." },
       { status: 409 }
     );
   }
@@ -29,8 +30,11 @@ export async function POST(_request: Request, { params }: { params: Promise<{ id
       userId: auth.context.user.id,
       reconnectConnectionId: connection.id
     });
-    return NextResponse.json({ authorizationUrl: await blingOAuthService.buildAuthorizationUrl(state) });
+    return NextResponse.json({
+      success: true,
+      authorizationUrl: await blingOAuthService.buildAuthorizationUrl(state)
+    });
   } catch {
-    return NextResponse.json({ error: "Nao foi possivel iniciar a reconexao agora." }, { status: 400 });
+    return NextResponse.json({ error: "Não foi possível iniciar a conexão agora." }, { status: 400 });
   }
 }

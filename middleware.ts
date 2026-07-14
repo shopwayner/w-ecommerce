@@ -1,10 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth/token";
+import { BLING_CALLBACK_PATH } from "@/lib/services/bling-oauth-url";
 
 const publicApiRoutes = [
   "/api/auth/login",
   "/api/auth/logout",
-  "/api/integrations/bling/callback",
+  BLING_CALLBACK_PATH,
   "/api/marketplaces/mercado-livre/client/callback",
   "/api/marketplaces/mercado-livre/client/notifications"
 ];

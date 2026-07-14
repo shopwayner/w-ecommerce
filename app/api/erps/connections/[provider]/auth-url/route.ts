@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
-import { blingOAuthService } from "@/lib/services/bling-oauth-service";
+import { blingOAuthService, getBlingOAuthConfigurationStatus } from "@/lib/services/bling-oauth-service";
 import { erpConnectionsService } from "@/lib/services/erps/erp-connections-service";
 
 type Params = { params: Promise<{ provider: string }> };
@@ -14,6 +14,13 @@ export async function GET(_request: NextRequest, { params }: Params) {
   if (!provider) return NextResponse.json({ error: "ERP não suportado." }, { status: 404 });
 
   if (provider.slug === "bling") {
+    if (!getBlingOAuthConfigurationStatus().configured) {
+      return NextResponse.json(
+        { error: "A configuração da conta precisa ser revisada." },
+        { status: 409 }
+      );
+    }
+
     try {
       const state = await blingOAuthService.createOAuthState({
         organizationId: auth.context.organizationId,
@@ -21,10 +28,12 @@ export async function GET(_request: NextRequest, { params }: Params) {
         connectionName: "Bling",
         connectionRole: "OTHER"
       });
-      return NextResponse.json({ authorizationUrl: await blingOAuthService.buildAuthorizationUrl(state) });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Falha ao iniciar OAuth Bling.";
-      return NextResponse.json({ error: message }, { status: 400 });
+      return NextResponse.json({
+        success: true,
+        authorizationUrl: await blingOAuthService.buildAuthorizationUrl(state)
+      });
+    } catch {
+      return NextResponse.json({ error: "Não foi possível iniciar a conexão agora." }, { status: 400 });
     }
   }
 

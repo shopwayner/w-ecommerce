@@ -2,9 +2,12 @@ import { createHash, randomBytes } from "crypto";
 import { Prisma, type ConnectionRole } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { encryptSecret, decryptSecret } from "@/lib/security/encryption";
+import {
+  BLING_AUTHORIZATION_URL,
+  validateBlingRedirectUri
+} from "@/lib/services/bling-oauth-url";
 import { sanitizeLogPayload } from "@/lib/utils";
 
-const authorizationUrl = "https://www.bling.com.br/Api/v3/oauth/authorize";
 const tokenUrl = "https://www.bling.com.br/Api/v3/oauth/token";
 const stateTtlMs = 10 * 60 * 1000;
 const reconnectStatePrefix = "__BLING_RECONNECT__:";
@@ -76,19 +79,24 @@ function hashState(state: string) {
 function getGlobalBlingCredentials(): BlingCredentials {
   const clientId = process.env.BLING_CLIENT_ID;
   const clientSecret = process.env.BLING_CLIENT_SECRET;
-  const redirectUri = process.env.BLING_REDIRECT_URI;
 
-  if (!clientId || !clientSecret || !redirectUri) {
+  if (!clientId || !clientSecret) {
     throw new Error("Credenciais Bling nao configuradas.");
   }
 
-  return { clientId, clientSecret, redirectUri };
+  return { clientId, clientSecret, redirectUri: getBlingRedirectUri() };
 }
 
 function getBlingRedirectUri() {
-  const redirectUri = process.env.BLING_REDIRECT_URI?.trim();
-  if (!redirectUri) throw new BlingCredentialsMissingError();
-  return redirectUri;
+  try {
+    return validateBlingRedirectUri({
+      redirectUri: process.env.BLING_REDIRECT_URI,
+      publicAppUrl: process.env.APP_URL ?? process.env.NEXT_PUBLIC_APP_URL,
+      production: process.env.NODE_ENV === "production"
+    });
+  } catch {
+    throw new BlingCredentialsMissingError();
+  }
 }
 
 function decryptStoredBlingCredentials(credentials: EncryptedBlingCredentials): Pick<BlingCredentials, "clientId" | "clientSecret"> | null {
@@ -132,11 +140,19 @@ export function getEncryptedBlingCredentialUpdates(input: { clientId?: string; c
 }
 
 export function getBlingOAuthConfigurationStatus() {
+  let redirectUriConfigured = false;
+  try {
+    getBlingRedirectUri();
+    redirectUriConfigured = true;
+  } catch {
+    redirectUriConfigured = false;
+  }
+
   return {
     clientIdConfigured: Boolean(process.env.BLING_CLIENT_ID),
     clientSecretConfigured: Boolean(process.env.BLING_CLIENT_SECRET),
-    redirectUriConfigured: Boolean(process.env.BLING_REDIRECT_URI),
-    configured: Boolean(process.env.BLING_CLIENT_ID && process.env.BLING_CLIENT_SECRET && process.env.BLING_REDIRECT_URI)
+    redirectUriConfigured,
+    configured: Boolean(process.env.BLING_CLIENT_ID && process.env.BLING_CLIENT_SECRET && redirectUriConfigured)
   };
 }
 
@@ -359,7 +375,7 @@ export class BlingOAuthService {
     const { clientId, redirectUri } = reference
       ? await this.credentialsForConnection(reference.connectionId, stateRecord.organizationId)
       : getGlobalBlingCredentials();
-    const url = new URL(authorizationUrl);
+    const url = new URL(BLING_AUTHORIZATION_URL);
     url.searchParams.set("response_type", "code");
     url.searchParams.set("client_id", clientId);
     url.searchParams.set("redirect_uri", redirectUri);
