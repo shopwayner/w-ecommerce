@@ -10,6 +10,8 @@ import { IntelligentProductPreview } from "@/components/intelligent-product-prev
 import { Badge, Button, Card, PageHeader } from "@/components/ui";
 import {
   calculateProductSuggestionCompatibility,
+  isProductSuggestionPreviewAllowed,
+  shouldContinueCompatibleReferenceSearch,
   type ProductCompatibilitySuggestion,
   type ProductSuggestionCompatibilityLevel,
   type ProductSuggestionCompatibilityResult
@@ -38,7 +40,8 @@ const AMAZON_LOGO_SRC = "/marketplaces/amazon.png";
 const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre.png";
 const MERCADO_LIVRE_DETAIL_CONCURRENCY = 4;
 const MERCADO_LIVRE_DETAIL_TIMEOUT_MS = 15000;
-const MERCADO_LIVRE_OFFER_PAGE_MAX_CATALOGS = 80;
+const MERCADO_LIVRE_MAX_SEARCH_PAGES = 3;
+const MERCADO_LIVRE_OFFER_PAGE_MAX_CATALOGS = 60;
 
 function AmazonLogo({ size = 18, className = "" }: { size?: number; className?: string }) {
   return (
@@ -92,7 +95,6 @@ type MercadoLivreLocalFilter =
   | "completeData"
   | "withPrice"
   | "withSeller"
-  | "hideLowCompatibility"
   | "classic"
   | "premium";
 type InternalGtinState = "idle" | "loading" | "found" | "not_found" | "error";
@@ -103,7 +105,6 @@ const mercadoLivreLocalFilterLabels: Record<MercadoLivreLocalFilter, string> = {
   completeData: "Somente dados completos",
   withPrice: "Somente com preco",
   withSeller: "Somente com vendedor",
-  hideLowCompatibility: "Ocultar baixa compatibilidade",
   classic: "Somente Classico",
   premium: "Somente Premium"
 };
@@ -112,7 +113,6 @@ const mercadoLivreLocalFilterOptions: MercadoLivreLocalFilter[] = [
   "completeData",
   "withPrice",
   "withSeller",
-  "hideLowCompatibility",
   "classic",
   "premium"
 ];
@@ -716,7 +716,7 @@ function confidenceTone(confidence: number | null) {
 function compatibilityTone(level: ProductSuggestionCompatibilityLevel) {
   if (level === "HIGH") return "success" as const;
   if (level === "MEDIUM") return "warning" as const;
-  if (level === "LOW") return "danger" as const;
+  if (level === "LOW" || level === "DIFFERENT") return "danger" as const;
   return "muted" as const;
 }
 
@@ -761,7 +761,6 @@ function CompatibilityDetails({
     <div className={`mt-2 rounded-md border border-matrix-border bg-matrix-panel2/60 ${compact ? "p-2 text-[11px]" : "p-3 text-xs"} text-matrix-muted`}>
       <div className="flex flex-wrap items-center gap-2">
         <Badge tone={compatibilityTone(compatibility.level)}>{compatibility.label}</Badge>
-        {compatibility.score !== null ? <span>Score {compatibility.score}/100</span> : <span>Score indisponivel</span>}
       </div>
       <div className="mt-2 grid gap-2 md:grid-cols-2">
         {compatibility.gtin.local ?? localProduct?.gtin ? <span>GTIN local: {compatibility.gtin.local ?? localProduct?.gtin}</span> : null}
@@ -778,7 +777,7 @@ function CompatibilityDetails({
       {compatibility.suggestionOnlyWords.length && !compact ? (
         <p className="mt-1">Termos so na sugestao: {compatibility.suggestionOnlyWords.join(", ")}</p>
       ) : null}
-      {compatibility.level === "LOW" ? (
+      {compatibility.level === "LOW" || compatibility.level === "DIFFERENT" ? (
         <p className="mt-2 rounded border border-red-500/30 bg-red-500/10 p-2 text-red-100">
           A sugestao pode ser de outro produto ou modelo. Revise titulo, aplicacao, marca, GTIN e imagens antes de salvar.
         </p>
@@ -1184,7 +1183,6 @@ function mercadoLivreResultMatchesLocalFilters(
   if (filters.has("completeData") && dataCompleteness.label !== "Dados completos") return false;
   if (filters.has("withPrice") && typeof item.price !== "number") return false;
   if (filters.has("withSeller") && !mercadoLivreSellerLabel(item)) return false;
-  if (filters.has("hideLowCompatibility") && compatibility?.level === "LOW") return false;
   if (filters.has("classic") && listingType !== "Clássico" && listingType !== "Classico") return false;
   if (filters.has("premium") && listingType !== "Premium") return false;
 
@@ -1334,10 +1332,14 @@ export function IntelligentProductRegistrationPage() {
         .filter(({ item }) => hasMercadoLivrePublicOffer(item)),
     [rankedMercadoLivreItems]
   );
+  const mercadoLivreCompatibleOfferItems = useMemo(
+    () => mercadoLivreOfferItems.filter(({ compatibility }) => isProductSuggestionPreviewAllowed(compatibility)),
+    [mercadoLivreOfferItems]
+  );
   const mercadoLivreOfferPageStartIndex = (mercadoLivreOfferPage - 1) * mercadoLivrePageSize;
   const mercadoLivreOfferPageItems = useMemo(
-    () => mercadoLivreOfferItems.slice(mercadoLivreOfferPageStartIndex, mercadoLivreOfferPageStartIndex + mercadoLivrePageSize),
-    [mercadoLivreOfferItems, mercadoLivreOfferPageStartIndex, mercadoLivrePageSize]
+    () => mercadoLivreCompatibleOfferItems.slice(mercadoLivreOfferPageStartIndex, mercadoLivreOfferPageStartIndex + mercadoLivrePageSize),
+    [mercadoLivreCompatibleOfferItems, mercadoLivreOfferPageStartIndex, mercadoLivrePageSize]
   );
   const filteredMercadoLivreItems = useMemo(
     () => mercadoLivreOfferPageItems.filter(({ item, compatibility }) => mercadoLivreResultMatchesLocalFilters(item, compatibility, mercadoLivreLocalFilters)),
@@ -1348,11 +1350,19 @@ export function IntelligentProductRegistrationPage() {
   const mercadoLivreUsefulResultCount = rankedMercadoLivreItems.filter(({ item }) => isUsefulMercadoLivreCard(item)).length;
   const mercadoLivreHiddenIncompleteCount = rankedMercadoLivreItems.filter(({ item }) => !isUsefulMercadoLivreCard(item)).length;
   const mercadoLivrePublicOfferResultCount = mercadoLivreOfferItems.length;
+  const mercadoLivreCompatibleOfferResultCount = mercadoLivreCompatibleOfferItems.length;
   const mercadoLivreLoadedCatalogCount = mercadoLivreSearch?.items.length ?? 0;
   const mercadoLivreTargetOfferCount = mercadoLivreOfferPage * mercadoLivrePageSize;
-  const mercadoLivreCanAnalyzeMoreCatalogs = mercadoLivreLoadedCatalogCount < MERCADO_LIVRE_OFFER_PAGE_MAX_CATALOGS && Boolean(mercadoLivrePaging?.hasNextPage);
+  const mercadoLivreCanAnalyzeMoreCatalogs =
+    mercadoLivreLoadedCatalogCount < MERCADO_LIVRE_OFFER_PAGE_MAX_CATALOGS &&
+    shouldContinueCompatibleReferenceSearch({
+      page: mercadoLivreLoadedRawPagesRef.current.size,
+      maxPages: MERCADO_LIVRE_MAX_SEARCH_PAGES,
+      hasNextPage: Boolean(mercadoLivrePaging?.hasNextPage),
+      hasAcceptableResult: mercadoLivreCompatibleOfferResultCount > 0
+    });
   const mercadoLivreOfferPageCanGoNext =
-    mercadoLivrePublicOfferResultCount > mercadoLivreOfferPage * mercadoLivrePageSize || mercadoLivreCanAnalyzeMoreCatalogs || mercadoLivreOfferCollecting;
+    mercadoLivreCompatibleOfferResultCount > mercadoLivreOfferPage * mercadoLivrePageSize || mercadoLivreCanAnalyzeMoreCatalogs || mercadoLivreOfferCollecting;
   const mercadoLivreOfferPageHasPrevious = mercadoLivreOfferPage > 1;
   const mercadoLivreCurrentPageDetailKeys = useMemo(
     () =>
@@ -1385,7 +1395,7 @@ export function IntelligentProductRegistrationPage() {
     Boolean(mercadoLivreSearch) &&
     mercadoLivreSearchState !== "blocked_403" &&
     mercadoLivreSearchState !== "error" &&
-    mercadoLivrePublicOfferResultCount < mercadoLivreTargetOfferCount &&
+    mercadoLivreCompatibleOfferResultCount < mercadoLivreTargetOfferCount &&
     mercadoLivreCanAnalyzeMoreCatalogs;
   const mercadoLivreOfferCollectionInProgress =
     Boolean(mercadoLivreSearch) && (mercadoLivreOfferCollecting || mercadoLivreCurrentPageDetailsInProgress || mercadoLivreNeedsMoreOffersForPage);
@@ -1396,9 +1406,7 @@ export function IntelligentProductRegistrationPage() {
     mercadoLivreOfferPageItems.length < mercadoLivrePageSize &&
     !mercadoLivreOfferPageCanGoNext;
   const selectedMercadoLivreResult =
-    filteredMercadoLivreItems.find(({ item, rankedIndex }) => mercadoLivreItemKey(item, rankedIndex) === selectedMercadoLivreResultKey) ??
-    filteredMercadoLivreItems[0] ??
-    null;
+    filteredMercadoLivreItems.find(({ item, rankedIndex }) => mercadoLivreItemKey(item, rankedIndex) === selectedMercadoLivreResultKey) ?? null;
   const selectedMercadoLivreResultKeyForRender = selectedMercadoLivreResult
     ? mercadoLivreItemKey(selectedMercadoLivreResult.item, selectedMercadoLivreResult.rankedIndex)
     : null;
@@ -1426,15 +1434,8 @@ export function IntelligentProductRegistrationPage() {
   const selectedMercadoLivreDetailUrl = selectedMercadoLivreDetailItem ? mercadoLivreItemPublicUrl(selectedMercadoLivreDetailItem) : null;
   const selectedMercadoLivreDataCompleteness = selectedMercadoLivreDetailItem ? mercadoLivreDataCompleteness(selectedMercadoLivreDetailItem) : null;
   useEffect(() => {
-    if (!filteredMercadoLivreItems.length) {
-      if (selectedMercadoLivreResultKey) setSelectedMercadoLivreResultKey(null);
-      return;
-    }
-
     const selectedStillExists = filteredMercadoLivreItems.some(({ item, rankedIndex }) => mercadoLivreItemKey(item, rankedIndex) === selectedMercadoLivreResultKey);
-    if (!selectedStillExists) {
-      setSelectedMercadoLivreResultKey(mercadoLivreItemKey(filteredMercadoLivreItems[0].item, filteredMercadoLivreItems[0].rankedIndex));
-    }
+    if (selectedMercadoLivreResultKey && !selectedStillExists) setSelectedMercadoLivreResultKey(null);
   }, [filteredMercadoLivreItems, selectedMercadoLivreResultKey]);
 
   useEffect(() => {
@@ -2126,7 +2127,11 @@ export function IntelligentProductRegistrationPage() {
     if (!mercadoLivreSearch || mercadoLivreOfferCollecting) return;
     const currentPaging = mercadoLivreSearch.paging;
     const currentRawCount = mercadoLivreSearch.items.length;
-    if (!currentPaging?.hasNextPage || currentRawCount >= MERCADO_LIVRE_OFFER_PAGE_MAX_CATALOGS) return;
+    if (
+      !currentPaging?.hasNextPage ||
+      currentRawCount >= MERCADO_LIVRE_OFFER_PAGE_MAX_CATALOGS ||
+      mercadoLivreLoadedRawPagesRef.current.size >= MERCADO_LIVRE_MAX_SEARCH_PAGES
+    ) return;
 
     const nextRawPage = (currentPaging.page ?? 1) + 1;
     if (mercadoLivreLoadedRawPagesRef.current.has(nextRawPage)) return;
@@ -2140,10 +2145,11 @@ export function IntelligentProductRegistrationPage() {
     setMercadoLivreOfferCollecting(true);
     setMercadoLivreOfferCollectionError(null);
     setMercadoLivreStatusMessage(
-      `Buscando anuncios com oferta. ${mercadoLivrePublicOfferResultCount} encontrado(s), ${mercadoLivreCurrentPageDetailsFinished} catalogo(s) analisado(s).`
+      `Buscando referencias compativeis. ${mercadoLivreCompatibleOfferResultCount} encontrada(s), ${mercadoLivreCurrentPageDetailsFinished} catalogo(s) analisado(s).`
     );
 
     try {
+      await new Promise((resolve) => setTimeout(resolve, 250));
       const params = new URLSearchParams({
         q: continuationValue,
         searchMode: continuationMode,
@@ -2183,9 +2189,9 @@ export function IntelligentProductRegistrationPage() {
   }, [
     mercadoLivreCurrentPageDetailsFinished,
     mercadoLivreLastQuery,
+    mercadoLivreCompatibleOfferResultCount,
     mercadoLivreOfferCollecting,
     mercadoLivrePageSize,
-    mercadoLivrePublicOfferResultCount,
     mercadoLivreSearch
   ]);
 
@@ -2473,6 +2479,13 @@ export function IntelligentProductRegistrationPage() {
   }
 
   function selectMercadoLivreSuggestion(item: MercadoLivreSearchItem) {
+    const compatibility = product
+      ? calculateProductSuggestionCompatibility(product, mercadoLivreItemToCompatibilitySuggestion(item))
+      : null;
+    if (!isProductSuggestionPreviewAllowed(compatibility)) {
+      setMessage("Esta referencia nao corresponde com seguranca ao produto local e nao pode abrir a previa.");
+      return;
+    }
     const resultIndex = rankedMercadoLivreItems.findIndex(({ item: candidate }) => candidate === item || Boolean(item.externalItemId && candidate.externalItemId === item.externalItemId));
     if (resultIndex >= 0) setSelectedMercadoLivreResultKey(mercadoLivreItemKey(item, resultIndex));
     setSelectedMercadoLivreSuggestion(item);
@@ -2777,7 +2790,7 @@ export function IntelligentProductRegistrationPage() {
             <span>Produto/SKU: {formatValue(selectedHistory.productSku)}</span>
             <span>Origem: {selectedHistory.sourceProvider}</span>
             <span>Anuncio/referencia: {formatValue(selectedHistory.sourceExternalId)}</span>
-            <span>Compatibilidade: {formatValue(selectedHistory.compatibilityLevel)} {selectedHistory.compatibilityScore !== null ? `(${selectedHistory.compatibilityScore}/100)` : ""}</span>
+            <span>Compatibilidade: {formatValue(selectedHistory.compatibilityLevel)}</span>
             <span>Confirmacao principal: {selectedHistory.confirmationMainUsed ? "Usada" : "Nao usada"}</span>
             <span>Confirmacao baixa compatibilidade: {selectedHistory.confirmationLowCompatibilityUsed ? "Usada" : "Nao usada"}</span>
           </div>
@@ -3390,8 +3403,8 @@ export function IntelligentProductRegistrationPage() {
                         <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-matrix-muted">
                           <Badge tone="info">
                             {mercadoLivreOfferCollectionInProgress
-                              ? `${mercadoLivrePublicOfferResultCount} anuncio(s) com oferta encontrados`
-                              : `${mercadoLivreOfferPageItems.length} anuncio(s) com oferta`}
+                              ? `${mercadoLivreCompatibleOfferResultCount} referencia(s) compativel(is) encontrada(s)`
+                              : `${mercadoLivreOfferPageItems.length} referencia(s) compativel(is)`}
                           </Badge>
                           {mercadoLivreCurrentPageDetailsTotal ? (
                             <Badge tone={mercadoLivreOfferCollectionInProgress ? "warning" : "success"}>
@@ -3406,7 +3419,7 @@ export function IntelligentProductRegistrationPage() {
                           ) : null}
                           {mercadoLivreOfferCollectionError ? <Badge tone="warning">{mercadoLivreOfferCollectionError}</Badge> : null}
                           {mercadoLivreOfferPageIncompleteFinal ? (
-                            <Badge tone="warning">Foram encontrados {mercadoLivreOfferPageItems.length} anuncio(s) com oferta para esta pagina.</Badge>
+                            <Badge tone="warning">Foram encontradas {mercadoLivreOfferPageItems.length} referencia(s) compativel(is) para esta pagina.</Badge>
                           ) : null}
                           <span className="rounded-md border border-matrix-border bg-matrix-panel2/70 px-2 py-1">
                             Pagina {mercadoLivreOfferPage}
@@ -3623,10 +3636,10 @@ export function IntelligentProductRegistrationPage() {
                         }) : (
                           <div className="rounded-lg border border-dashed border-matrix-border bg-matrix-panel2/50 p-5 text-sm text-matrix-muted">
                             {mercadoLivreOfferCollectionInProgress
-                              ? "Buscando anuncios com oferta para esta pagina. Os resultados aparecem assim que forem encontrados."
+                              ? "Buscando referencias compativeis com limite seguro de paginas."
                               : mercadoLivreOfferPageItems.length
-                                ? "Nenhum anuncio com oferta nesta pagina corresponde aos filtros. Limpe os filtros ou avance a pagina."
-                                : "Foram encontrados poucos anuncios com oferta para esta pagina. Tente ajustar o termo de busca ou avance se houver mais resultados."}
+                                ? "Nenhuma referencia compativel nesta pagina corresponde aos filtros selecionados."
+                                : "Nenhuma referencia compativel foi encontrada."}
                           </div>
                         )}
                       </div>
@@ -3772,12 +3785,11 @@ export function IntelligentProductRegistrationPage() {
                               </div>
                             </div>
                             <div className="rounded-md border border-matrix-border bg-matrix-panel p-3">
-                              <p className="font-semibold text-matrix-fg">Confianca</p>
-                              <p className="mt-1 text-sm text-matrix-muted">{selectedMercadoLivreResultCompatibility?.score !== null && selectedMercadoLivreResultCompatibility?.score !== undefined ? `${selectedMercadoLivreResultCompatibility.score}/100` : "Sem score"}</p>
+                              <p className="font-semibold text-matrix-fg">Compatibilidade</p>
                               <p className="mt-2 text-xs text-matrix-muted">
-                                {selectedMercadoLivreResultCompatibility?.level === "LOW"
-                                  ? "Baixa compatibilidade exige confirmacao extra antes de salvar."
-                                  : "Revise os campos antes de salvar localmente."}
+                                {selectedMercadoLivreResultCompatibility && isProductSuggestionPreviewAllowed(selectedMercadoLivreResultCompatibility)
+                                  ? "Revise os campos antes de salvar localmente."
+                                  : "Esta referencia nao pode abrir a previa."}
                               </p>
                             </div>
                           </div>

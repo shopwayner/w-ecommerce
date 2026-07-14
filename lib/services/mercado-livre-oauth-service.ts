@@ -6,12 +6,19 @@ import { decryptSecret, encryptSecret } from "@/lib/security/encryption";
 import { getUserAccountContext } from "@/lib/services/account-context-service";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { sanitizeLogPayload } from "@/lib/utils";
+import {
+  buildProductReferenceSearchQueries,
+  calculateProductSuggestionCompatibility,
+  isProductSuggestionPreviewAllowed
+} from "@/lib/intelligent-product-compatibility";
 
 const tokenUrl = "https://api.mercadolibre.com/oauth/token";
 const apiBaseUrl = "https://api.mercadolibre.com";
 const stateTtlMs = 10 * 60 * 1000;
 const mercadoLivreSearchBlockedWarning = "O Catalogo Mercado Livre recusou a consulta read-only no momento. A busca local continua disponivel.";
 const mercadoLivreDetailTimeoutMs = 8000;
+const mercadoLivreTitleSearchMaxQueries = 3;
+const mercadoLivreTitleSearchPauseMs = 150;
 
 type MercadoLivreTokenResponse = {
   access_token: string;
@@ -243,6 +250,56 @@ const localProductSearchSelect = {
 } satisfies Prisma.ProductSelect;
 
 type LocalProductSearchRecord = Prisma.ProductGetPayload<{ select: typeof localProductSearchSelect }>;
+
+function mercadoLivreSearchItemKey(item: NormalizedMercadoLivreSearchItem) {
+  return item.externalItemId ?? item.catalogProductId ?? `${item.title ?? ""}|${item.gtin ?? ""}|${item.imageUrl ?? ""}`;
+}
+
+function mergeUniqueMercadoLivreSearchItems(
+  current: NormalizedMercadoLivreSearchItem[],
+  incoming: NormalizedMercadoLivreSearchItem[]
+) {
+  const seen = new Set<string>();
+  const merged: NormalizedMercadoLivreSearchItem[] = [];
+  for (const item of [...current, ...incoming]) {
+    const key = mercadoLivreSearchItemKey(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+  return merged;
+}
+
+function hasAcceptableMercadoLivreReference(
+  localProduct: LocalProductSearchRecord | null,
+  items: NormalizedMercadoLivreSearchItem[]
+) {
+  if (!localProduct) return false;
+  return items.some((item) =>
+    isProductSuggestionPreviewAllowed(
+      calculateProductSuggestionCompatibility(
+        {
+          name: localProduct.name,
+          gtin: localProduct.ean,
+          brand: localProduct.brand
+        },
+        {
+          title: item.title,
+          gtin: item.gtin,
+          brand: item.brand,
+          categoryId: item.categoryId,
+          categoryName: item.categoryName,
+          categoryPath: item.categoryPath,
+          attributes: item.attributes
+        }
+      )
+    )
+  );
+}
+
+function pauseMercadoLivreTitleSearch() {
+  return new Promise((resolve) => setTimeout(resolve, mercadoLivreTitleSearchPauseMs));
+}
 
 function hashState(state: string) {
   return createHash("sha256").update(state).digest("hex");
@@ -1637,6 +1694,7 @@ export class MercadoLivreOAuthService {
       return catalogSearch;
     };
 
+    let titleSearchQueriesAttempted = resolvedSearch.searchType === "TITLE" ? 1 : 0;
     const firstSearch = await runSearchStep(resolvedSearch.searchValue, resolvedSearch.searchType);
     items.push(...firstSearch.items);
     searchPaging = firstSearch.paging;
@@ -1646,8 +1704,9 @@ export class MercadoLivreOAuthService {
     if (requestedSearchMode === "auto" && resolvedSearch.searchType === "GTIN" && firstSearch.total === 0 && !items.length) {
       const titleFallbackValue = localLookup.product?.name?.trim() || null;
       if (titleFallbackValue) {
-        warnings.push(`Nenhum resultado encontrado por GTIN/EAN ${resolvedSearch.searchValue}. A busca foi refeita automaticamente por titulo.`);
+        warnings.push("Nenhum resultado encontrado pelo identificador do produto. A busca foi refeita automaticamente por titulo.");
         const fallbackSearch = await runSearchStep(titleFallbackValue, "TITLE");
+        titleSearchQueriesAttempted = 1;
         items.splice(0, items.length, ...fallbackSearch.items);
         searchPaging = fallbackSearch.paging;
         mercadoLivreError = mercadoLivreError ?? fallbackSearch.error;
@@ -1665,6 +1724,47 @@ export class MercadoLivreOAuthService {
       }
     } else if (requestedSearchMode === "gtin" && resolvedSearch.searchType === "GTIN" && firstSearch.total === 0 && !items.length && !firstSearch.error) {
       warnings.push("Nenhum produto encontrado no Catalogo Mercado Livre para este GTIN/EAN. Tente buscar por titulo.");
+    }
+
+    if (effectiveSearchType === "TITLE" && pagingInput.page === 1) {
+      const titleSearchQueries = buildProductReferenceSearchQueries({
+        title: localLookup.product?.name?.trim() || effectiveSearchValue || resolvedSearch.searchValue,
+        brand: localLookup.product?.brand
+      }).slice(0, mercadoLivreTitleSearchMaxQueries);
+      const attemptedQueries = new Set(
+        [firstSearchType === "TITLE" ? firstSearchValue : null, fallbackSearchValue]
+          .filter((value): value is string => Boolean(value))
+          .map((value) => value.trim().toLocaleLowerCase("pt-BR").replace(/\s+/g, " "))
+      );
+
+      for (const searchValue of titleSearchQueries) {
+        if (titleSearchQueriesAttempted >= mercadoLivreTitleSearchMaxQueries) break;
+        if (hasAcceptableMercadoLivreReference(localLookup.product, items)) break;
+        const normalizedSearchValue = searchValue.trim().toLocaleLowerCase("pt-BR").replace(/\s+/g, " ");
+        if (attemptedQueries.has(normalizedSearchValue)) continue;
+        attemptedQueries.add(normalizedSearchValue);
+        await pauseMercadoLivreTitleSearch();
+        const stagedSearch = await runSearchStep(searchValue, "TITLE");
+        titleSearchQueriesAttempted += 1;
+        items.splice(0, items.length, ...mergeUniqueMercadoLivreSearchItems(items, stagedSearch.items));
+        searchPaging = stagedSearch.paging;
+        mercadoLivreError = mercadoLivreError ?? stagedSearch.error;
+        fallbackSearchType = "TITLE";
+        fallbackSearchValue = searchValue;
+        fallbackSearchTotal = stagedSearch.total;
+        fallbackApiMode = "q";
+        effectiveSearchType = "TITLE";
+        effectiveSearchValue = searchValue;
+        apiMode = "q";
+        fallbackUsed = true;
+      }
+
+      if (titleSearchQueriesAttempted > 1) {
+        warnings.push("A busca por titulo foi refinada mantendo tipo da peca, modelo, aplicacao e marca quando disponiveis.");
+      }
+      if (!hasAcceptableMercadoLivreReference(localLookup.product, items)) {
+        warnings.push("Nenhuma referencia compativel foi encontrada nas consultas seguras por titulo.");
+      }
     }
 
     if (mercadoLivreError?.httpStatus === 403) {
@@ -1698,6 +1798,11 @@ export class MercadoLivreOAuthService {
       publicSearchTotal,
       catalogFallbackUsed,
       catalogFallbackTotal,
+      searchStrategy: {
+        titleQueriesAttempted: titleSearchQueriesAttempted,
+        maxTitleQueries: mercadoLivreTitleSearchMaxQueries,
+        maxPages: 3
+      },
       analyzedResultsCount: prioritizedSearchItems.analyzedResultsCount,
       usefulResultsCount: prioritizedSearchItems.usefulResultsCount,
       displayedResultsCount: prioritizedSearchItems.displayedResultsCount,
