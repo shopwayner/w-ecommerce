@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
+import { prisma } from "@/lib/prisma";
 import {
   normalizeMercadoLivreItemId,
   normalizeMercadoLivreManualReference
@@ -15,6 +16,62 @@ type Params = {
 const noStoreHeaders = {
   "Cache-Control": "private, no-store, max-age=0"
 };
+
+function textValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function cachedAttributes(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const attributes = (value as Record<string, unknown>).attributes;
+  if (!Array.isArray(attributes)) return [];
+
+  return attributes.map((attribute) => {
+    if (!attribute || typeof attribute !== "object" || Array.isArray(attribute)) {
+      return { id: null, name: null, value: null };
+    }
+    const record = attribute as Record<string, unknown>;
+    return {
+      id: textValue(record.id),
+      name: textValue(record.name),
+      value: textValue(record.value) ?? textValue(record.value_name)
+    };
+  });
+}
+
+async function getCachedReferenceReadOnly(organizationId: string, itemId: string) {
+  const cached = await prisma.mercadoLivreListingCache.findFirst({
+    where: {
+      organizationId,
+      externalItemId: itemId,
+      connection: { status: "ACTIVE" }
+    },
+    select: {
+      externalItemId: true,
+      title: true,
+      gtin: true,
+      brand: true,
+      categoryId: true,
+      categoryName: true,
+      thumbnail: true,
+      rawAttributesJson: true
+    }
+  });
+  if (!cached) return null;
+
+  return normalizeMercadoLivreManualReference({
+    externalItemId: cached.externalItemId,
+    title: cached.title,
+    brand: cached.brand,
+    gtin: cached.gtin,
+    imageUrl: cached.thumbnail,
+    imageUrls: [],
+    categoryId: cached.categoryId,
+    categoryName: cached.categoryName,
+    categoryPath: cached.categoryName,
+    attributes: cachedAttributes(cached.rawAttributesJson)
+  });
+}
 
 function safeErrorResponse(error: unknown) {
   const message = error instanceof Error ? error.message : "";
@@ -57,6 +114,12 @@ export async function GET(_request: Request, { params }: Params) {
 
     if (!itemDiagnostic || itemDiagnostic.status !== "ok") {
       const notFound = itemDiagnostic?.httpStatus === 404;
+      const cachedReference = itemDiagnostic?.httpStatus === 403
+        ? await getCachedReferenceReadOnly(auth.context.organizationId, itemId)
+        : null;
+      if (cachedReference) {
+        return NextResponse.json({ item: cachedReference }, { headers: noStoreHeaders });
+      }
       return NextResponse.json(
         { error: notFound ? "Anúncio Mercado Livre não encontrado." : "Não foi possível carregar este anúncio agora." },
         { status: notFound ? 404 : 502, headers: noStoreHeaders }
