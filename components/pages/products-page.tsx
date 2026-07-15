@@ -37,7 +37,7 @@ import {
 import { AppShell } from "@/components/app-shell";
 import {
   BlingProductUpdateModal,
-  type BlingProductEditableValues,
+  type BlingProductReviewChanges,
   type BlingProductUpdatePreview,
   type BlingProductUpdateResult
 } from "@/components/bling-product-update-modal";
@@ -716,7 +716,7 @@ export function ProductsPage() {
     }
   }
 
-  async function confirmBlingProductUpdate(fields: BlingProductEditableValues) {
+  async function confirmBlingProductUpdate(fields: BlingProductReviewChanges) {
     if (
       !selectedBlingConnectionId ||
       !blingUpdatePreview ||
@@ -730,18 +730,13 @@ export function ProductsPage() {
     setBlingUpdateBusy(true);
     setBlingUpdateMessage("Atualizando produto...");
     try {
-      const reviewedFields = {
-        name: fields.name,
-        ...(fields.brand ? { brand: fields.brand } : {}),
-        ...(fields.images.length ? { images: fields.images } : {})
-      };
       const response = await fetch("/api/products/bling/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           connectionId: selectedBlingConnectionId,
           productId: blingUpdatePreview.item.productId,
-          fields: reviewedFields,
+          fields,
           confirmed: true,
           idempotencyKey
         })

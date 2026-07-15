@@ -15,6 +15,7 @@ import {
   isSupportedBlingProductStructure,
   maskBlingProductId,
   normalizeBlingProductImages,
+  normalizeBlingProductPresentationText,
   normalizeBlingProductReview,
   recordConfirmedBlingMappingSync,
   type BlingProductMappingSnapshot
@@ -107,8 +108,7 @@ test("normalizes the reviewed title, brand and image order", () => {
   assert.deepEqual(reviewed, {
     name: "Produto Matrix revisado",
     brand: "Marca Matrix",
-    images: [localProduct.images[1], localProduct.images[0]],
-    imagesProvided: true
+    images: [localProduct.images[1], localProduct.images[0]]
   });
 });
 
@@ -135,7 +135,7 @@ test("does not allow a brand when the local product has no valid brand", () => {
   const withoutBrand = { ...localProduct, brand: null };
   const reviewed = normalizeBlingProductReview({ name: "Produto" }, withoutBrand);
 
-  assert.equal(reviewed.brand, null);
+  assert.equal(reviewed.brand, undefined);
   assert.throws(
     () => normalizeBlingProductReview({ name: "Produto", brand: "Marca remota" }, withoutBrand),
     /nao esta disponivel/
@@ -233,7 +233,6 @@ test("preserves the remote title and omits brand and media when they are unchang
   const payload = buildBlingProductUpdatePayload(reviewed, remoteProduct, []);
 
   assert.deepEqual(payload, {
-    nome: "Produto antigo",
     tipo: "p",
     situacao: "a",
     formato: "s"
@@ -241,9 +240,18 @@ test("preserves the remote title and omits brand and media when they are unchang
 });
 
 test("does not delete remote images when no valid image remains selected", () => {
+  assert.throws(
+    () => normalizeBlingProductReview(
+      { images: [] },
+      localProduct,
+      remoteProduct
+    ),
+    /ao menos uma foto/
+  );
   const reviewed = normalizeBlingProductReview(
-    { name: "Produto Matrix", brand: "Marca Matrix", images: [] },
-    localProduct
+    { name: "Produto Matrix", brand: "Marca Matrix" },
+    localProduct,
+    remoteProduct
   );
   assert.deepEqual(compareBlingProductValues(reviewed, remoteProduct), ["name", "brand"]);
   assert.doesNotMatch(
@@ -290,7 +298,6 @@ test("detects title, brand and photos independently and keeps the official image
   );
   assert.deepEqual(compareBlingProductValues(photosOnly, matchingRemoteProduct()), ["images"]);
   assert.deepEqual(buildBlingProductUpdatePayload(photosOnly, matchingRemoteProduct(), ["images"]), {
-    nome: localProduct.name,
     tipo: "p",
     situacao: "a",
     formato: "s",
@@ -304,6 +311,96 @@ test("detects title, brand and photos independently and keeps the official image
     localProduct
   );
   assert.deepEqual(compareBlingProductValues(unchanged, matchingRemoteProduct()), []);
+});
+
+test("preserves five remote photos when the user changes only the title", () => {
+  const local = {
+    ...localProduct,
+    name: "Sensor Hibrido Pcx 150 13-15 / Lead 110 10-16 T-mac",
+    brand: "T-Mac",
+    images: ["https://cdn.example.com/local-sensor.jpg"]
+  };
+  const remoteImages = Array.from(
+    { length: 5 },
+    (_, index) => `https://cdn.example.com/remote-sensor-${index + 1}.jpg`
+  );
+  const remote = matchingRemoteProduct({
+    nome: "Sensor Hibrido PCX 150 13-15 / Lead 110 10-16 T-Mac",
+    marca: "T-Mac",
+    midia: {
+      imagens: {
+        externas: remoteImages.map((link) => ({ link })),
+        internas: []
+      }
+    }
+  });
+  const reviewed = normalizeBlingProductReview({ name: local.name }, local, remote);
+
+  assert.deepEqual(compareBlingProductValues(reviewed, remote), ["name"]);
+  const payload = buildBlingProductUpdatePayload(reviewed, remote, ["name"]);
+  assert.deepEqual(payload, {
+    nome: local.name,
+    tipo: "p",
+    situacao: "a",
+    formato: "s"
+  });
+  assert.equal("marca" in payload, false);
+  assert.equal("midia" in payload, false);
+  assert.equal(remoteImages.length, 5);
+});
+
+test("accepts an explicit merged gallery and preserves all remote photos", () => {
+  const localImage = "https://cdn.example.com/local-sensor.jpg";
+  const remoteImages = Array.from(
+    { length: 5 },
+    (_, index) => `https://cdn.example.com/remote-sensor-${index + 1}.jpg`
+  );
+  const local = { ...localProduct, images: [localImage] };
+  const remote = matchingRemoteProduct({
+    midia: {
+      imagens: {
+        externas: remoteImages.map((link) => ({ link })),
+        internas: []
+      }
+    }
+  });
+  const reviewed = normalizeBlingProductReview(
+    { images: [...remoteImages, localImage] },
+    local,
+    remote
+  );
+
+  assert.deepEqual(compareBlingProductValues(reviewed, remote), ["images"]);
+  const payload = buildBlingProductUpdatePayload(reviewed, remote, ["images"]);
+  assert.deepEqual(
+    (payload.midia as { imagens: { imagensURL: Array<{ link: string }> } }).imagens.imagensURL,
+    [...remoteImages, localImage].map((link) => ({ link }))
+  );
+});
+
+test("allows an explicit remote photo removal but rejects an unknown photo", () => {
+  const remote = matchingRemoteProduct();
+  const reviewed = normalizeBlingProductReview(
+    { images: [localProduct.images[1]] },
+    localProduct,
+    remote
+  );
+  assert.deepEqual(compareBlingProductValues(reviewed, remote), ["images"]);
+  assert.throws(
+    () => normalizeBlingProductReview(
+      { images: ["https://cdn.example.com/not-reviewed.jpg"] },
+      localProduct,
+      remote
+    ),
+    /Revise as fotos/
+  );
+});
+
+test("treats capitalization and simple punctuation as presentation-only", () => {
+  assert.equal(
+    normalizeBlingProductPresentationText("Sensor Hibrido Pcx / T-mac"),
+    normalizeBlingProductPresentationText("Sensor Hibrido PCX - T-Mac")
+  );
 });
 
 test("preserves exact required technical field values from the remote product", () => {
@@ -524,6 +621,26 @@ test("requires reviewed fields and idempotency only for a confirmed update", () 
       fields: { name: "Produto" }
     }).success,
     false
+  );
+  assert.equal(
+    blingProductUpdateRequestSchema.safeParse({
+      connectionId: "connection-1",
+      productId: "product-1",
+      confirmed: true,
+      idempotencyKey: "request_1234567890",
+      fields: {}
+    }).success,
+    false
+  );
+  assert.equal(
+    blingProductUpdateRequestSchema.safeParse({
+      connectionId: "connection-1",
+      productId: "product-1",
+      confirmed: true,
+      idempotencyKey: "request_1234567890",
+      fields: { name: "Produto revisado" }
+    }).success,
+    true
   );
 });
 
@@ -774,6 +891,15 @@ test("renders only the simplified single-product modal contract", () => {
   assert.match(modalSource, /linkNeedsReview \? "Fechar" : "Cancelar"/);
   assert.match(modalSource, /setShowLinkReview/);
   assert.doesNotMatch(modalSource, /setShowLinkReview[\s\S]{0,200}(fetch\(|onConfirm\()/);
+  assert.match(modalSource, /setImages\(item\?\.remote\?\.images \?\? \[\]\)/);
+  assert.match(modalSource, /Fotos atuais no Bling/);
+  assert.match(modalSource, /Fotos disponíveis no W Ecommerce/);
+  assert.match(modalSource, /Usar estas fotos no Bling/);
+  assert.match(modalSource, /nameChanged/);
+  assert.match(modalSource, /brandChanged/);
+  assert.match(modalSource, /imagesChanged/);
+  assert.match(modalSource, /if \(imagesChanged\) fields\.images = images/);
+  assert.doesNotMatch(pageSource, /fields\.images\.length/);
   assert.match(pageSource, /productId: selectedBlingProduct\.id/);
   for (const hiddenLabel of [
     "SKU",

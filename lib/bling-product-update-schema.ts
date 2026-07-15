@@ -2,11 +2,19 @@ import { z } from "zod";
 
 export const blingProductReviewedFieldsSchema = z
   .object({
-    name: z.string().max(220),
+    name: z.string().max(220).optional(),
     brand: z.string().max(120).optional(),
     images: z.array(z.string().max(2_000)).max(13).optional()
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (!Object.keys(value).length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Selecione ao menos uma alteracao antes de atualizar."
+      });
+    }
+  });
 
 export type BlingProductReviewInput = z.infer<typeof blingProductReviewedFieldsSchema>;
 

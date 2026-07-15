@@ -10,10 +10,9 @@ export type BlingProductUpdateField = (typeof BLING_PRODUCT_UPDATE_FIELDS)[numbe
 
 
 export type BlingReviewedProductValues = {
-  name: string;
-  brand: string | null;
-  images: string[];
-  imagesProvided: boolean;
+  name?: string;
+  brand?: string;
+  images?: string[];
 };
 
 export type BlingProductVisibleValues = {
@@ -259,6 +258,10 @@ function identityText(value: unknown) {
     .trim();
 }
 
+export function normalizeBlingProductPresentationText(value: unknown) {
+  return identityText(value);
+}
+
 function identityCode(value: unknown) {
   return identityText(value).replace(/\s+/g, "");
 }
@@ -370,29 +373,40 @@ export function assessBlingProductIdentity(input: {
 
 export function normalizeBlingProductReview(
   input: BlingProductReviewInput,
-  local: LocalProductValues
+  local: LocalProductValues,
+  remoteValue?: unknown
 ): BlingReviewedProductValues {
-  const name = normalizedText(input.name);
-  if (!name) throw new Error("Informe um titulo para atualizar o produto.");
-  if (name.length > 220) throw new Error("O titulo informado e muito longo.");
+  const remote = toRemoteValues(remoteData(remoteValue));
+  const reviewed: BlingReviewedProductValues = {};
 
-  let brand: string | null = null;
-  if (local.brand) {
-    brand = normalizedText(input.brand);
+  if (input.name !== undefined) {
+    const name = normalizedText(input.name);
+    if (!name) throw new Error("Informe um titulo para atualizar o produto.");
+    if (name.length > 220) throw new Error("O titulo informado e muito longo.");
+    reviewed.name = name;
+  }
+
+  if (input.brand !== undefined) {
+    if (!local.brand && !remote.brand) {
+      throw new Error("A marca nao esta disponivel para revisao neste produto.");
+    }
+    const brand = normalizedText(input.brand);
     if (!brand) throw new Error("Informe a marca para atualizar o produto.");
     if (brand.length > 120) throw new Error("A marca informada e muito longa.");
-  } else if (input.brand !== undefined) {
-    throw new Error("A marca nao esta disponivel para revisao neste produto.");
+    reviewed.brand = brand;
   }
 
-  const imagesProvided = input.images !== undefined;
-  const images = imagesProvided ? normalizeBlingProductImages(input.images ?? []) : [];
-  const allowedImages = new Set(local.images);
-  if (images.some((image) => !allowedImages.has(image))) {
-    throw new Error("Revise as fotos selecionadas e tente novamente.");
+  if (input.images !== undefined) {
+    const images = normalizeBlingProductImages(input.images);
+    if (!images.length) throw new Error("Mantenha ao menos uma foto para atualizar a galeria.");
+    const allowedImages = new Set([...local.images, ...remote.images]);
+    if (images.some((image) => !allowedImages.has(image))) {
+      throw new Error("Revise as fotos selecionadas e tente novamente.");
+    }
+    reviewed.images = images;
   }
 
-  return { name, brand, images, imagesProvided };
+  return reviewed;
 }
 
 export function compareBlingProductValues(
@@ -401,9 +415,9 @@ export function compareBlingProductValues(
 ) {
   const remote = toRemoteValues(remoteData(remoteValue));
   const differences: BlingProductUpdateField[] = [];
-  if (reviewed.name !== remote.name) differences.push("name");
-  if (reviewed.brand && reviewed.brand !== remote.brand) differences.push("brand");
-  if (reviewed.imagesProvided && reviewed.images.length > 0 && !sameImages(reviewed.images, remote.images)) {
+  if (reviewed.name !== undefined && reviewed.name !== remote.name) differences.push("name");
+  if (reviewed.brand !== undefined && reviewed.brand !== remote.brand) differences.push("brand");
+  if (reviewed.images !== undefined && !sameImages(reviewed.images, remote.images)) {
     differences.push("images");
   }
   return differences;
@@ -419,12 +433,10 @@ export function buildBlingProductUpdatePayload(
   fields: readonly BlingProductUpdateField[]
 ) {
   const remote = remoteData(remoteValue);
-  const current = toRemoteValues(remote);
   const type = exactString(remote.tipo);
   const situation = exactString(remote.situacao);
   const format = exactString(remote.formato);
   if (
-    !current.name ||
     !["S", "P", "N"].includes(type.toUpperCase()) ||
     !["A", "I"].includes(situation.toUpperCase()) ||
     format.toUpperCase() !== "S"
@@ -434,14 +446,21 @@ export function buildBlingProductUpdatePayload(
 
   const selected = new Set(fields);
   const payload: JsonRecord = {
-    nome: selected.has("name") ? reviewed.name : current.name,
     tipo: type,
     situacao: situation,
     formato: format
   };
 
-  if (selected.has("brand") && reviewed.brand) payload.marca = reviewed.brand;
-  if (selected.has("images") && reviewed.images.length > 0) {
+  if (selected.has("name")) {
+    if (!reviewed.name) throw new Error("Informe um titulo para atualizar o produto.");
+    payload.nome = reviewed.name;
+  }
+  if (selected.has("brand")) {
+    if (!reviewed.brand) throw new Error("Informe a marca para atualizar o produto.");
+    payload.marca = reviewed.brand;
+  }
+  if (selected.has("images")) {
+    if (!reviewed.images?.length) throw new Error("Mantenha ao menos uma foto para atualizar a galeria.");
     payload.midia = {
       imagens: {
         imagensURL: reviewed.images.map((link) => ({ link }))
@@ -663,10 +682,8 @@ async function inspectProduct(input: {
       };
     }
     const initialReview: BlingReviewedProductValues = {
-      name: localValues.name,
-      brand: localValues.brand,
-      images: localValues.images,
-      imagesProvided: localValues.images.length > 0
+      ...(localValues.name !== remoteValues.name ? { name: localValues.name } : {}),
+      ...(localValues.brand && localValues.brand !== remoteValues.brand ? { brand: localValues.brand } : {})
     };
     const differences = compareBlingProductValues(initialReview, remoteProduct);
     return {
@@ -838,7 +855,7 @@ export class BlingProductUpdateService {
           ...failure
         };
       } else {
-        const reviewed = normalizeBlingProductReview(input.fields, inspection.localValues);
+        const reviewed = normalizeBlingProductReview(input.fields, inspection.localValues, inspection.remoteProduct);
         const changedFields = compareBlingProductValues(reviewed, inspection.remoteProduct);
         attemptedFields = changedFields;
         if (!changedFields.length) {
