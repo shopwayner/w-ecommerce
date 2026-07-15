@@ -6,7 +6,6 @@ import {
   AlertTriangle,
   ChevronLeft,
   ChevronRight,
-  Eye,
   ImageIcon,
   RefreshCw,
   Star,
@@ -28,6 +27,8 @@ export type BlingProductReviewChanges = {
 };
 
 export type BlingProductUpdatePreview = {
+  confirmedLinkMismatch?: true;
+  linkMismatchConfirmation?: string;
   item: {
     productId: string;
     status: "READY" | "UNCHANGED" | "VINCULO_PRECISA_REVISAO" | "NOT_LINKED" | "UNSUPPORTED" | "ERROR";
@@ -41,6 +42,7 @@ export type BlingProductUpdatePreview = {
       remoteName: string;
       localMeasures: string[];
       remoteMeasures: string[];
+      reasons: Array<"KIT_VS_UNIT" | "MEASURES_MISMATCH" | "MODEL_MISMATCH" | "SKU_MISMATCH" | "GTIN_MISMATCH" | "BRAND_MISMATCH">;
     };
   };
 };
@@ -60,6 +62,7 @@ type BlingProductUpdateModalProps = {
   message: string;
   onClose: () => void;
   onConfirm: (fields: BlingProductReviewChanges) => void;
+  onConfirmLinkMismatch: () => void;
   preview: BlingProductUpdatePreview | null;
   result: BlingProductUpdateResult | null;
 };
@@ -85,11 +88,24 @@ function mergeImages(current: string[], available: string[]) {
   return [...new Set([...current, ...available])].slice(0, 13);
 }
 
+const linkMismatchReasonLabels: Record<
+  NonNullable<BlingProductUpdatePreview["item"]["linkReview"]>["reasons"][number],
+  string
+> = {
+  KIT_VS_UNIT: "O cadastro local indica um conjunto e o cadastro vinculado indica uma unidade.",
+  MEASURES_MISMATCH: "As medidas identificadas nos títulos são diferentes.",
+  MODEL_MISMATCH: "Os modelos identificados nos títulos são diferentes.",
+  SKU_MISMATCH: "Os códigos informados nos dois cadastros são diferentes.",
+  GTIN_MISMATCH: "Os identificadores comerciais informados são diferentes.",
+  BRAND_MISMATCH: "As marcas informadas nos dois cadastros são diferentes."
+};
+
 export function BlingProductUpdateModal({
   busy,
   message,
   onClose,
   onConfirm,
+  onConfirmLinkMismatch,
   preview,
   result
 }: BlingProductUpdateModalProps) {
@@ -99,6 +115,7 @@ export function BlingProductUpdateModal({
   const [images, setImages] = useState<string[]>([]);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [showLinkReview, setShowLinkReview] = useState(false);
+  const [linkMismatchAcknowledged, setLinkMismatchAcknowledged] = useState(false);
   const [nameTouched, setNameTouched] = useState(false);
   const [brandTouched, setBrandTouched] = useState(false);
   const [imagesEditingEnabled, setImagesEditingEnabled] = useState(false);
@@ -110,6 +127,7 @@ export function BlingProductUpdateModal({
     setImages(item?.remote?.images ?? []);
     setSelectedImageIndex(0);
     setShowLinkReview(false);
+    setLinkMismatchAcknowledged(false);
     setNameTouched(false);
     setBrandTouched(false);
     setImagesEditingEnabled(false);
@@ -224,10 +242,12 @@ export function BlingProductUpdateModal({
         <header className="flex items-start justify-between gap-4 border-b border-matrix-border px-4 py-4 sm:px-5">
           <div className="min-w-0">
             <h3 id="bling-product-update-title" className="text-xl font-semibold text-matrix-fg">
-              Atualizar produto no Bling
+              {linkNeedsReview ? "Revisar vínculo" : "Atualizar produto no Bling"}
             </h3>
             <p className="mt-1 text-sm text-matrix-muted">
-              Revise o título, a marca e as fotos antes de enviar.
+              {linkNeedsReview
+                ? "Confira os dois cadastros antes de continuar."
+                : "Revise o título, a marca e as fotos antes de enviar."}
             </p>
           </div>
           <button
@@ -271,24 +291,15 @@ export function BlingProductUpdateModal({
               </div>
 
               <div className="flex min-w-0 flex-col justify-center gap-4">
-                <div>
-                  <p className="text-xs font-semibold uppercase text-matrix-muted">Produto selecionado</p>
-                  <h4 className="mt-2 text-xl font-semibold text-matrix-fg">{item.local.name}</h4>
-                  {item.local.brand ? <p className="mt-2 text-sm text-matrix-muted">Marca: {item.local.brand}</p> : null}
-                </div>
                 <div className="flex gap-3 rounded-md border border-amber-500/35 bg-amber-500/10 p-4 text-sm text-amber-100">
                   <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
-                  <p>{item.message}</p>
+                  <p>Os dados parecem diferentes, mas você pode confirmar manualmente que este é o mesmo produto.</p>
                 </div>
-                {showLinkReview && item.linkReview ? (
+                {item.linkReview ? (
                   <div className="grid gap-3 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm">
                     <div>
-                      <p className="text-xs font-semibold uppercase text-matrix-muted">Status do vinculo</p>
-                      <p className="mt-1 text-amber-200">Precisa de revisao</p>
-                    </div>
-                    <div>
                       <p className="text-xs font-semibold uppercase text-matrix-muted">ID Bling</p>
-                      <p className="mt-1 text-matrix-fg">{item.linkReview.externalProductIdMasked ?? "Indisponivel"}</p>
+                      <p className="mt-1 text-matrix-fg">{item.linkReview.externalProductIdMasked ?? "Indisponível"}</p>
                     </div>
                     <div>
                       <p className="text-xs font-semibold uppercase text-matrix-muted">Produto no W Ecommerce</p>
@@ -302,15 +313,37 @@ export function BlingProductUpdateModal({
                       <div className="grid gap-2 sm:grid-cols-2">
                         <div>
                           <p className="text-xs font-semibold uppercase text-matrix-muted">Medidas locais</p>
-                          <p className="mt-1 text-matrix-fg">{item.linkReview.localMeasures.join(" + ") || "Nao informadas"}</p>
+                          <p className="mt-1 text-matrix-fg">{item.linkReview.localMeasures.join(" + ") || "Não informadas"}</p>
                         </div>
                         <div>
                           <p className="text-xs font-semibold uppercase text-matrix-muted">Medidas no Bling</p>
-                          <p className="mt-1 text-matrix-fg">{item.linkReview.remoteMeasures.join(" + ") || "Nao informadas"}</p>
+                          <p className="mt-1 text-matrix-fg">{item.linkReview.remoteMeasures.join(" + ") || "Não informadas"}</p>
                         </div>
                       </div>
                     ) : null}
+                    {item.linkReview.reasons.length ? (
+                      <div>
+                        <p className="text-xs font-semibold uppercase text-matrix-muted">Principais diferenças</p>
+                        <ul className="mt-2 grid gap-1 text-matrix-fg">
+                          {item.linkReview.reasons.map((reason) => (
+                            <li key={reason}>• {linkMismatchReasonLabels[reason]}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
                   </div>
+                ) : null}
+                {showLinkReview ? (
+                  <label className="flex cursor-pointer items-start gap-3 rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/10 p-4 text-sm text-matrix-fg">
+                    <input
+                      checked={linkMismatchAcknowledged}
+                      className="mt-0.5 h-4 w-4 accent-matrix-gold"
+                      disabled={busy}
+                      onChange={(event) => setLinkMismatchAcknowledged(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span>Confirmo que este é o mesmo produto.</span>
+                  </label>
                 ) : null}
               </div>
             </div>
@@ -551,12 +584,21 @@ export function BlingProductUpdateModal({
           {linkNeedsReview ? (
             <Button
               className="w-full sm:w-auto"
-              disabled={busy}
-              onClick={() => setShowLinkReview((current) => !current)}
+              disabled={busy || (showLinkReview && !linkMismatchAcknowledged)}
+              onClick={() => {
+                if (!showLinkReview) {
+                  setShowLinkReview(true);
+                  return;
+                }
+                onConfirmLinkMismatch();
+              }}
               type="button"
             >
-              <Eye className="mr-2 h-4 w-4" />
-              {showLinkReview ? "Ocultar detalhes" : "Revisar vinculo"}
+              {busy
+                ? "Confirmando vínculo..."
+                : showLinkReview
+                  ? "Continuar com este vínculo"
+                  : "Revisar vínculo"}
             </Button>
           ) : (
             <Button

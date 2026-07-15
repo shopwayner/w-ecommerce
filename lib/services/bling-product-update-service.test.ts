@@ -10,6 +10,7 @@ import {
   assessBlingProductIdentity,
   buildBlingProductUpdatePayload,
   compareBlingProductValues,
+  createBlingProductLinkMismatchConfirmation,
   describeBlingProductUpdateFailure,
   getBlingProductUpdateErrorMessage,
   isSupportedBlingProductStructure,
@@ -18,6 +19,7 @@ import {
   normalizeBlingProductPresentationText,
   normalizeBlingProductReview,
   recordConfirmedBlingMappingSync,
+  verifyBlingProductLinkMismatchConfirmation,
   type BlingProductMappingSnapshot
 } from "./bling-product-update-service";
 import { BlingApiError, classifyBlingApiFailure } from "./bling-api-client";
@@ -644,6 +646,89 @@ test("requires reviewed fields and idempotency only for a confirmed update", () 
   );
 });
 
+test("accepts link mismatch confirmation only in its explicit request stages", () => {
+  const base = { connectionId: "connection-1", productId: "product-1" };
+  const idempotencyKey = "link_review_1234567890";
+  const linkMismatchConfirmation = `v1.${"a".repeat(64)}`;
+
+  assert.equal(blingProductUpdateRequestSchema.safeParse({ ...base, confirmedLinkMismatch: true }).success, false);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    confirmedLinkMismatch: true,
+    idempotencyKey
+  }).success, true);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    confirmedLinkMismatch: true,
+    idempotencyKey,
+    fields: { name: "Nao permitido nesta etapa" }
+  }).success, false);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    confirmed: true,
+    confirmedLinkMismatch: true,
+    idempotencyKey,
+    fields: { name: "Produto revisado" }
+  }).success, false);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    confirmed: true,
+    confirmedLinkMismatch: true,
+    linkMismatchConfirmation,
+    idempotencyKey,
+    fields: { name: "Produto revisado" }
+  }).success, true);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    confirmed: true,
+    linkMismatchConfirmation,
+    idempotencyKey,
+    fields: { name: "Produto revisado" }
+  }).success, false);
+});
+
+test("binds a link mismatch confirmation to one user and operation", () => {
+  const previousKey = process.env.APP_ENCRYPTION_KEY;
+  process.env.APP_ENCRYPTION_KEY = "ab".repeat(32);
+  try {
+    const now = new Date("2026-07-15T12:00:00.000Z");
+    const scope = {
+      userId: "user-1",
+      organizationId: "organization-1",
+      connectionId: "connection-1",
+      productId: "product-1",
+      externalProductId: "10310",
+      idempotencyKey: "link_review_1234567890"
+    };
+    const confirmation = createBlingProductLinkMismatchConfirmation(scope, now);
+    assert.doesNotMatch(confirmation, /10310|user-1|organization-1/);
+    assert.equal(
+      verifyBlingProductLinkMismatchConfirmation(confirmation, scope, new Date(now.getTime() + 60_000)).externalProductId,
+      "10310"
+    );
+
+    for (const changedScope of [
+      { ...scope, userId: "user-2" },
+      { ...scope, organizationId: "organization-2" },
+      { ...scope, connectionId: "connection-2" },
+      { ...scope, productId: "product-2" },
+      { ...scope, idempotencyKey: "link_review_0987654321" }
+    ]) {
+      assert.throws(
+        () => verifyBlingProductLinkMismatchConfirmation(confirmation, changedScope, new Date(now.getTime() + 60_000)),
+        /Revise o vinculo novamente/
+      );
+    }
+    assert.throws(
+      () => verifyBlingProductLinkMismatchConfirmation(confirmation, scope, new Date(now.getTime() + 11 * 60_000)),
+      /Revise o vinculo novamente/
+    );
+  } finally {
+    if (previousKey === undefined) delete process.env.APP_ENCRYPTION_KEY;
+    else process.env.APP_ENCRYPTION_KEY = previousKey;
+  }
+});
+
 test("masks product identity and returns only friendly connection errors", () => {
   assert.equal(maskBlingProductId("123456789"), "***6789");
   assert.equal(maskBlingProductId("123"), "***123");
@@ -819,6 +904,7 @@ test("keeps preview read-only and performs one PUT followed by one verification 
 
   assert.match(previewSource, /readOnly: true/);
   assert.doesNotMatch(previewSource, /createUpdateJob|method: "PUT"/);
+  assert.doesNotMatch(previewSource, /productExternalMapping\.(create|update|upsert)/);
   assert.equal((updateSource.match(/method: "PUT"/g) ?? []).length, 1);
   assert.ok(linkReviewGuard >= 0 && linkReviewGuard < putCall);
   assert.match(updateSource, /code: "LINK_REVIEW_REQUIRED"[\s\S]*putRequests: 0/);
@@ -828,6 +914,8 @@ test("keeps preview read-only and performs one PUT followed by one verification 
   assert.match(source, /where: \{ id: productId, organizationId \}/);
   assert.match(source, /where: \{ organizationId, connectionId \}/);
   assert.match(source, /where: \{ id: connectionId, organizationId \}/);
+  assert.match(source, /input\.confirmedLinkMismatchExternalProductId === externalProductId/);
+  assert.match(source, /externalProductId: confirmation\.externalProductId/);
   assert.match(source, /connection\.status !== "ACTIVE"/);
   assert.match(source, /pg_advisory_xact_lock/);
   assert.match(source, /pg_advisory_xact_lock[\s\S]*::text AS "lockState"/);
@@ -861,6 +949,9 @@ test("requires both write permissions, an administrator and explicit confirmatio
   assert.match(source, /auth\.context\.role !== "ADMIN"/);
   assert.match(source, /parsed\.data\.confirmed/);
   assert.match(source, /parsed\.data\.idempotencyKey/);
+  assert.match(source, /USER_CONFIRMED_SAME_PRODUCT/);
+  assert.match(source, /auth\.context\.user\.id/);
+  assert.match(source, /requirePersist: true/);
   assert.doesNotMatch(source, /export async function (GET|PUT|PATCH|DELETE)/);
 });
 
@@ -886,11 +977,14 @@ test("renders only the simplified single-product modal contract", () => {
   assert.match(modalSource, /Remover foto/);
   assert.match(modalSource, /item\?\.status === "VINCULO_PRECISA_REVISAO"/);
   assert.match(modalSource, /linkNeedsReview \? \(/);
-  assert.match(modalSource, /Revisar vinculo/);
-  assert.match(modalSource, /Precisa de revisao/);
+  assert.match(modalSource, /Revisar vínculo/);
+  assert.match(modalSource, /Revisar vínculo/);
+  assert.match(modalSource, /Continuar com este vínculo/);
+  assert.match(modalSource, /Confirmo que este é o mesmo produto/);
   assert.match(modalSource, /linkNeedsReview \? "Fechar" : "Cancelar"/);
   assert.match(modalSource, /setShowLinkReview/);
-  assert.doesNotMatch(modalSource, /setShowLinkReview[\s\S]{0,200}(fetch\(|onConfirm\()/);
+  assert.match(pageSource, /confirmedLinkMismatch: true/);
+  assert.match(pageSource, /linkMismatchConfirmation: blingUpdatePreview\.linkMismatchConfirmation/);
   assert.match(modalSource, /setImages\(item\?\.remote\?\.images \?\? \[\]\)/);
   assert.match(modalSource, /Fotos atuais no Bling/);
   assert.match(modalSource, /Fotos disponíveis no W Ecommerce/);
@@ -902,8 +996,6 @@ test("renders only the simplified single-product modal contract", () => {
   assert.doesNotMatch(pageSource, /fields\.images\.length/);
   assert.match(pageSource, /productId: selectedBlingProduct\.id/);
   for (const hiddenLabel of [
-    "SKU",
-    "GTIN",
     "Descricao",
     "Categoria",
     "Preco",
@@ -913,4 +1005,6 @@ test("renders only the simplified single-product modal contract", () => {
   ]) {
     assert.doesNotMatch(modalSource, new RegExp(hiddenLabel, "i"));
   }
+  assert.doesNotMatch(modalSource, />\s*SKU\s*</i);
+  assert.doesNotMatch(modalSource, />\s*GTIN\s*</i);
 });

@@ -738,7 +738,13 @@ export function ProductsPage() {
           productId: blingUpdatePreview.item.productId,
           fields,
           confirmed: true,
-          idempotencyKey
+          idempotencyKey,
+          ...(blingUpdatePreview.confirmedLinkMismatch && blingUpdatePreview.linkMismatchConfirmation
+            ? {
+                confirmedLinkMismatch: true,
+                linkMismatchConfirmation: blingUpdatePreview.linkMismatchConfirmation
+              }
+            : {})
         })
       });
       const payload = await response.json().catch(() => ({}));
@@ -755,6 +761,47 @@ export function ProductsPage() {
       }
     } catch {
       setBlingUpdateMessage("Nao foi possivel atualizar o produto no Bling agora.");
+    } finally {
+      blingUpdateRequestInFlight.current = false;
+      setBlingUpdateBusy(false);
+    }
+  }
+
+  async function confirmBlingProductLinkMismatch() {
+    if (
+      !selectedBlingConnectionId
+      || !blingUpdatePreview
+      || blingUpdatePreview.item.status !== "VINCULO_PRECISA_REVISAO"
+      || blingUpdateBusy
+      || blingUpdateRequestInFlight.current
+    ) return;
+    const idempotencyKey = blingUpdateIdempotencyKey.current;
+    if (!idempotencyKey) return;
+
+    blingUpdateRequestInFlight.current = true;
+    setBlingUpdateBusy(true);
+    setBlingUpdateMessage("Confirmando o vínculo selecionado...");
+    try {
+      const response = await fetch("/api/products/bling/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          connectionId: selectedBlingConnectionId,
+          productId: blingUpdatePreview.item.productId,
+          confirmed: false,
+          confirmedLinkMismatch: true,
+          idempotencyKey
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.data?.confirmedLinkMismatch || !payload.data?.linkMismatchConfirmation) {
+        setBlingUpdateMessage(payload.error ?? "Não foi possível confirmar este vínculo agora.");
+        return;
+      }
+      setBlingUpdatePreview(payload.data as BlingProductUpdatePreview);
+      setBlingUpdateMessage("");
+    } catch {
+      setBlingUpdateMessage("Não foi possível confirmar este vínculo agora.");
     } finally {
       blingUpdateRequestInFlight.current = false;
       setBlingUpdateBusy(false);
@@ -1183,6 +1230,7 @@ export function ProductsPage() {
           message={blingUpdateMessage}
           onClose={closeBlingUpdateModal}
           onConfirm={(fields) => void confirmBlingProductUpdate(fields)}
+          onConfirmLinkMismatch={() => void confirmBlingProductLinkMismatch()}
           preview={blingUpdatePreview}
           result={blingUpdateResult}
         />

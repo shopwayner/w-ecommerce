@@ -1,6 +1,7 @@
 import { ERPProvider, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { BlingProductReviewInput } from "@/lib/bling-product-update-schema";
+import { decryptSecret, encryptSecret } from "@/lib/security/encryption";
 import { BlingApiError, blingApiClient } from "@/lib/services/bling-api-client";
 
 type JsonRecord = Record<string, unknown>;
@@ -37,6 +38,7 @@ export type BlingProductLinkReview = {
   remoteName: string;
   localMeasures: string[];
   remoteMeasures: string[];
+  reasons: BlingProductIdentityReason[];
 };
 
 export type BlingProductIdentityReason =
@@ -130,6 +132,72 @@ type AdvisoryLockTransaction = Pick<Prisma.TransactionClient, "$queryRaw">;
 const updateJobType = "BLING_PRODUCT_UPDATE";
 const staleJobLeaseMs = 5 * 60 * 1_000;
 const maximumImages = 13;
+const linkMismatchConfirmationMaxAgeMs = 10 * 60 * 1_000;
+
+type BlingProductLinkMismatchConfirmation = {
+  version: 1;
+  reason: "USER_CONFIRMED_SAME_PRODUCT";
+  userId: string;
+  organizationId: string;
+  connectionId: string;
+  productId: string;
+  externalProductId: string;
+  idempotencyKey: string;
+  issuedAt: string;
+  expiresAt: string;
+};
+
+type BlingProductLinkMismatchConfirmationScope = Omit<
+  BlingProductLinkMismatchConfirmation,
+  "version" | "reason" | "issuedAt" | "expiresAt"
+>;
+
+export function createBlingProductLinkMismatchConfirmation(
+  scope: BlingProductLinkMismatchConfirmationScope,
+  now = new Date()
+) {
+  const confirmation: BlingProductLinkMismatchConfirmation = {
+    version: 1,
+    reason: "USER_CONFIRMED_SAME_PRODUCT",
+    ...scope,
+    issuedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + linkMismatchConfirmationMaxAgeMs).toISOString()
+  };
+  return encryptSecret(JSON.stringify(confirmation));
+}
+
+export function verifyBlingProductLinkMismatchConfirmation(
+  value: string,
+  expected: Omit<BlingProductLinkMismatchConfirmationScope, "externalProductId">,
+  now = new Date()
+) {
+  try {
+    const confirmation = JSON.parse(decryptSecret(value)) as Partial<BlingProductLinkMismatchConfirmation>;
+    const expiresAt = typeof confirmation.expiresAt === "string" ? Date.parse(confirmation.expiresAt) : Number.NaN;
+    const issuedAt = typeof confirmation.issuedAt === "string" ? Date.parse(confirmation.issuedAt) : Number.NaN;
+    if (
+      confirmation.version !== 1
+      || confirmation.reason !== "USER_CONFIRMED_SAME_PRODUCT"
+      || confirmation.userId !== expected.userId
+      || confirmation.organizationId !== expected.organizationId
+      || confirmation.connectionId !== expected.connectionId
+      || confirmation.productId !== expected.productId
+      || confirmation.idempotencyKey !== expected.idempotencyKey
+      || typeof confirmation.externalProductId !== "string"
+      || !/^\d+$/.test(confirmation.externalProductId)
+      || !Number.isFinite(issuedAt)
+      || !Number.isFinite(expiresAt)
+      || issuedAt > now.getTime() + 30_000
+      || expiresAt <= now.getTime()
+      || expiresAt - issuedAt !== linkMismatchConfirmationMaxAgeMs
+    ) {
+      throw new Error("invalid confirmation");
+    }
+    return confirmation as BlingProductLinkMismatchConfirmation;
+  } catch {
+    throw new Error("Revise o vinculo novamente antes de atualizar.");
+  }
+}
 
 function record(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : {};
@@ -503,6 +571,7 @@ export function describeBlingProductUpdateFailure(input: {
   const verificationFailure = input.stage === "VERIFY_GET"
     || (input.stage === "PUT" && apiError?.details?.requestState === "UNKNOWN");
   const unsupported = error instanceof Error && /nao pode ser preservado|nao pode ser atualizado/i.test(error.message);
+  const linkConfirmationRequired = error instanceof Error && /Revise o vinculo novamente/i.test(error.message);
   const imageFailure = apiError?.details?.category === "IMAGES";
   const rejected = Boolean(apiError && [400, 409, 422].includes(apiError.status));
   const rateLimited = apiError?.code === "RATE_LIMITED";
@@ -512,6 +581,9 @@ export function describeBlingProductUpdateFailure(input: {
   if (verificationFailure) {
     code = "VERIFICATION_REQUIRED";
     message = "A atualizacao pode ter sido concluida. Verifique novamente antes de tentar.";
+  } else if (linkConfirmationRequired) {
+    code = "LINK_REVIEW_REQUIRED";
+    message = "Revise o vinculo novamente antes de atualizar.";
   } else if (tokenFailure || apiError?.details?.category === "PERMISSION") {
     code = "AUTHORIZATION_REQUIRED";
     message = "A autorizacao do Bling precisa ser renovada.";
@@ -620,11 +692,32 @@ function unavailableItem(productId: string, status: BlingProductPreviewItem["sta
   } satisfies BlingProductPreviewItem;
 }
 
+function reviewableItem(
+  productId: string,
+  localValues: LocalProductValues,
+  remoteProduct: JsonRecord
+): BlingProductPreviewItem {
+  const remoteValues = toRemoteValues(remoteProduct);
+  const initialReview: BlingReviewedProductValues = {
+    ...(localValues.name !== remoteValues.name ? { name: localValues.name } : {}),
+    ...(localValues.brand && localValues.brand !== remoteValues.brand ? { brand: localValues.brand } : {})
+  };
+  const differences = compareBlingProductValues(initialReview, remoteProduct);
+  return {
+    productId,
+    status: differences.length ? "READY" : "UNCHANGED",
+    message: differences.length ? "Revise o titulo, a marca e as fotos antes de enviar." : "Este produto ja esta atualizado no Bling.",
+    local: { name: localValues.name, brand: localValues.brand, images: localValues.images },
+    remote: { name: remoteValues.name, brand: remoteValues.brand, images: remoteValues.images }
+  };
+}
+
 async function inspectProduct(input: {
   organizationId: string;
   connectionId: string;
   productId: string;
   readOnly: boolean;
+  confirmedLinkMismatchExternalProductId?: string;
 }): Promise<PreviewInspection> {
   const product = await loadProduct(input.organizationId, input.connectionId, input.productId);
   if (!product) {
@@ -658,7 +751,9 @@ async function inspectProduct(input: {
         gtin: firstText(remoteProduct.gtin, remoteProduct.gtinEmbalagem)
       }
     });
-    if (identity.status === "VINCULO_PRECISA_REVISAO") {
+    const linkMismatchConfirmed = identity.status === "VINCULO_PRECISA_REVISAO"
+      && input.confirmedLinkMismatchExternalProductId === externalProductId;
+    if (identity.status === "VINCULO_PRECISA_REVISAO" && !linkMismatchConfirmed) {
       return {
         publicItem: {
           productId: product.id,
@@ -672,7 +767,8 @@ async function inspectProduct(input: {
             localName: localValues.name,
             remoteName: remoteValues.name,
             localMeasures: identity.localMeasures,
-            remoteMeasures: identity.remoteMeasures
+            remoteMeasures: identity.remoteMeasures,
+            reasons: identity.reasons
           }
         },
         localValues,
@@ -681,19 +777,8 @@ async function inspectProduct(input: {
         mappingSnapshot
       };
     }
-    const initialReview: BlingReviewedProductValues = {
-      ...(localValues.name !== remoteValues.name ? { name: localValues.name } : {}),
-      ...(localValues.brand && localValues.brand !== remoteValues.brand ? { brand: localValues.brand } : {})
-    };
-    const differences = compareBlingProductValues(initialReview, remoteProduct);
     return {
-      publicItem: {
-        productId: product.id,
-        status: differences.length ? "READY" : "UNCHANGED",
-        message: differences.length ? "Revise o titulo, a marca e as fotos antes de enviar." : "Este produto ja esta atualizado no Bling.",
-        local: { name: localValues.name, brand: localValues.brand, images: localValues.images },
-        remote: { name: remoteValues.name, brand: remoteValues.brand, images: remoteValues.images }
-      },
+      publicItem: reviewableItem(product.id, localValues, remoteProduct),
       localValues,
       remoteProduct,
       externalProductId,
@@ -799,10 +884,87 @@ export class BlingProductUpdateService {
     return { item: (await inspectProduct({ ...input, readOnly: true })).publicItem };
   }
 
-  async updateOne(input: { organizationId: string; connectionId: string; productId: string; fields: BlingProductReviewInput; idempotencyKey: string }): Promise<BlingProductUpdateResult> {
+  async confirmLinkMismatch(input: {
+    userId: string;
+    organizationId: string;
+    connectionId: string;
+    productId: string;
+    idempotencyKey: string;
+  }) {
+    await validateConnection(input.organizationId, input.connectionId);
+    const inspection = await inspectProduct({
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      productId: input.productId,
+      readOnly: true
+    });
+    if (
+      inspection.publicItem.status !== "VINCULO_PRECISA_REVISAO"
+      || !inspection.localValues
+      || !inspection.remoteProduct
+      || !inspection.externalProductId
+      || !inspection.mappingSnapshot
+    ) {
+      throw new Error("Este vinculo nao esta disponivel para confirmacao manual.");
+    }
+
+    const linkMismatchConfirmation = createBlingProductLinkMismatchConfirmation({
+      userId: input.userId,
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      productId: input.productId,
+      externalProductId: inspection.externalProductId,
+      idempotencyKey: input.idempotencyKey
+    });
+
+    return {
+      preview: {
+        item: reviewableItem(input.productId, inspection.localValues, inspection.remoteProduct),
+        confirmedLinkMismatch: true as const,
+        linkMismatchConfirmation
+      },
+      externalProductIdMasked: maskBlingProductId(inspection.externalProductId),
+      reasons: inspection.publicItem.linkReview?.reasons ?? []
+    };
+  }
+
+  async updateOne(input: {
+    userId: string;
+    organizationId: string;
+    connectionId: string;
+    productId: string;
+    fields: BlingProductReviewInput;
+    idempotencyKey: string;
+    confirmedLinkMismatch?: boolean;
+    linkMismatchConfirmation?: string;
+  }): Promise<BlingProductUpdateResult> {
     let prepared: Awaited<ReturnType<typeof createUpdateJob>>;
+    let confirmedLinkMismatchExternalProductId: string | undefined;
     try {
       await validateConnection(input.organizationId, input.connectionId);
+      if (input.confirmedLinkMismatch) {
+        if (!input.linkMismatchConfirmation) throw new Error("Revise o vinculo novamente antes de atualizar.");
+        const confirmation = verifyBlingProductLinkMismatchConfirmation(input.linkMismatchConfirmation, {
+          userId: input.userId,
+          organizationId: input.organizationId,
+          connectionId: input.connectionId,
+          productId: input.productId,
+          idempotencyKey: input.idempotencyKey
+        });
+        const mapping = await prisma.productExternalMapping.findFirst({
+          where: {
+            organizationId: input.organizationId,
+            connectionId: input.connectionId,
+            productId: input.productId,
+            externalProductId: confirmation.externalProductId
+          },
+          select: { id: true }
+        });
+        if (!mapping) throw new Error("Revise o vinculo novamente antes de atualizar.");
+        confirmedLinkMismatchExternalProductId = confirmation.externalProductId;
+      } else if (input.linkMismatchConfirmation) {
+        throw new Error("Revise o vinculo novamente antes de atualizar.");
+      }
       prepared = await createUpdateJob(input);
     } catch (error) {
       const failure = describeBlingProductUpdateFailure({ error, stage: "PRECONDITION" });
@@ -823,7 +985,13 @@ export class BlingProductUpdateService {
     let externalProductIdMasked: string | null = null;
     let attemptedFields: BlingProductUpdateField[] = [];
     try {
-      const inspection = await inspectProduct({ ...input, readOnly: false });
+      const inspection = await inspectProduct({
+        organizationId: input.organizationId,
+        connectionId: input.connectionId,
+        productId: input.productId,
+        readOnly: false,
+        confirmedLinkMismatchExternalProductId
+      });
       externalProductIdMasked = maskBlingProductId(inspection.externalProductId);
       const item = inspection.publicItem;
       if (item.status === "VINCULO_PRECISA_REVISAO") {

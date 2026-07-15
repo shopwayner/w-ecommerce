@@ -20,6 +20,7 @@ function safeRouteError(error: unknown) {
     return { status: 409, message: "Reconecte a conta Bling para continuar." };
   }
   if (message.includes("andamento")) return { status: 409, message: "Ja existe uma atualizacao em andamento para esta conta." };
+  if (message.toLowerCase().includes("vinculo")) return { status: 409, message: "Revise o vinculo novamente antes de atualizar." };
   if (message.includes("titulo") || message.includes("marca") || message.includes("fotos")) return { status: 400, message };
   return { status: 503, message: "Nao foi possivel atualizar o produto no Bling agora." };
 }
@@ -40,6 +41,35 @@ export async function POST(request: Request) {
   const correlationId = maskedReference(randomUUID());
   try {
     if (!parsed.data.confirmed) {
+      if (parsed.data.confirmedLinkMismatch) {
+        const confirmation = await blingProductUpdateService.confirmLinkMismatch({
+          userId: auth.context.user.id,
+          organizationId: auth.context.organizationId,
+          connectionId: parsed.data.connectionId,
+          productId: parsed.data.productId,
+          idempotencyKey: parsed.data.idempotencyKey as string
+        });
+        await logDangerousAction({
+          authContext: auth.context,
+          action: "USER_CONFIRMED_SAME_PRODUCT",
+          entityType: "Product",
+          entityId: parsed.data.productId,
+          route: "/api/products/bling/update",
+          method: "POST",
+          confirmation: true,
+          status: "SUCCESS",
+          riskLevel: "CRITICAL",
+          summary: "Usuario confirmou que o produto e o cadastro vinculado no Bling representam o mesmo item.",
+          metadata: {
+            connectionId: parsed.data.connectionId,
+            externalProductIdMasked: confirmation.externalProductIdMasked,
+            result: "CONFIRMED"
+          },
+          request,
+          requirePersist: true
+        });
+        return NextResponse.json({ data: confirmation.preview });
+      }
       const preview = await blingProductUpdateService.preview({
         organizationId: auth.context.organizationId,
         connectionId: parsed.data.connectionId,
@@ -66,6 +96,7 @@ export async function POST(request: Request) {
         connectionId: parsed.data.connectionId,
         productId: parsed.data.productId,
         allowedFields: Object.keys(fields),
+        confirmedLinkMismatch: parsed.data.confirmedLinkMismatch,
         correlationId,
         idempotencyRef
       },
@@ -74,11 +105,14 @@ export async function POST(request: Request) {
     });
 
     const result = await blingProductUpdateService.updateOne({
+      userId: auth.context.user.id,
       organizationId: auth.context.organizationId,
       connectionId: parsed.data.connectionId,
       productId: parsed.data.productId,
       fields,
-      idempotencyKey
+      idempotencyKey,
+      confirmedLinkMismatch: parsed.data.confirmedLinkMismatch,
+      linkMismatchConfirmation: parsed.data.linkMismatchConfirmation
     });
 
     await createAuditLog({
@@ -125,7 +159,7 @@ export async function POST(request: Request) {
       entityId: parsed.data.productId,
       route: "/api/products/bling/update",
       method: "POST",
-      confirmation: parsed.data.confirmed,
+      confirmation: parsed.data.confirmed || parsed.data.confirmedLinkMismatch,
       status: "FAILED",
       riskLevel: "HIGH",
       summary: safeError.message,

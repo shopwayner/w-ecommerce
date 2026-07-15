@@ -24,7 +24,9 @@ export const blingProductUpdateRequestSchema = z
     productId: z.string().trim().min(1).max(100),
     fields: blingProductReviewedFieldsSchema.optional(),
     confirmed: z.boolean().optional().default(false),
-    idempotencyKey: z.string().trim().min(16).max(200).regex(/^[A-Za-z0-9:_-]+$/).optional()
+    idempotencyKey: z.string().trim().min(16).max(200).regex(/^[A-Za-z0-9:_-]+$/).optional(),
+    confirmedLinkMismatch: z.boolean().optional().default(false),
+    linkMismatchConfirmation: z.string().trim().min(32).max(4_000).optional()
   })
   .strict()
   .superRefine((value, context) => {
@@ -42,10 +44,49 @@ export const blingProductUpdateRequestSchema = z
         message: "Confirme novamente esta atualizacao."
       });
     }
-    if (!value.confirmed && (value.fields !== undefined || value.idempotencyKey !== undefined)) {
+    if (value.confirmedLinkMismatch && !value.idempotencyKey) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["idempotencyKey"],
+        message: "Confirme novamente esta revisao de vinculo."
+      });
+    }
+    if (value.confirmed && value.confirmedLinkMismatch && !value.linkMismatchConfirmation) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["linkMismatchConfirmation"],
+        message: "Revise o vinculo antes de atualizar."
+      });
+    }
+    if (value.linkMismatchConfirmation && !value.confirmedLinkMismatch) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["linkMismatchConfirmation"],
+        message: "A confirmacao nao corresponde a esta operacao."
+      });
+    }
+    if (!value.confirmed && value.confirmedLinkMismatch && value.fields !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["fields"],
+        message: "Revise o vinculo antes de editar o produto."
+      });
+    }
+    if (!value.confirmed && !value.confirmedLinkMismatch && (
+      value.fields !== undefined
+      || value.idempotencyKey !== undefined
+      || value.linkMismatchConfirmation !== undefined
+    )) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         message: "A consulta inicial nao aceita dados de atualizacao."
+      });
+    }
+    if (!value.confirmed && value.confirmedLinkMismatch && value.linkMismatchConfirmation !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["linkMismatchConfirmation"],
+        message: "A revisao inicial nao aceita uma confirmacao anterior."
       });
     }
   });
