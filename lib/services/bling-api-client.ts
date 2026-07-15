@@ -26,16 +26,108 @@ export type BlingApiErrorCode =
   | "TEMPORARY_FAILURE"
   | "REQUEST_REJECTED";
 
+export type BlingApiFailureCategory =
+  | "AUTHORIZATION"
+  | "PERMISSION"
+  | "RATE_LIMIT"
+  | "IMAGES"
+  | "VALIDATION"
+  | "NOT_FOUND"
+  | "TEMPORARY"
+  | "UNKNOWN";
+
+export type BlingApiErrorDetails = {
+  category: BlingApiFailureCategory;
+  upstreamCode?: string;
+  requestIdMasked?: string;
+  requestState: "NOT_SENT" | "SENT" | "UNKNOWN";
+};
+
 export class BlingApiError extends Error {
   constructor(
     message: string,
     public status: number,
     public code: BlingApiErrorCode,
-    public retryAfter?: number
+    public retryAfter?: number,
+    public details?: BlingApiErrorDetails
   ) {
     super(message);
     this.name = "BlingApiError";
   }
+}
+
+function safeUpstreamCode(value: unknown) {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const normalized = String(value).trim();
+  return /^[A-Za-z0-9_.:-]{1,80}$/.test(normalized) ? normalized : undefined;
+}
+
+function maskUpstreamRequestId(value: string | null) {
+  const normalized = value?.trim() ?? "";
+  if (!normalized) return undefined;
+  if (normalized.length <= 8) return `***${normalized.slice(-4)}`;
+  return `${normalized.slice(0, 4)}...${normalized.slice(-4)}`;
+}
+
+function knownErrorFragments(value: unknown, depth = 0): string[] {
+  if (depth > 4 || value === null || value === undefined) return [];
+  if (typeof value === "string" || typeof value === "number") return [String(value).slice(0, 300)];
+  if (Array.isArray(value)) return value.slice(0, 10).flatMap((item) => knownErrorFragments(item, depth + 1));
+  if (typeof value !== "object") return [];
+
+  const allowedKeys = new Set(["code", "type", "message", "description", "field", "path", "error"]);
+  return Object.entries(value as Record<string, unknown>)
+    .filter(([key]) => allowedKeys.has(key.toLowerCase()))
+    .slice(0, 20)
+    .flatMap(([, item]) => knownErrorFragments(item, depth + 1));
+}
+
+function firstKnownErrorCode(value: unknown, depth = 0): string | undefined {
+  if (depth > 4 || !value || typeof value !== "object") return undefined;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 10)) {
+      const code = firstKnownErrorCode(item, depth + 1);
+      if (code) return code;
+    }
+    return undefined;
+  }
+  for (const [key, item] of Object.entries(value as Record<string, unknown>).slice(0, 20)) {
+    if (["code", "type"].includes(key.toLowerCase())) {
+      const code = safeUpstreamCode(item);
+      if (code) return code;
+    }
+    const nested = firstKnownErrorCode(item, depth + 1);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+export function classifyBlingApiFailure(input: {
+  status: number;
+  payload?: unknown;
+  requestId?: string | null;
+  requestState?: BlingApiErrorDetails["requestState"];
+}): BlingApiErrorDetails {
+  const fragments = knownErrorFragments(input.payload)
+    .join(" ")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "");
+  let category: BlingApiFailureCategory = "UNKNOWN";
+  if ([401].includes(input.status)) category = "AUTHORIZATION";
+  else if ([403].includes(input.status)) category = "PERMISSION";
+  else if (input.status === 404) category = "NOT_FOUND";
+  else if (input.status === 429) category = "RATE_LIMIT";
+  else if (input.status >= 500) category = "TEMPORARY";
+  else if (/imagem|image|midia|imagensurl|foto|photo/.test(fragments)) category = "IMAGES";
+  else if ([400, 409, 422].includes(input.status)) category = "VALIDATION";
+
+  return {
+    category,
+    upstreamCode: firstKnownErrorCode(input.payload),
+    requestIdMasked: maskUpstreamRequestId(input.requestId ?? null),
+    requestState: input.requestState ?? "SENT"
+  };
 }
 
 export function getBlingApiErrorMessage(code: BlingApiErrorCode) {
@@ -124,10 +216,13 @@ export class BlingApiClient {
         body: options.body === undefined ? undefined : JSON.stringify(options.body)
       });
     } catch {
-      throw new BlingApiError("Falha temporaria ao consultar o Bling.", 503, "TEMPORARY_FAILURE");
+      throw new BlingApiError("Falha temporaria ao consultar o Bling.", 503, "TEMPORARY_FAILURE", undefined, {
+        category: "TEMPORARY",
+        requestState: "UNKNOWN"
+      });
     }
 
-    if (response.status === 401 && !retried && allowRefresh) {
+    if (response.status === 401 && !retried && allowRefresh && options.method === "GET") {
       try {
         await blingOAuthService.refreshAccessToken(options.connectionId, options.organizationId);
       } catch {
@@ -137,23 +232,71 @@ export class BlingApiClient {
     }
 
     if (response.status === 401) {
-      throw new BlingApiError("Autorizacao Bling expirada.", 401, "TOKEN_EXPIRED");
+      throw new BlingApiError(
+        "Autorizacao Bling expirada.",
+        401,
+        "TOKEN_EXPIRED",
+        undefined,
+        await this.readFailureDetails(response)
+      );
     }
     if (response.status === 403) {
-      throw new BlingApiError("Permissao Bling insuficiente.", 403, "PERMISSION_DENIED");
+      throw new BlingApiError(
+        "Permissao Bling insuficiente.",
+        403,
+        "PERMISSION_DENIED",
+        undefined,
+        await this.readFailureDetails(response)
+      );
     }
     if (response.status === 429) {
       const retryAfter = Number(response.headers.get("retry-after") ?? "0") || undefined;
-      throw new BlingApiError("Limite temporario de consultas atingido.", 429, "RATE_LIMITED", retryAfter);
+      throw new BlingApiError(
+        "Limite temporario de consultas atingido.",
+        429,
+        "RATE_LIMITED",
+        retryAfter,
+        await this.readFailureDetails(response)
+      );
     }
     if (response.status >= 500) {
-      throw new BlingApiError("Falha temporaria ao consultar o Bling.", response.status, "TEMPORARY_FAILURE");
+      throw new BlingApiError(
+        "Falha temporaria ao consultar o Bling.",
+        response.status,
+        "TEMPORARY_FAILURE",
+        undefined,
+        await this.readFailureDetails(response)
+      );
     }
     if (!response.ok) {
-      throw new BlingApiError("A consulta ao Bling foi recusada.", response.status, "REQUEST_REJECTED");
+      throw new BlingApiError(
+        "A consulta ao Bling foi recusada.",
+        response.status,
+        "REQUEST_REJECTED",
+        undefined,
+        await this.readFailureDetails(response)
+      );
     }
 
     return response.json() as Promise<T>;
+  }
+
+  private async readFailureDetails(response: Response) {
+    let payload: unknown;
+    try {
+      payload = await response.clone().json();
+    } catch {
+      payload = undefined;
+    }
+    return classifyBlingApiFailure({
+      status: response.status,
+      payload,
+      requestId:
+        response.headers.get("x-request-id") ??
+        response.headers.get("x-correlation-id") ??
+        response.headers.get("x-bling-request-id"),
+      requestState: "SENT"
+    });
   }
 
   private async getAccessToken(organizationId: string, connectionId: string, allowRefresh: boolean) {

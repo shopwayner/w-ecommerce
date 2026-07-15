@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
 import { requireApiAuth } from "@/lib/auth/api";
 import { can } from "@/lib/auth/permissions";
 import {
@@ -7,6 +8,10 @@ import {
 } from "@/lib/bling-product-update-schema";
 import { createAuditLog, logDangerousAction } from "@/lib/services/audit-log-service";
 import { blingProductUpdateService } from "@/lib/services/bling-product-update-service";
+
+function maskedReference(value: string) {
+  return value.length <= 8 ? `***${value.slice(-4)}` : `${value.slice(0, 4)}...${value.slice(-4)}`;
+}
 
 function safeRouteError(error: unknown) {
   const message = error instanceof Error ? error.message : "";
@@ -32,6 +37,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Revise o produto e tente novamente." }, { status: 400 });
   }
 
+  const correlationId = maskedReference(randomUUID());
   try {
     if (!parsed.data.confirmed) {
       const preview = await blingProductUpdateService.preview({
@@ -44,6 +50,7 @@ export async function POST(request: Request) {
 
     const fields = parsed.data.fields as BlingProductReviewInput;
     const idempotencyKey = parsed.data.idempotencyKey as string;
+    const idempotencyRef = maskedReference(idempotencyKey);
     await logDangerousAction({
       authContext: auth.context,
       action: "BLING_PRODUCT_UPDATE_INTENT_RECORDED",
@@ -58,7 +65,9 @@ export async function POST(request: Request) {
       metadata: {
         connectionId: parsed.data.connectionId,
         productId: parsed.data.productId,
-        allowedFields: Object.keys(fields)
+        allowedFields: Object.keys(fields),
+        correlationId,
+        idempotencyRef
       },
       request,
       requirePersist: true
@@ -89,14 +98,40 @@ export async function POST(request: Request) {
         externalProductIdMasked: result.externalProductIdMasked,
         fields: result.fields,
         resultCode: result.status,
-        replayed: result.replayed === true
+        replayed: result.replayed === true,
+        correlationId,
+        idempotencyRef,
+        stage: result.audit?.stage,
+        putRequests: result.audit?.putRequests,
+        putRequestState: result.audit?.putRequestState,
+        verificationGetExecuted: result.audit?.verificationGetExecuted,
+        localTimestampUpdated: result.audit?.localTimestampUpdated,
+        upstreamStatus: result.audit?.upstreamStatus,
+        upstreamCode: result.audit?.upstreamCode,
+        upstreamRequestIdMasked: result.audit?.upstreamRequestIdMasked
       },
       request
     });
 
-    return NextResponse.json({ data: { item: result } });
+    const publicResult = { ...result };
+    delete publicResult.audit;
+    return NextResponse.json({ data: { item: publicResult } });
   } catch (error) {
     const safeError = safeRouteError(error);
+    await createAuditLog({
+      authContext: auth.context,
+      action: "BLING_PRODUCT_UPDATE_RESULT",
+      entityType: "Product",
+      entityId: parsed.data.productId,
+      route: "/api/products/bling/update",
+      method: "POST",
+      confirmation: parsed.data.confirmed,
+      status: "FAILED",
+      riskLevel: "HIGH",
+      summary: safeError.message,
+      metadata: { correlationId, stage: "ROUTE", putRequests: 0 },
+      request
+    });
     return NextResponse.json({ error: safeError.message }, { status: safeError.status });
   }
 }

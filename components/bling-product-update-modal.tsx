@@ -3,8 +3,10 @@
 import { useEffect, useState } from "react";
 import Image from "next/image";
 import {
+  AlertTriangle,
   ChevronLeft,
   ChevronRight,
+  Eye,
   ImageIcon,
   RefreshCw,
   Star,
@@ -22,10 +24,18 @@ export type BlingProductEditableValues = {
 export type BlingProductUpdatePreview = {
   item: {
     productId: string;
-    status: "READY" | "UNCHANGED" | "NOT_LINKED" | "UNSUPPORTED" | "ERROR";
+    status: "READY" | "UNCHANGED" | "VINCULO_PRECISA_REVISAO" | "NOT_LINKED" | "UNSUPPORTED" | "ERROR";
     message: string;
     local: BlingProductEditableValues | null;
     remote: BlingProductEditableValues | null;
+    linkReview?: {
+      status: "VINCULO_PRECISA_REVISAO";
+      externalProductIdMasked: string | null;
+      localName: string;
+      remoteName: string;
+      localMeasures: string[];
+      remoteMeasures: string[];
+    };
   };
 };
 
@@ -69,12 +79,14 @@ export function BlingProductUpdateModal({
   const [brand, setBrand] = useState("");
   const [images, setImages] = useState<string[]>([]);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
+  const [showLinkReview, setShowLinkReview] = useState(false);
 
   useEffect(() => {
     setTitle(item?.local?.name ?? "");
     setBrand(item?.local?.brand ?? "");
     setImages(item?.local?.images ?? []);
     setSelectedImageIndex(0);
+    setShowLinkReview(false);
   }, [item?.productId, item?.local]);
 
   useEffect(() => {
@@ -89,8 +101,9 @@ export function BlingProductUpdateModal({
   const normalizedBrand = normalizeReviewText(brand);
   const brandVisible = Boolean(item?.local?.brand);
   const remote = item?.remote;
+  const linkNeedsReview = item?.status === "VINCULO_PRECISA_REVISAO";
   const canReview = Boolean(
-    item?.local && remote && !["NOT_LINKED", "UNSUPPORTED", "ERROR"].includes(item.status)
+    item?.local && remote && !["VINCULO_PRECISA_REVISAO", "NOT_LINKED", "UNSUPPORTED", "ERROR"].includes(item.status)
   );
   const imagesChanged = Boolean(images.length && remote && !sameImages(images, remote.images));
   const hasDifferences = Boolean(
@@ -169,7 +182,72 @@ export function BlingProductUpdateModal({
             </div>
           ) : null}
 
-          {item?.local ? (
+          {item?.local && linkNeedsReview ? (
+            <div className="grid gap-5 lg:grid-cols-[minmax(240px,0.75fr)_minmax(0,1.25fr)]">
+              <div className="relative grid aspect-square max-h-[360px] place-items-center overflow-hidden rounded-lg border border-matrix-gold/30 bg-white">
+                {item.local.images[0] ? (
+                  <Image
+                    alt={item.local.name}
+                    className="h-full w-full object-contain"
+                    fill
+                    priority
+                    sizes="(max-width: 1024px) 90vw, 360px"
+                    src={item.local.images[0]}
+                    unoptimized
+                  />
+                ) : (
+                  <div className="text-center text-matrix-muted">
+                    <ImageIcon className="mx-auto h-8 w-8" />
+                    <p className="mt-2 text-sm">Produto sem foto</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex min-w-0 flex-col justify-center gap-4">
+                <div>
+                  <p className="text-xs font-semibold uppercase text-matrix-muted">Produto selecionado</p>
+                  <h4 className="mt-2 text-xl font-semibold text-matrix-fg">{item.local.name}</h4>
+                  {item.local.brand ? <p className="mt-2 text-sm text-matrix-muted">Marca: {item.local.brand}</p> : null}
+                </div>
+                <div className="flex gap-3 rounded-md border border-amber-500/35 bg-amber-500/10 p-4 text-sm text-amber-100">
+                  <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+                  <p>{item.message}</p>
+                </div>
+                {showLinkReview && item.linkReview ? (
+                  <div className="grid gap-3 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm">
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-matrix-muted">Status do vinculo</p>
+                      <p className="mt-1 text-amber-200">Precisa de revisao</p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-matrix-muted">ID Bling</p>
+                      <p className="mt-1 text-matrix-fg">{item.linkReview.externalProductIdMasked ?? "Indisponivel"}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-matrix-muted">Produto no W Ecommerce</p>
+                      <p className="mt-1 text-matrix-fg">{item.linkReview.localName}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-matrix-muted">Produto vinculado no Bling</p>
+                      <p className="mt-1 text-matrix-fg">{item.linkReview.remoteName}</p>
+                    </div>
+                    {(item.linkReview.localMeasures.length || item.linkReview.remoteMeasures.length) ? (
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <div>
+                          <p className="text-xs font-semibold uppercase text-matrix-muted">Medidas locais</p>
+                          <p className="mt-1 text-matrix-fg">{item.linkReview.localMeasures.join(" + ") || "Nao informadas"}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-semibold uppercase text-matrix-muted">Medidas no Bling</p>
+                          <p className="mt-1 text-matrix-fg">{item.linkReview.remoteMeasures.join(" + ") || "Nao informadas"}</p>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : item?.local ? (
             <div className="grid gap-5 lg:grid-cols-[minmax(0,1.08fr)_minmax(280px,0.92fr)]">
               <div className="min-w-0">
                 <div className="relative grid aspect-square max-h-[430px] place-items-center overflow-hidden rounded-lg border border-matrix-gold/30 bg-white">
@@ -284,7 +362,7 @@ export function BlingProductUpdateModal({
             </div>
           ) : null}
 
-          {friendlyMessage ? (
+          {friendlyMessage && !linkNeedsReview ? (
             <p
               className={`mt-4 rounded-md border px-3 py-2 text-sm ${
                 result?.status === "UPDATED" && !localRecordWarning
@@ -317,16 +395,28 @@ export function BlingProductUpdateModal({
             type="button"
             variant="secondary"
           >
-            Cancelar
+            {linkNeedsReview ? "Fechar" : "Cancelar"}
           </Button>
-          <Button
-            className="w-full sm:w-auto"
-            disabled={!canReview || !hasDifferences || formInvalid || busy || completed}
-            onClick={submit}
-            type="button"
-          >
-            {busy ? "Atualizando produto..." : "Atualizar no Bling"}
-          </Button>
+          {linkNeedsReview ? (
+            <Button
+              className="w-full sm:w-auto"
+              disabled={busy}
+              onClick={() => setShowLinkReview((current) => !current)}
+              type="button"
+            >
+              <Eye className="mr-2 h-4 w-4" />
+              {showLinkReview ? "Ocultar detalhes" : "Revisar vinculo"}
+            </Button>
+          ) : (
+            <Button
+              className="w-full sm:w-auto"
+              disabled={!canReview || !hasDifferences || formInvalid || busy || completed}
+              onClick={submit}
+              type="button"
+            >
+              {busy ? "Atualizando produto..." : "Atualizar no Bling"}
+            </Button>
+          )}
         </footer>
       </section>
     </div>

@@ -6,8 +6,11 @@ import { Prisma } from "@prisma/client";
 import { blingProductUpdateRequestSchema } from "@/lib/bling-product-update-schema";
 import {
   BLING_PRODUCT_UPDATE_FIELDS,
+  acquireBlingProductUpdateLock,
+  assessBlingProductIdentity,
   buildBlingProductUpdatePayload,
   compareBlingProductValues,
+  describeBlingProductUpdateFailure,
   getBlingProductUpdateErrorMessage,
   isSupportedBlingProductStructure,
   maskBlingProductId,
@@ -16,7 +19,9 @@ import {
   recordConfirmedBlingMappingSync,
   type BlingProductMappingSnapshot
 } from "./bling-product-update-service";
-import { BlingApiError } from "./bling-api-client";
+import { BlingApiError, classifyBlingApiFailure } from "./bling-api-client";
+
+type AdvisoryTestClient = Pick<Prisma.TransactionClient, "$queryRaw">;
 
 const localProduct = {
   name: "Produto Matrix",
@@ -190,7 +195,6 @@ test("builds only title, brand, images and exact required remote fields", () => 
     formato: "s",
     marca: "Marca revisada",
     midia: {
-      video: { url: "https://www.youtube.com/watch?v=matrix" },
       imagens: {
         imagensURL: [
           { link: localProduct.images[1] },
@@ -214,7 +218,8 @@ test("builds only title, brand, images and exact required remote fields", () => 
     "estoque",
     "tributacao",
     "variacoes",
-    "fornecedor"
+    "fornecedor",
+    "video"
   ]) {
     assert.doesNotMatch(serialized, new RegExp(forbiddenField, "i"));
   }
@@ -290,7 +295,6 @@ test("detects title, brand and photos independently and keeps the official image
     situacao: "a",
     formato: "s",
     midia: {
-      video: { url: "https://www.youtube.com/watch?v=matrix" },
       imagens: { imagensURL: [{ link: localProduct.images[1] }] }
     }
   });
@@ -318,6 +322,21 @@ test("preserves exact required technical field values from the remote product", 
   assert.equal(payload.formato, "s");
 });
 
+test("blocks the PUT payload when required remote fields are absent", () => {
+  const reviewed = normalizeBlingProductReview(
+    { name: "Titulo revisado", brand: localProduct.brand },
+    localProduct
+  );
+  for (const missing of ["tipo", "situacao", "formato"] as const) {
+    const current = matchingRemoteProduct();
+    const remote = { data: { ...current.data, [missing]: undefined } };
+    assert.throws(
+      () => buildBlingProductUpdatePayload(reviewed, remote, ["name"]),
+      /nao pode ser preservado/
+    );
+  }
+});
+
 test("blocks variations, compositions and variation children", () => {
   assert.equal(isSupportedBlingProductStructure(localProduct, remoteProduct.data), true);
   assert.equal(isSupportedBlingProductStructure(localProduct, { ...remoteProduct.data, formato: "V" }), false);
@@ -329,6 +348,123 @@ test("blocks variations, compositions and variation children", () => {
     ),
     false
   );
+});
+
+test("blocks a local tire kit linked to a single remote tire", () => {
+  const assessment = assessBlingProductIdentity({
+    local: {
+      name: "Pneus 130/70-13 + 110/70-14 Cinborg Furia Racer G2 Tubeless PCX",
+      brand: "Cinborg",
+      sku: "10310"
+    },
+    remote: {
+      name: "PNEU 110/70-14 CIBORG FURIA RACER G2 TUBELESS",
+      sku: "10310"
+    }
+  });
+
+  assert.equal(assessment.status, "VINCULO_PRECISA_REVISAO");
+  assert.ok(assessment.reasons.includes("KIT_VS_UNIT"));
+  assert.deepEqual(assessment.localMeasures, ["130/70-13", "110/70-14"]);
+  assert.deepEqual(assessment.remoteMeasures, ["110/70-14"]);
+});
+
+test("blocks incompatible measures and divergent GTIN values", () => {
+  const measures = assessBlingProductIdentity({
+    local: { name: "Pneu 130/70-13", sku: "10" },
+    remote: { name: "Pneu 90/90-18", sku: "10" }
+  });
+  assert.ok(measures.reasons.includes("MEASURES_MISMATCH"));
+
+  const gtin = assessBlingProductIdentity({
+    local: { name: "Sensor PCX 150", gtin: "7891234567895" },
+    remote: { name: "Sensor PCX 150", gtin: "7901234567892" }
+  });
+  assert.ok(gtin.reasons.includes("GTIN_MISMATCH"));
+});
+
+test("does not block capitalization or punctuation differences", () => {
+  const assessment = assessBlingProductIdentity({
+    local: { name: "Sensor Hibrido PCX-150!", brand: "T-MAC", sku: "6592" },
+    remote: { name: "sensor hibrido pcx 150", brand: "t mac", sku: "6592" }
+  });
+  assert.equal(assessment.status, "COMPATIVEL");
+  assert.deepEqual(assessment.reasons, []);
+});
+
+test("blocks clearly incompatible model identifiers", () => {
+  const assessment = assessBlingProductIdentity({
+    local: { name: "Sensor para PCX150", sku: "6592" },
+    remote: { name: "Sensor para CG160", sku: "6592" }
+  });
+  assert.ok(assessment.reasons.includes("MODEL_MISMATCH"));
+});
+
+test("allows a compatible linked product to reach the preview", () => {
+  const assessment = assessBlingProductIdentity({
+    local: { name: "Pneu 110/70-14 Cinborg Furia Racer G2", brand: "Cinborg", sku: "10310" },
+    remote: { name: "PNEU 110/70-14 CIBORG FURIA RACER G2", brand: "Ciborg", sku: "10310" }
+  });
+  assert.equal(assessment.status, "COMPATIVEL");
+});
+
+test("uses a deserializable transactional advisory lock and releases it on completion or error", async () => {
+  let owner: string | null = null;
+  const waiters: Array<() => void> = [];
+  const acquire = async (transactionId: string) => {
+    while (owner && owner !== transactionId) {
+      await new Promise<void>((resolve) => waiters.push(resolve));
+    }
+    owner = transactionId;
+    return [{ lockState: "" }];
+  };
+  const release = (transactionId: string) => {
+    if (owner !== transactionId) return;
+    owner = null;
+    waiters.splice(0).forEach((resolve) => resolve());
+  };
+  const transaction = async <T>(transactionId: string, action: (client: AdvisoryTestClient) => Promise<T>) => {
+    const client = {
+      $queryRaw: ((_: TemplateStringsArray, lockKey: unknown) => {
+        assert.equal(lockKey, "organization:connection");
+        return acquire(transactionId);
+      }) as AdvisoryTestClient["$queryRaw"]
+    };
+    try {
+      return await action(client);
+    } finally {
+      release(transactionId);
+    }
+  };
+
+  let releaseFirst!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let secondAcquired = false;
+  const first = transaction("first", async (client) => {
+    await acquireBlingProductUpdateLock(client, "organization:connection");
+    await firstGate;
+  });
+  const second = transaction("second", async (client) => {
+    await acquireBlingProductUpdateLock(client, "organization:connection");
+    secondAcquired = true;
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(secondAcquired, false);
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.equal(secondAcquired, true);
+
+  await assert.rejects(
+    transaction("error", async (client) => {
+      await acquireBlingProductUpdateLock(client, "organization:connection");
+      throw new Error("transaction failed");
+    }),
+    /transaction failed/
+  );
+  await transaction("after-error", async (client) => {
+    await acquireBlingProductUpdateLock(client, "organization:connection");
+  });
 });
 
 test("rejects every request key outside the strict single-product contract", () => {
@@ -397,12 +533,115 @@ test("masks product identity and returns only friendly connection errors", () =>
   assert.equal(maskBlingProductId(null), null);
   assert.equal(
     getBlingProductUpdateErrorMessage(new BlingApiError("raw", 401, "TOKEN_EXPIRED")),
-    "Reconecte a conta Bling para continuar."
+    "A autorizacao do Bling precisa ser renovada."
   );
   assert.equal(
     getBlingProductUpdateErrorMessage(new Error("sensitive upstream detail")),
-    "Nao foi possivel atualizar o produto no Bling agora."
+    "Nao foi possivel atualizar o produto agora."
   );
+});
+
+test("classifies only sanitized upstream failure metadata", () => {
+  const details = classifyBlingApiFailure({
+    status: 422,
+    payload: {
+      error: {
+        code: "IMAGE_INVALID",
+        message: "A imagem informada nao pode ser processada.",
+        payload: { access_token: "must-not-be-read" }
+      }
+    },
+    requestId: "request-1234567890"
+  });
+
+  assert.deepEqual(details, {
+    category: "IMAGES",
+    upstreamCode: "IMAGE_INVALID",
+    requestIdMasked: "requ...7890",
+    requestState: "SENT"
+  });
+  assert.doesNotMatch(JSON.stringify(details), /must-not-be-read|access_token/);
+});
+
+test("maps failures before PUT and rejected PUT responses to friendly states", () => {
+  const beforePut = describeBlingProductUpdateFailure({
+    error: new Error("local lock failure"),
+    stage: "PRECONDITION"
+  });
+  assert.equal(beforePut.audit?.putRequests, 0);
+  assert.equal(beforePut.audit?.verificationGetExecuted, false);
+
+  const scenarios = [
+    { status: 400, code: "REQUEST_REJECTED" as const, expected: "DATA_REJECTED" },
+    { status: 401, code: "TOKEN_EXPIRED" as const, expected: "AUTHORIZATION_REQUIRED" },
+    { status: 403, code: "PERMISSION_DENIED" as const, expected: "AUTHORIZATION_REQUIRED" },
+    { status: 422, code: "REQUEST_REJECTED" as const, expected: "DATA_REJECTED" },
+    { status: 429, code: "RATE_LIMITED" as const, expected: "RATE_LIMITED" },
+    { status: 500, code: "TEMPORARY_FAILURE" as const, expected: "TEMPORARY_FAILURE" }
+  ];
+
+  for (const scenario of scenarios) {
+    const details = classifyBlingApiFailure({ status: scenario.status, payload: { error: { code: `E${scenario.status}` } } });
+    const failure = describeBlingProductUpdateFailure({
+      error: new BlingApiError("raw upstream detail", scenario.status, scenario.code, undefined, details),
+      stage: "PUT",
+      fields: ["name"],
+      putRequests: 1
+    });
+    assert.equal(failure.code, scenario.expected);
+    assert.equal(failure.audit?.putRequests, 1);
+    assert.equal(failure.audit?.upstreamStatus, scenario.status);
+    assert.doesNotMatch(failure.message, /HTTP|endpoint|payload|raw/i);
+  }
+
+  const localTokenFailure = describeBlingProductUpdateFailure({
+    error: new BlingApiError("raw", 401, "TOKEN_MISSING"),
+    stage: "PUT",
+    putRequests: 1
+  });
+  assert.equal(localTokenFailure.audit?.putRequests, 0);
+  assert.equal(localTokenFailure.audit?.putRequestState, "NOT_SENT");
+});
+
+test("distinguishes image rejection and uncertain post-PUT verification", () => {
+  const imageFailure = describeBlingProductUpdateFailure({
+    error: new BlingApiError("raw", 422, "REQUEST_REJECTED", undefined, {
+      category: "IMAGES",
+      requestState: "SENT",
+      upstreamCode: "IMAGE_INVALID",
+      requestIdMasked: "requ...7890"
+    }),
+    stage: "PUT",
+    fields: ["images"],
+    putRequests: 1
+  });
+  assert.equal(imageFailure.code, "IMAGES_REJECTED");
+  assert.equal(imageFailure.message, "As imagens selecionadas nao puderam ser enviadas.");
+
+  const verificationFailure = describeBlingProductUpdateFailure({
+    error: new Error("verification failed"),
+    stage: "VERIFY_GET",
+    fields: ["name"],
+    putRequests: 1,
+    verificationGetExecuted: true
+  });
+  assert.equal(verificationFailure.code, "VERIFICATION_REQUIRED");
+  assert.equal(verificationFailure.audit?.putRequests, 1);
+  assert.equal(verificationFailure.audit?.verificationGetExecuted, true);
+  assert.match(verificationFailure.message, /pode ter sido concluida/i);
+
+  const uncertainPut = describeBlingProductUpdateFailure({
+    error: new BlingApiError("network timeout", 503, "TEMPORARY_FAILURE", undefined, {
+      category: "TEMPORARY",
+      requestState: "UNKNOWN"
+    }),
+    stage: "PUT",
+    fields: ["name"],
+    putRequests: 1
+  });
+  assert.equal(uncertainPut.code, "VERIFICATION_REQUIRED");
+  assert.equal(uncertainPut.audit?.putRequestState, "UNKNOWN");
+  assert.match(uncertainPut.message, /verifique novamente/i);
 });
 
 test("records confirmed sync while preserving mapping updatedAt and identity", async () => {
@@ -436,6 +675,17 @@ test("does not overwrite a mapping whose identity or updatedAt changed", async (
   assert.deepEqual(result, { status: "LOCAL_MAPPING_CONCURRENT_UPDATE", updatedCount: 0 });
 });
 
+test("surfaces a local timestamp failure without implying another PUT", async () => {
+  await assert.rejects(
+    recordConfirmedBlingMappingSync(mappingSnapshot, new Date(), {
+      updateMany: async () => {
+        throw new Error("local database unavailable");
+      }
+    }),
+    /local database unavailable/
+  );
+});
+
 test("keeps preview read-only and performs one PUT followed by one verification GET", () => {
   const source = readFileSync(
     path.join(process.cwd(), "lib/services/bling-product-update-service.ts"),
@@ -448,18 +698,38 @@ test("keeps preview read-only and performs one PUT followed by one verification 
   const putCall = updateSource.indexOf('method: "PUT"');
   const verificationCall = updateSource.indexOf("verifyUpdatedBlingProduct");
   const mappingTimestamp = updateSource.indexOf("recordConfirmedBlingMappingSync");
+  const linkReviewGuard = updateSource.indexOf('item.status === "VINCULO_PRECISA_REVISAO"');
 
   assert.match(previewSource, /readOnly: true/);
   assert.doesNotMatch(previewSource, /createUpdateJob|method: "PUT"/);
   assert.equal((updateSource.match(/method: "PUT"/g) ?? []).length, 1);
+  assert.ok(linkReviewGuard >= 0 && linkReviewGuard < putCall);
+  assert.match(updateSource, /code: "LINK_REVIEW_REQUIRED"[\s\S]*putRequests: 0/);
   assert.ok(putCall >= 0 && verificationCall > putCall && mappingTimestamp > verificationCall);
   assert.match(updateSource, /code: "LOCAL_MAPPING_RECORD_FAILED"/);
+  assert.match(updateSource, /code: "LOCAL_AUDIT_RECORD_FAILED"/);
   assert.match(source, /where: \{ id: productId, organizationId \}/);
   assert.match(source, /where: \{ organizationId, connectionId \}/);
   assert.match(source, /where: \{ id: connectionId, organizationId \}/);
   assert.match(source, /connection\.status !== "ACTIVE"/);
   assert.match(source, /pg_advisory_xact_lock/);
+  assert.match(source, /pg_advisory_xact_lock[\s\S]*::text AS "lockState"/);
+  assert.doesNotMatch(source, /pg_advisory_xact_lock\([^)]*\)(?![\s\S]{0,80}::text)/);
+  assert.match(source, /prepared\.replay[\s\S]*replayed: true/);
+  assert.match(source, /stage = "VERIFY_GET"[\s\S]*verificationGetExecuted = true/);
   assert.doesNotMatch(source, /MarketplaceCategoryMapping/);
+});
+
+test("never retries a mutating Bling request automatically after authorization failure", () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-api-client.ts"),
+    "utf8"
+  );
+  assert.match(
+    source,
+    /response\.status === 401[\s\S]*allowRefresh && options\.method === "GET"/
+  );
+  assert.doesNotMatch(source, /allowRefresh\) \{[\s\S]*return this\.performRequest<T>\(options, true/);
 });
 
 test("requires both write permissions, an administrator and explicit confirmation", () => {
@@ -497,6 +767,14 @@ test("renders only the simplified single-product modal contract", () => {
   assert.match(modalSource, /Atualizando produto\.\.\./);
   assert.match(modalSource, /Definir como foto principal/);
   assert.match(modalSource, /Remover foto/);
+  assert.match(modalSource, /item\?\.status === "VINCULO_PRECISA_REVISAO"/);
+  assert.match(modalSource, /linkNeedsReview \? \(/);
+  assert.match(modalSource, /Revisar vinculo/);
+  assert.match(modalSource, /Precisa de revisao/);
+  assert.match(modalSource, /linkNeedsReview \? "Fechar" : "Cancelar"/);
+  assert.match(modalSource, /setShowLinkReview/);
+  assert.doesNotMatch(modalSource, /setShowLinkReview[\s\S]{0,200}(fetch\(|onConfirm\()/);
+  assert.match(pageSource, /productId: selectedBlingProduct\.id/);
   for (const hiddenLabel of [
     "SKU",
     "GTIN",
@@ -504,7 +782,6 @@ test("renders only the simplified single-product modal contract", () => {
     "Categoria",
     "Preco",
     "Estoque",
-    "ID Bling",
     "Atualizados",
     "Precisam de revisao"
   ]) {
