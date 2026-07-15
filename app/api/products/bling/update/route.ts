@@ -3,9 +3,8 @@ import { randomUUID } from "node:crypto";
 import { requireApiAuth } from "@/lib/auth/api";
 import { can } from "@/lib/auth/permissions";
 import {
-  BLING_PRODUCT_UPDATE_BLOCK_MESSAGE,
-  BLING_PRODUCT_UPDATE_WRITES_BLOCKED,
   blingProductUpdateRequestSchema,
+  getBlingProductPatchBlock,
   type BlingProductReviewInput
 } from "@/lib/bling-product-update-schema";
 import { createAuditLog, logDangerousAction } from "@/lib/services/audit-log-service";
@@ -15,6 +14,17 @@ function maskedReference(value: string) {
   return value.length <= 8 ? `***${value.slice(-4)}` : `${value.slice(0, 4)}...${value.slice(-4)}`;
 }
 
+function requestsImageUpdate(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const fields = (value as { fields?: unknown }).fields;
+  return Boolean(
+    fields
+    && typeof fields === "object"
+    && !Array.isArray(fields)
+    && Object.prototype.hasOwnProperty.call(fields, "images")
+  );
+}
+
 function safeRouteError(error: unknown) {
   const message = error instanceof Error ? error.message : "";
   if (message.includes("Conta Bling nao encontrada")) return { status: 404, message: "Conta Bling nao encontrada." };
@@ -22,6 +32,7 @@ function safeRouteError(error: unknown) {
     return { status: 409, message: "Reconecte a conta Bling para continuar." };
   }
   if (message.includes("andamento")) return { status: 409, message: "Ja existe uma atualizacao em andamento para esta conta." };
+  if (message.includes("revisão pendente")) return { status: 423, message };
   if (message.toLowerCase().includes("vinculo")) return { status: 409, message: "Revise o vinculo novamente antes de atualizar." };
   if (message.includes("titulo") || message.includes("fotos")) return { status: 400, message };
   return { status: 503, message: "Nao foi possivel atualizar o produto no Bling agora." };
@@ -35,13 +46,28 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json().catch(() => null);
+  if (requestsImageUpdate(body)) {
+    const imageBlock = getBlingProductPatchBlock("IMAGES_ONLY");
+    if (imageBlock) {
+      return NextResponse.json(
+        { error: imageBlock.message, code: imageBlock.code },
+        { status: 423 }
+      );
+    }
+  }
   const parsed = blingProductUpdateRequestSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json({ error: "Revise o produto e tente novamente." }, { status: 400 });
   }
 
-  if (parsed.data.confirmed && BLING_PRODUCT_UPDATE_WRITES_BLOCKED) {
-    return NextResponse.json({ error: BLING_PRODUCT_UPDATE_BLOCK_MESSAGE }, { status: 423 });
+  if (parsed.data.confirmed && parsed.data.operation) {
+    const capabilityBlock = getBlingProductPatchBlock(parsed.data.operation);
+    if (capabilityBlock) {
+      return NextResponse.json(
+        { error: capabilityBlock.message, code: capabilityBlock.code },
+        { status: 423 }
+      );
+    }
   }
 
   const correlationId = maskedReference(randomUUID());
@@ -102,6 +128,7 @@ export async function POST(request: Request) {
         connectionId: parsed.data.connectionId,
         productId: parsed.data.productId,
         allowedFields: Object.keys(fields),
+        operation: parsed.data.operation,
         confirmedLinkMismatch: parsed.data.confirmedLinkMismatch,
         correlationId,
         idempotencyRef
@@ -116,6 +143,7 @@ export async function POST(request: Request) {
       connectionId: parsed.data.connectionId,
       productId: parsed.data.productId,
       fields,
+      operation: parsed.data.operation as NonNullable<typeof parsed.data.operation>,
       idempotencyKey,
       confirmedLinkMismatch: parsed.data.confirmedLinkMismatch,
       linkMismatchConfirmation: parsed.data.linkMismatchConfirmation

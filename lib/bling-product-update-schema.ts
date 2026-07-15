@@ -1,8 +1,29 @@
 import { z } from "zod";
 
-export const BLING_PRODUCT_UPDATE_WRITES_BLOCKED = true;
-export const BLING_PRODUCT_UPDATE_BLOCK_MESSAGE =
-  "A atualização de produtos no Bling está temporariamente bloqueada para revisão.";
+export const BLING_PRODUCT_NAME_PATCH_BLOCK_MESSAGE =
+  "A atualização de nome no Bling ainda não está disponível.";
+export const BLING_PRODUCT_IMAGES_PATCH_BLOCK_MESSAGE =
+  "A atualização de fotos ainda está em validação.";
+
+export const blingProductPatchOperationSchema = z.enum([
+  "NAME_ONLY",
+  "IMAGES_ONLY",
+  "NAME_AND_IMAGES"
+]);
+
+export type BlingProductPatchOperation = z.infer<typeof blingProductPatchOperationSchema>;
+
+export type BlingProductPatchCapabilities = {
+  namePatchEnabled: boolean;
+  imagesPatchEnabled: boolean;
+};
+
+export function getBlingProductPatchCapabilities(): BlingProductPatchCapabilities {
+  return {
+    namePatchEnabled: process.env.BLING_PRODUCT_NAME_PATCH_ENABLED === "true",
+    imagesPatchEnabled: process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED === "true"
+  };
+}
 
 export const blingProductReviewedFieldsSchema = z
   .object({
@@ -21,11 +42,47 @@ export const blingProductReviewedFieldsSchema = z
 
 export type BlingProductReviewInput = z.infer<typeof blingProductReviewedFieldsSchema>;
 
+export function getBlingProductPatchOperation(
+  fields: BlingProductReviewInput
+): BlingProductPatchOperation {
+  if (fields.name !== undefined && fields.images !== undefined) {
+    return "NAME_AND_IMAGES";
+  }
+  return fields.images !== undefined ? "IMAGES_ONLY" : "NAME_ONLY";
+}
+
+export type BlingProductPatchBlock = {
+  code: "NAME_PATCH_BLOCKED" | "IMAGES_PATCH_BLOCKED";
+  message: string;
+};
+
+export function getBlingProductPatchBlock(
+  operation: BlingProductPatchOperation,
+  capabilities = getBlingProductPatchCapabilities()
+): BlingProductPatchBlock | null {
+  if (operation === "NAME_ONLY") {
+    return capabilities.namePatchEnabled
+      ? null
+      : {
+          code: "NAME_PATCH_BLOCKED",
+          message: BLING_PRODUCT_NAME_PATCH_BLOCK_MESSAGE
+        };
+  }
+
+  return capabilities.imagesPatchEnabled
+    ? null
+    : {
+        code: "IMAGES_PATCH_BLOCKED",
+        message: BLING_PRODUCT_IMAGES_PATCH_BLOCK_MESSAGE
+      };
+}
+
 export const blingProductUpdateRequestSchema = z
   .object({
     connectionId: z.string().trim().min(1).max(100),
     productId: z.string().trim().min(1).max(100),
     fields: blingProductReviewedFieldsSchema.optional(),
+    operation: blingProductPatchOperationSchema.optional(),
     confirmed: z.boolean().optional().default(false),
     idempotencyKey: z.string().trim().min(16).max(200).regex(/^[A-Za-z0-9:_-]+$/).optional(),
     confirmedLinkMismatch: z.boolean().optional().default(false),
@@ -38,6 +95,25 @@ export const blingProductUpdateRequestSchema = z
         code: z.ZodIssueCode.custom,
         path: ["fields"],
         message: "Revise o produto antes de atualizar."
+      });
+    }
+    if (value.confirmed && !value.operation) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["operation"],
+        message: "A operação de atualização não foi informada."
+      });
+    }
+    if (
+      value.confirmed
+      && value.fields
+      && value.operation
+      && value.operation !== getBlingProductPatchOperation(value.fields)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["operation"],
+        message: "A operação não corresponde aos campos selecionados."
       });
     }
     if (value.confirmed && !value.idempotencyKey) {
@@ -66,6 +142,13 @@ export const blingProductUpdateRequestSchema = z
         code: z.ZodIssueCode.custom,
         path: ["linkMismatchConfirmation"],
         message: "A confirmacao nao corresponde a esta operacao."
+      });
+    }
+    if (!value.confirmed && value.operation !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["operation"],
+        message: "A consulta inicial nao aceita uma operacao de atualizacao."
       });
     }
     if (!value.confirmed && value.confirmedLinkMismatch && value.fields !== undefined) {

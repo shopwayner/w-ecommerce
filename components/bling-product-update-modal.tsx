@@ -27,12 +27,17 @@ export type BlingProductReviewChanges = {
 export type BlingProductUpdatePreview = {
   confirmedLinkMismatch?: true;
   linkMismatchConfirmation?: string;
+  capabilities: {
+    namePatchEnabled: boolean;
+    imagesPatchEnabled: boolean;
+  };
   item: {
     productId: string;
     status: "READY" | "UNCHANGED" | "VINCULO_PRECISA_REVISAO" | "NOT_LINKED" | "UNSUPPORTED" | "ERROR";
     message: string;
     local: BlingProductEditableValues | null;
     remote: BlingProductEditableValues | null;
+    imageComparison?: "IMAGES_ALREADY_SYNCED" | "IMAGES_DIFFERENT" | "IMAGES_UNKNOWN";
     dryRun?: {
       canUpdate: boolean;
       safeToExecute: boolean;
@@ -76,6 +81,9 @@ export type BlingProductUpdateResult = {
     | "VERIFICATION_REQUIRED"
     | "LINK_REVIEW_REQUIRED"
     | "TEMPORARILY_BLOCKED"
+    | "NAME_PATCH_BLOCKED"
+    | "IMAGES_PATCH_BLOCKED"
+    | "PRODUCT_INCIDENT_BLOCKED"
     | "EXTERNAL_UPDATE_INTEGRITY_FAILED"
     | "LOCAL_MAPPING_CONCURRENT_UPDATE"
     | "LOCAL_MAPPING_RECORD_FAILED"
@@ -170,12 +178,18 @@ export function BlingProductUpdateModal({
   const remote = item?.remote;
   const remoteImages = remote?.images ?? [];
   const localImages = item?.local?.images ?? [];
+  const namePatchEnabled = preview?.capabilities.namePatchEnabled === true;
+  const imagesPatchEnabled = preview?.capabilities.imagesPatchEnabled === true;
+  const imagesAlreadySynced = item?.imageComparison === "IMAGES_ALREADY_SYNCED";
+  const imagesDifferent = item?.imageComparison === "IMAGES_DIFFERENT";
   const linkNeedsReview = item?.status === "VINCULO_PRECISA_REVISAO";
   const canReview = Boolean(
     item?.local && remote && !["VINCULO_PRECISA_REVISAO", "NOT_LINKED", "UNSUPPORTED", "ERROR"].includes(item.status)
   );
   const nameChanged = Boolean(nameTouched && remote && normalizedTitle !== normalizeReviewText(remote.name));
-  const imagesChanged = Boolean(imagesEditingEnabled && remote && !sameImages(images, remoteImages));
+  const imagesChanged = Boolean(
+    imagesPatchEnabled && imagesEditingEnabled && remote && !sameImages(images, remoteImages)
+  );
   const removedRemoteCount = remoteImages.filter((image) => !images.includes(image)).length;
   const imageRemovalNotExplicit = Boolean(
     imagesChanged && images.length < remoteImages.length && removedRemoteImages.length < removedRemoteCount
@@ -204,7 +218,7 @@ export function BlingProductUpdateModal({
   );
 
   function makeSelectedImagePrimary() {
-    if (!imagesEditingEnabled || selectedImageIndex <= 0) return;
+    if (!imagesPatchEnabled || !imagesEditingEnabled || selectedImageIndex <= 0) return;
     setImages((current) => {
       const selected = current[selectedImageIndex];
       if (!selected) return current;
@@ -214,7 +228,7 @@ export function BlingProductUpdateModal({
   }
 
   function removeSelectedImage() {
-    if (!imagesEditingEnabled) return;
+    if (!imagesPatchEnabled || !imagesEditingEnabled) return;
     const selected = images[selectedImageIndex];
     if (selected && remoteImages.includes(selected)) {
       setRemovedRemoteImages((current) => current.includes(selected) ? current : [...current, selected]);
@@ -225,6 +239,7 @@ export function BlingProductUpdateModal({
   }
 
   function useLocalImages() {
+    if (!imagesPatchEnabled) return;
     const merged = mergeImages(remoteImages, localImages);
     setImages(merged);
     setImagesEditingEnabled(true);
@@ -235,7 +250,7 @@ export function BlingProductUpdateModal({
   }
 
   function useLocalTitle() {
-    if (!item?.local?.name) return;
+    if (!namePatchEnabled || !item?.local?.name) return;
     setTitle(item.local.name);
     setNameTouched(true);
   }
@@ -243,8 +258,8 @@ export function BlingProductUpdateModal({
   function submit() {
     if (!canReview || !hasDifferences || formInvalid || busy || completed) return;
     const fields: BlingProductReviewChanges = {};
-    if (nameChanged) fields.name = normalizedTitle;
-    if (imagesChanged) fields.images = images;
+    if (nameChanged && namePatchEnabled) fields.name = normalizedTitle;
+    if (imagesChanged && imagesPatchEnabled) fields.images = images;
     onConfirm(fields);
   }
 
@@ -402,7 +417,7 @@ export function BlingProductUpdateModal({
                       <button
                         aria-label="Definir como foto principal"
                         className="grid h-10 w-10 place-items-center rounded-md border border-matrix-border bg-matrix-panel/90 text-matrix-goldDark disabled:opacity-45"
-                        disabled={!imagesEditingEnabled || selectedImageIndex === 0 || busy || completed}
+                        disabled={!imagesPatchEnabled || !imagesEditingEnabled || selectedImageIndex === 0 || busy || completed}
                         onClick={makeSelectedImagePrimary}
                         title="Definir como foto principal"
                         type="button"
@@ -412,7 +427,7 @@ export function BlingProductUpdateModal({
                       <button
                         aria-label="Remover foto"
                         className="grid h-10 w-10 place-items-center rounded-md border border-red-500/35 bg-matrix-panel/90 text-red-400 disabled:opacity-45"
-                        disabled={!imagesEditingEnabled || busy || completed}
+                        disabled={!imagesPatchEnabled || !imagesEditingEnabled || busy || completed}
                         onClick={removeSelectedImage}
                         title="Remover foto"
                         type="button"
@@ -470,7 +485,7 @@ export function BlingProductUpdateModal({
                     </div>
                     <Button
                       className="shrink-0"
-                      disabled={!localImages.length || imagesEditingEnabled || busy || completed}
+                      disabled={!imagesPatchEnabled || !localImages.length || imagesEditingEnabled || busy || completed}
                       onClick={useLocalImages}
                       type="button"
                       variant="secondary"
@@ -498,6 +513,16 @@ export function BlingProductUpdateModal({
                       As fotos locais foram adicionadas à seleção. Revise antes de atualizar.
                     </p>
                   ) : null}
+                  {imagesAlreadySynced ? (
+                    <p className="mt-3 text-xs text-green-300">
+                      As fotos já estão atualizadas no Bling.
+                    </p>
+                  ) : null}
+                  {imagesDifferent && !imagesPatchEnabled ? (
+                    <p className="mt-3 text-xs text-amber-200">
+                      As fotos não serão enviadas nesta atualização.
+                    </p>
+                  ) : null}
                   {galleryReductionRequiresConfirmation ? (
                     <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-md border border-amber-500/35 bg-amber-500/10 p-3 text-sm text-amber-100">
                       <input
@@ -518,7 +543,7 @@ export function BlingProductUpdateModal({
                   Título
                   <textarea
                     className="min-h-28 resize-y rounded-md border border-matrix-gold/35 bg-matrix-panel2 px-3 py-2 text-base font-semibold text-matrix-fg outline-none focus:border-matrix-gold/70"
-                    disabled={busy || completed}
+                    disabled={!namePatchEnabled || busy || completed}
                     maxLength={120}
                     onChange={(event) => {
                       setTitle(event.target.value);
@@ -536,7 +561,7 @@ export function BlingProductUpdateModal({
                     </p>
                     <button
                       className="mt-2 font-semibold text-matrix-goldDark hover:underline disabled:opacity-50"
-                      disabled={busy || completed}
+                      disabled={!namePatchEnabled || busy || completed}
                       onClick={useLocalTitle}
                       type="button"
                     >
@@ -563,7 +588,14 @@ export function BlingProductUpdateModal({
               {friendlyMessage}
             </p>
           ) : null}
-          {canReview && !hasDifferences && !busy && !completed ? (
+          {canReview && nameChanged && !busy && !completed ? (
+            <p className="mt-4 rounded-md border border-matrix-gold/30 bg-matrix-goldSoft/10 px-3 py-2 text-sm text-matrix-fg">
+              {imagesDifferent && !imagesPatchEnabled
+                ? "Somente o nome será atualizado. As fotos não serão enviadas nesta atualização."
+                : "Somente o nome será atualizado."}
+            </p>
+          ) : null}
+          {canReview && !hasDifferences && !imagesDifferent && !busy && !completed ? (
             <p className="mt-4 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm text-matrix-muted">
               Este produto já está atualizado no Bling.
             </p>
@@ -617,7 +649,13 @@ export function BlingProductUpdateModal({
               onClick={submit}
               type="button"
             >
-              {busy ? "Atualizando produto..." : "Atualizar no Bling"}
+              {busy
+                ? nameChanged && !imagesChanged
+                  ? "Atualizando nome..."
+                  : "Atualizando produto..."
+                : nameChanged && !imagesChanged
+                  ? "Atualizar nome no Bling"
+                  : "Atualizar no Bling"}
             </Button>
           )}
         </footer>

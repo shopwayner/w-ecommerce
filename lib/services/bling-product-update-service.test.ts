@@ -4,9 +4,10 @@ import path from "node:path";
 import test from "node:test";
 import { Prisma } from "@prisma/client";
 import {
-  BLING_PRODUCT_UPDATE_BLOCK_MESSAGE,
-  BLING_PRODUCT_UPDATE_WRITES_BLOCKED,
-  blingProductUpdateRequestSchema
+  BLING_PRODUCT_IMAGES_PATCH_BLOCK_MESSAGE,
+  blingProductUpdateRequestSchema,
+  getBlingProductPatchBlock,
+  getBlingProductPatchCapabilities
 } from "@/lib/bling-product-update-schema";
 import {
   BLING_PRODUCT_UPDATE_FIELDS,
@@ -17,6 +18,7 @@ import {
   buildBlingProductRestorationPayload,
   classifyBlingProductStructure,
   classifyBlingStockAction,
+  compareBlingProductImages,
   compareBlingProductValues,
   compareBlingProductIntegrity,
   createBlingProductLinkMismatchConfirmation,
@@ -24,6 +26,7 @@ import {
   createBlingProductUpdateDryRun,
   describeBlingProductUpdateFailure,
   getBlingProductUpdateErrorMessage,
+  hasBlockingBlingProductIncident,
   isSupportedBlingProductStructure,
   maskBlingProductId,
   normalizeBlingProductImages,
@@ -946,6 +949,7 @@ test("rejects every request key outside the strict single-product contract", () 
     connectionId: "connection-1",
     productId: "product-1",
     confirmed: true,
+    operation: "NAME_AND_IMAGES" as const,
     idempotencyKey: "request_1234567890",
     fields: { name: "Produto", images: [localProduct.images[0]] }
   };
@@ -1005,6 +1009,7 @@ test("requires reviewed fields and idempotency only for a confirmed update", () 
       connectionId: "connection-1",
       productId: "product-1",
       confirmed: true,
+      operation: "NAME_ONLY",
       idempotencyKey: "request_1234567890",
       fields: {}
     }).success,
@@ -1015,6 +1020,7 @@ test("requires reviewed fields and idempotency only for a confirmed update", () 
       connectionId: "connection-1",
       productId: "product-1",
       confirmed: true,
+      operation: "NAME_ONLY",
       idempotencyKey: "request_1234567890",
       fields: { name: "Produto revisado" }
     }).success,
@@ -1067,6 +1073,7 @@ test("accepts link mismatch confirmation only in its explicit request stages", (
   assert.equal(blingProductUpdateRequestSchema.safeParse({
     ...base,
     confirmed: true,
+    operation: "NAME_ONLY",
     confirmedLinkMismatch: true,
     idempotencyKey,
     fields: { name: "Produto revisado" }
@@ -1074,6 +1081,7 @@ test("accepts link mismatch confirmation only in its explicit request stages", (
   assert.equal(blingProductUpdateRequestSchema.safeParse({
     ...base,
     confirmed: true,
+    operation: "NAME_ONLY",
     confirmedLinkMismatch: true,
     linkMismatchConfirmation,
     idempotencyKey,
@@ -1082,6 +1090,7 @@ test("accepts link mismatch confirmation only in its explicit request stages", (
   assert.equal(blingProductUpdateRequestSchema.safeParse({
     ...base,
     confirmed: true,
+    operation: "NAME_ONLY",
     linkMismatchConfirmation,
     idempotencyKey,
     fields: { name: "Produto revisado" }
@@ -1673,7 +1682,7 @@ test("never retries a mutating Bling request automatically after authorization f
   assert.doesNotMatch(source, /allowRefresh\) \{[\s\S]*return this\.performRequest<T>\(options, true/);
 });
 
-test("blocks product writes in the UI, route and service before a job or PATCH can start", async () => {
+test("releases name updates while blocking image operations before a job or PATCH", async () => {
   const routeSource = readFileSync(
     path.join(process.cwd(), "app/api/products/bling/update/route.ts"),
     "utf8"
@@ -1688,47 +1697,175 @@ test("blocks product writes in the UI, route and service before a job or PATCH c
   );
   const updateStart = serviceSource.indexOf("  async updateOne(input:");
   const updateSource = serviceSource.slice(updateStart);
-  const routeBlock = routeSource.indexOf("if (parsed.data.confirmed && BLING_PRODUCT_UPDATE_WRITES_BLOCKED)");
+  const routeBlock = routeSource.indexOf("getBlingProductPatchBlock(parsed.data.operation)");
+  const routeImageBlock = routeSource.indexOf("requestsImageUpdate(body)");
+  const routeParse = routeSource.indexOf("blingProductUpdateRequestSchema.safeParse(body)");
   const routeUpdate = routeSource.indexOf("blingProductUpdateService.updateOne");
-  const serviceBlock = updateSource.indexOf("BLING_PRODUCT_UPDATE_WRITES_BLOCKED");
+  const serviceBlock = updateSource.indexOf("getBlingProductPatchBlock(input.operation)");
   const serviceJob = updateSource.indexOf("createUpdateJob(input)");
   const servicePatch = updateSource.indexOf('method: "PATCH"');
   const previewStart = pageSource.indexOf("async function openBlingUpdatePreview");
   const previewEnd = pageSource.indexOf("async function confirmBlingProductUpdate", previewStart);
   const previewSource = pageSource.slice(previewStart, previewEnd);
 
-  assert.equal(BLING_PRODUCT_UPDATE_WRITES_BLOCKED, true);
-  assert.equal(
-    BLING_PRODUCT_UPDATE_BLOCK_MESSAGE,
-    "A atualização de produtos no Bling está temporariamente bloqueada para revisão."
-  );
   assert.ok(routeBlock >= 0 && routeBlock < routeUpdate);
+  assert.ok(routeImageBlock >= 0 && routeImageBlock < routeParse && routeImageBlock < routeUpdate);
   assert.match(routeSource, /status:\s*423/);
   assert.ok(serviceBlock >= 0 && serviceBlock < serviceJob && serviceBlock < servicePatch);
   assert.equal(updateSource.indexOf('method: "PUT"'), -1);
-  assert.match(updateSource, /code:\s*"TEMPORARILY_BLOCKED"[\s\S]*patchRequests:\s*0/);
-  assert.match(previewSource, /BLING_PRODUCT_UPDATE_WRITES_BLOCKED/);
-  assert.match(previewSource, /BLING_PRODUCT_UPDATE_BLOCK_MESSAGE/);
-  assert.match(pageSource, /disabled=\{[\s\S]*BLING_PRODUCT_UPDATE_WRITES_BLOCKED \|\|/);
-  assert.ok(
-    previewSource.indexOf("BLING_PRODUCT_UPDATE_WRITES_BLOCKED")
-      < previewSource.indexOf("fetch(")
-  );
+  assert.match(updateSource, /code: capabilityBlock\.code[\s\S]*patchRequests:\s*0/);
+  assert.doesNotMatch(previewSource, /BLING_PRODUCT_(NAME|IMAGES)_PATCH_ENABLED|process\.env/);
+  assert.doesNotMatch(pageSource, /BLING_PRODUCT_(NAME|IMAGES)_PATCH_ENABLED|process\.env/);
+  assert.match(pageSource, /operation,[\s\S]*confirmed: true/);
 
-  const blocked = await blingProductUpdateService.updateOne({
-    userId: "user-never-loaded",
-    organizationId: "organization-never-loaded",
-    connectionId: "connection-never-loaded",
-    productId: "product-never-loaded",
-    fields: { name: "Nao deve ser enviado" },
-    idempotencyKey: "blocked_request_123456"
-  });
-  assert.equal(blocked.code, "TEMPORARILY_BLOCKED");
-  assert.ok(blocked.audit);
-  assert.equal(blocked.audit.patchRequests, 0);
-  assert.equal(blocked.audit.patchRequestState, "NOT_SENT");
-  assert.equal(blocked.audit.verificationGetExecuted, false);
-  assert.equal(blocked.audit.localTimestampUpdated, false);
+  const previousNameFlag = process.env.BLING_PRODUCT_NAME_PATCH_ENABLED;
+  const previousImagesFlag = process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED;
+  process.env.BLING_PRODUCT_NAME_PATCH_ENABLED = "true";
+  process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED = "false";
+  try {
+    assert.deepEqual(getBlingProductPatchCapabilities(), {
+      namePatchEnabled: true,
+      imagesPatchEnabled: false
+    });
+    assert.equal(getBlingProductPatchBlock("NAME_ONLY"), null);
+    assert.deepEqual(getBlingProductPatchBlock("IMAGES_ONLY"), {
+      code: "IMAGES_PATCH_BLOCKED",
+      message: BLING_PRODUCT_IMAGES_PATCH_BLOCK_MESSAGE
+    });
+    assert.deepEqual(getBlingProductPatchBlock("NAME_AND_IMAGES"), {
+      code: "IMAGES_PATCH_BLOCKED",
+      message: BLING_PRODUCT_IMAGES_PATCH_BLOCK_MESSAGE
+    });
+
+    const blocked = await blingProductUpdateService.updateOne({
+      userId: "user-never-loaded",
+      organizationId: "organization-never-loaded",
+      connectionId: "connection-never-loaded",
+      productId: "product-never-loaded",
+      fields: { images: ["https://cdn.example.com/photo.jpg"] },
+      operation: "IMAGES_ONLY",
+      idempotencyKey: "blocked_request_123456"
+    });
+    assert.equal(blocked.code, "IMAGES_PATCH_BLOCKED");
+    assert.ok(blocked.audit);
+    assert.equal(blocked.audit.patchRequests, 0);
+    assert.equal(blocked.audit.patchRequestState, "NOT_SENT");
+    assert.equal(blocked.audit.verificationGetExecuted, false);
+    assert.equal(blocked.audit.localTimestampUpdated, false);
+  } finally {
+    if (previousNameFlag === undefined) delete process.env.BLING_PRODUCT_NAME_PATCH_ENABLED;
+    else process.env.BLING_PRODUCT_NAME_PATCH_ENABLED = previousNameFlag;
+    if (previousImagesFlag === undefined) delete process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED;
+    else process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED = previousImagesFlag;
+  }
+});
+
+test("fails closed when selective patch flags are absent", () => {
+  const previousNameFlag = process.env.BLING_PRODUCT_NAME_PATCH_ENABLED;
+  const previousImagesFlag = process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED;
+  delete process.env.BLING_PRODUCT_NAME_PATCH_ENABLED;
+  delete process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED;
+  try {
+    assert.deepEqual(getBlingProductPatchCapabilities(), {
+      namePatchEnabled: false,
+      imagesPatchEnabled: false
+    });
+    assert.equal(getBlingProductPatchBlock("NAME_ONLY")?.code, "NAME_PATCH_BLOCKED");
+    assert.equal(getBlingProductPatchBlock("IMAGES_ONLY")?.code, "IMAGES_PATCH_BLOCKED");
+  } finally {
+    if (previousNameFlag === undefined) delete process.env.BLING_PRODUCT_NAME_PATCH_ENABLED;
+    else process.env.BLING_PRODUCT_NAME_PATCH_ENABLED = previousNameFlag;
+    if (previousImagesFlag === undefined) delete process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED;
+    else process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED = previousImagesFlag;
+  }
+});
+
+test("binds the declared patch operation to the exact reviewed fields", () => {
+  const base = {
+    connectionId: "connection-1",
+    productId: "product-1",
+    confirmed: true,
+    idempotencyKey: "request_1234567890"
+  };
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    operation: "NAME_ONLY",
+    fields: { name: "Produto revisado" }
+  }).success, true);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    operation: "IMAGES_ONLY",
+    fields: { images: ["https://cdn.example.com/photo.jpg"] }
+  }).success, true);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    operation: "NAME_AND_IMAGES",
+    fields: { name: "Produto revisado", images: ["https://cdn.example.com/photo.jpg"] }
+  }).success, true);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    operation: "NAME_ONLY",
+    fields: { name: "Produto revisado", images: ["https://cdn.example.com/photo.jpg"] }
+  }).success, false);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    operation: "NAME_AND_IMAGES",
+    fields: { name: "Produto revisado" }
+  }).success, false);
+});
+
+test("classifies synchronized, different and unknown Bling image sets without downloads", () => {
+  const first = "https://cdn.example.com/first.jpg";
+  const second = "https://cdn.example.com/second.jpg";
+  const alternate = "https://images.example.com/first-copy.jpg";
+  assert.equal(compareBlingProductImages({
+    localImages: [first],
+    remoteImages: [first, second]
+  }), "IMAGES_ALREADY_SYNCED");
+  assert.equal(compareBlingProductImages({
+    localImages: [alternate],
+    remoteImages: [first, second],
+    contentFingerprints: {
+      [alternate]: "same-content",
+      [first]: "same-content",
+      [second]: "other-content"
+    }
+  }), "IMAGES_ALREADY_SYNCED");
+  assert.equal(compareBlingProductImages({
+    localImages: ["https://cdn.example.com/new.jpg"],
+    remoteImages: [first, second]
+  }), "IMAGES_DIFFERENT");
+  assert.equal(compareBlingProductImages({
+    localImages: [],
+    remoteImages: [first]
+  }), "IMAGES_UNKNOWN");
+  assert.equal(compareBlingProductImages({
+    localImages: ["http://cdn.example.com/invalid.jpg"],
+    remoteImages: [first]
+  }), "IMAGES_UNKNOWN");
+});
+
+test("blocks products with a prior integral PUT incident without affecting safe PATCH history", () => {
+  assert.equal(hasBlockingBlingProductIncident([{
+    action: "BLING_PRODUCT_UPDATE_RESULT",
+    status: "SUCCESS",
+    metadata: { resultCode: "UPDATED", putRequests: 1 }
+  }]), true);
+  assert.equal(hasBlockingBlingProductIncident([{
+    action: "BLING_PRODUCT_UPDATE_RESULT",
+    status: "SUCCESS",
+    metadata: { resultCode: "UPDATED", patchRequests: 1 }
+  }]), false);
+  assert.equal(hasBlockingBlingProductIncident([{
+    action: "BLING_PRODUCT_UPDATE_RESULT",
+    status: "FAILED",
+    metadata: { resultCode: "EXTERNAL_UPDATE_INTEGRITY_FAILED" }
+  }]), true);
+  assert.equal(hasBlockingBlingProductIncident([{
+    action: "BLING_PRODUCT_UPDATE_INTEGRITY_FAILED",
+    status: "FAILED",
+    metadata: {}
+  }]), true);
 });
 
 test("requires both write permissions, an administrator and explicit confirmation", () => {
@@ -1766,6 +1903,10 @@ test("renders only the simplified single-product modal contract", () => {
   assert.equal((pageSource.match(/method: "POST"/g) ?? []).filter(Boolean).length > 0, true);
   assert.match(modalSource, /Atualizar produto no Bling/);
   assert.match(modalSource, /Atualizar no Bling/);
+  assert.match(modalSource, /Atualizar nome no Bling/);
+  assert.match(modalSource, /Somente o nome será atualizado\./);
+  assert.match(modalSource, /As fotos já estão atualizadas no Bling\./);
+  assert.match(modalSource, /As fotos não serão enviadas nesta atualização\./);
   assert.match(modalSource, /Atualizando produto\.\.\./);
   assert.match(modalSource, /Definir como foto principal/);
   assert.match(modalSource, /Remover foto/);
@@ -1794,7 +1935,9 @@ test("renders only the simplified single-product modal contract", () => {
   assert.match(modalSource, /Usar estas fotos no Bling/);
   assert.match(modalSource, /nameChanged/);
   assert.match(modalSource, /imagesChanged/);
-  assert.match(modalSource, /if \(imagesChanged\) fields\.images = images/);
+  assert.match(modalSource, /if \(imagesChanged && imagesPatchEnabled\) fields\.images = images/);
+  assert.match(modalSource, /preview\?\.capabilities\.namePatchEnabled/);
+  assert.match(modalSource, /preview\?\.capabilities\.imagesPatchEnabled/);
   assert.match(modalSource, /galleryReductionRequiresConfirmation/);
   assert.match(modalSource, /imageReductionAcknowledged/);
   assert.match(modalSource, /Confirmo que revisei a remo/);
