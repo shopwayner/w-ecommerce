@@ -36,9 +36,13 @@ export type BlingApiFailureCategory =
   | "TEMPORARY"
   | "UNKNOWN";
 
+export type BlingApiFailureField = "TITLE" | "BRAND" | "IMAGES" | "REQUIRED";
+
 export type BlingApiErrorDetails = {
   category: BlingApiFailureCategory;
   upstreamCode?: string;
+  upstreamField?: BlingApiFailureField;
+  upstreamFieldCode?: string;
   requestIdMasked?: string;
   requestState: "NOT_SENT" | "SENT" | "UNKNOWN";
 };
@@ -75,11 +79,57 @@ function knownErrorFragments(value: unknown, depth = 0): string[] {
   if (Array.isArray(value)) return value.slice(0, 10).flatMap((item) => knownErrorFragments(item, depth + 1));
   if (typeof value !== "object") return [];
 
-  const allowedKeys = new Set(["code", "type", "message", "description", "field", "path", "error"]);
+  const allowedKeys = new Set([
+    "code",
+    "type",
+    "message",
+    "description",
+    "field",
+    "fields",
+    "path",
+    "element",
+    "namespace",
+    "msg",
+    "collection",
+    "error"
+  ]);
   return Object.entries(value as Record<string, unknown>)
     .filter(([key]) => allowedKeys.has(key.toLowerCase()))
     .slice(0, 20)
     .flatMap(([, item]) => knownErrorFragments(item, depth + 1));
+}
+
+function firstKnownFieldCode(value: unknown, depth = 0): string | undefined {
+  if (depth > 5 || !value || typeof value !== "object") return undefined;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 10)) {
+      const code = firstKnownFieldCode(item, depth + 1);
+      if (code) return code;
+    }
+    return undefined;
+  }
+
+  const item = value as Record<string, unknown>;
+  if (
+    ("element" in item || "field" in item || "path" in item || "msg" in item)
+    && ("code" in item)
+  ) {
+    const code = safeUpstreamCode(item.code);
+    if (code) return code;
+  }
+  for (const nested of Object.values(item).slice(0, 20)) {
+    const code = firstKnownFieldCode(nested, depth + 1);
+    if (code) return code;
+  }
+  return undefined;
+}
+
+function inferFailureField(fragments: string): BlingApiFailureField | undefined {
+  if (/imagem|image|midia|imagensurl|foto|photo|video/.test(fragments)) return "IMAGES";
+  if (/\bmarca\b|\bbrand\b/.test(fragments)) return "BRAND";
+  if (/\bnome\b|\btitulo\b|\btitle\b/.test(fragments)) return "TITLE";
+  if (/obrigatori|required|missing|required field|campo ausente/.test(fragments)) return "REQUIRED";
+  return undefined;
 }
 
 function firstKnownErrorCode(value: unknown, depth = 0): string | undefined {
@@ -122,10 +172,16 @@ export function classifyBlingApiFailure(input: {
   else if (/imagem|image|midia|imagensurl|foto|photo/.test(fragments)) category = "IMAGES";
   else if ([400, 409, 422].includes(input.status)) category = "VALIDATION";
 
+  const upstreamField = inferFailureField(fragments);
+  const upstreamFieldCode = firstKnownFieldCode(input.payload);
+  const requestIdMasked = maskUpstreamRequestId(input.requestId ?? null);
+
   return {
     category,
     upstreamCode: firstKnownErrorCode(input.payload),
-    requestIdMasked: maskUpstreamRequestId(input.requestId ?? null),
+    ...(upstreamField ? { upstreamField } : {}),
+    ...(upstreamFieldCode ? { upstreamFieldCode } : {}),
+    ...(requestIdMasked ? { requestIdMasked } : {}),
     requestState: input.requestState ?? "SENT"
   };
 }

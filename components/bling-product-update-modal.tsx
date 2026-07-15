@@ -53,7 +53,21 @@ export type BlingProductUpdateResult = {
   status: "UPDATED" | "UNCHANGED" | "FAILED";
   message: string;
   fields: Array<"name" | "brand" | "images">;
-  code?: "LOCAL_MAPPING_CONCURRENT_UPDATE" | "LOCAL_MAPPING_RECORD_FAILED";
+  code?:
+    | "AUTHORIZATION_REQUIRED"
+    | "IMAGES_REJECTED"
+    | "TITLE_REJECTED"
+    | "BRAND_REJECTED"
+    | "REQUIRED_FIELDS_MISSING"
+    | "UNSUPPORTED_STRUCTURE"
+    | "DATA_REJECTED"
+    | "RATE_LIMITED"
+    | "TEMPORARY_FAILURE"
+    | "VERIFICATION_REQUIRED"
+    | "LINK_REVIEW_REQUIRED"
+    | "LOCAL_MAPPING_CONCURRENT_UPDATE"
+    | "LOCAL_MAPPING_RECORD_FAILED"
+    | "LOCAL_AUDIT_RECORD_FAILED";
   replayed?: boolean;
 };
 
@@ -173,9 +187,14 @@ export function BlingProductUpdateModal({
       && normalizePresentationText(item.local.name) === normalizePresentationText(remote.name)
   );
   const completed = result?.status === "UPDATED" || result?.status === "UNCHANGED";
+  const retryBlocked = result?.code === "VERIFICATION_REQUIRED";
   const selectedImage = images[selectedImageIndex] ?? null;
   const friendlyMessage = message || (!canReview ? item?.message ?? "" : "");
-  const localRecordWarning = Boolean(result?.code);
+  const localRecordWarning = Boolean(
+    result?.status === "UPDATED"
+    && result.code
+    && ["LOCAL_MAPPING_CONCURRENT_UPDATE", "LOCAL_MAPPING_RECORD_FAILED", "LOCAL_AUDIT_RECORD_FAILED"].includes(result.code)
+  );
 
   function makeSelectedImagePrimary() {
     if (!imagesEditingEnabled || selectedImageIndex <= 0) return;
@@ -486,7 +505,7 @@ export function BlingProductUpdateModal({
                   <textarea
                     className="min-h-28 resize-y rounded-md border border-matrix-gold/35 bg-matrix-panel2 px-3 py-2 text-base font-semibold text-matrix-fg outline-none focus:border-matrix-gold/70"
                     disabled={busy || completed}
-                    maxLength={220}
+                    maxLength={120}
                     onChange={(event) => {
                       setTitle(event.target.value);
                       setNameTouched(true);
@@ -603,7 +622,7 @@ export function BlingProductUpdateModal({
           ) : (
             <Button
               className="w-full sm:w-auto"
-              disabled={!canReview || !hasDifferences || formInvalid || busy || completed}
+              disabled={!canReview || !hasDifferences || formInvalid || busy || completed || retryBlocked}
               onClick={submit}
               type="button"
             >

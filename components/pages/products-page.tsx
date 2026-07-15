@@ -707,7 +707,6 @@ export function ProductsPage() {
 
       const preview = payload.data as BlingProductUpdatePreview;
       setBlingUpdatePreview(preview);
-      blingUpdateIdempotencyKey.current = crypto.randomUUID();
       setBlingUpdateMessage("");
     } catch {
       setBlingUpdateMessage("Nao foi possivel atualizar o produto no Bling agora.");
@@ -724,25 +723,53 @@ export function ProductsPage() {
       blingUpdateRequestInFlight.current ||
       blingUpdateResult?.status === "UPDATED"
     ) return;
-    const idempotencyKey = blingUpdateIdempotencyKey.current;
-    if (!idempotencyKey) return;
+    const hadIdempotencyKey = Boolean(blingUpdateIdempotencyKey.current);
+    const idempotencyKey = blingUpdateIdempotencyKey.current ?? crypto.randomUUID();
+    blingUpdateIdempotencyKey.current = idempotencyKey;
     blingUpdateRequestInFlight.current = true;
     setBlingUpdateBusy(true);
     setBlingUpdateMessage("Atualizando produto...");
     try {
+      let activePreview = blingUpdatePreview;
+      if (!hadIdempotencyKey && activePreview.confirmedLinkMismatch) {
+        const confirmationResponse = await fetch("/api/products/bling/update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            connectionId: selectedBlingConnectionId,
+            productId: activePreview.item.productId,
+            confirmed: false,
+            confirmedLinkMismatch: true,
+            idempotencyKey
+          })
+        });
+        const confirmationPayload = await confirmationResponse.json().catch(() => ({}));
+        if (
+          !confirmationResponse.ok
+          || !confirmationPayload.data?.confirmedLinkMismatch
+          || !confirmationPayload.data?.linkMismatchConfirmation
+        ) {
+          blingUpdateIdempotencyKey.current = null;
+          setBlingUpdateMessage(confirmationPayload.error ?? "Revise o vinculo novamente antes de atualizar.");
+          return;
+        }
+        activePreview = confirmationPayload.data as BlingProductUpdatePreview;
+        setBlingUpdatePreview(activePreview);
+      }
+
       const response = await fetch("/api/products/bling/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           connectionId: selectedBlingConnectionId,
-          productId: blingUpdatePreview.item.productId,
+          productId: activePreview.item.productId,
           fields,
           confirmed: true,
           idempotencyKey,
-          ...(blingUpdatePreview.confirmedLinkMismatch && blingUpdatePreview.linkMismatchConfirmation
+          ...(activePreview.confirmedLinkMismatch && activePreview.linkMismatchConfirmation
             ? {
                 confirmedLinkMismatch: true,
-                linkMismatchConfirmation: blingUpdatePreview.linkMismatchConfirmation
+                linkMismatchConfirmation: activePreview.linkMismatchConfirmation
               }
             : {})
         })
@@ -755,12 +782,23 @@ export function ProductsPage() {
       }
       setBlingUpdateResult(result);
       setBlingUpdateMessage(result.message);
+      if (result.status === "FAILED" && result.code !== "VERIFICATION_REQUIRED") {
+        blingUpdateIdempotencyKey.current = null;
+      }
       if (result.status !== "FAILED") {
         setSelectedProductIds((current) => new Set([...current].filter((id) => id !== result.productId)));
         await loadProducts();
       }
     } catch {
-      setBlingUpdateMessage("Nao foi possivel atualizar o produto no Bling agora.");
+      setBlingUpdateResult({
+        productId: blingUpdatePreview.item.productId,
+        externalProductIdMasked: null,
+        status: "FAILED",
+        code: "VERIFICATION_REQUIRED",
+        message: "A atualizacao pode ter sido concluida. Verifique novamente antes de tentar.",
+        fields: []
+      });
+      setBlingUpdateMessage("A atualizacao pode ter sido concluida. Verifique novamente antes de tentar.");
     } finally {
       blingUpdateRequestInFlight.current = false;
       setBlingUpdateBusy(false);
@@ -775,8 +813,8 @@ export function ProductsPage() {
       || blingUpdateBusy
       || blingUpdateRequestInFlight.current
     ) return;
-    const idempotencyKey = blingUpdateIdempotencyKey.current;
-    if (!idempotencyKey) return;
+    const idempotencyKey = blingUpdateIdempotencyKey.current ?? crypto.randomUUID();
+    blingUpdateIdempotencyKey.current = idempotencyKey;
 
     blingUpdateRequestInFlight.current = true;
     setBlingUpdateBusy(true);

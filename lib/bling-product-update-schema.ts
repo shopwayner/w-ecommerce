@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const blingProductReviewedFieldsSchema = z
   .object({
-    name: z.string().max(220).optional(),
+    name: z.string().max(120).optional(),
     brand: z.string().max(120).optional(),
     images: z.array(z.string().max(2_000)).max(13).optional()
   })

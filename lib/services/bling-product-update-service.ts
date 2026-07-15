@@ -1,3 +1,5 @@
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { ERPProvider, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { BlingProductReviewInput } from "@/lib/bling-product-update-schema";
@@ -65,6 +67,9 @@ export type BlingProductUpdateResult = {
   code?:
     | "AUTHORIZATION_REQUIRED"
     | "IMAGES_REJECTED"
+    | "TITLE_REJECTED"
+    | "BRAND_REJECTED"
+    | "REQUIRED_FIELDS_MISSING"
     | "UNSUPPORTED_STRUCTURE"
     | "DATA_REJECTED"
     | "RATE_LIMITED"
@@ -80,6 +85,7 @@ export type BlingProductUpdateResult = {
 
 export type BlingProductUpdateStage =
   | "PRECONDITION"
+  | "IMAGE_VALIDATION"
   | "PUT"
   | "VERIFY_GET"
   | "LOCAL_CONFIRMATION"
@@ -93,6 +99,8 @@ export type BlingProductUpdateAudit = {
   localTimestampUpdated: boolean;
   upstreamStatus?: number;
   upstreamCode?: string;
+  upstreamField?: "TITLE" | "BRAND" | "IMAGES" | "REQUIRED";
+  upstreamFieldCode?: string;
   upstreamRequestIdMasked?: string;
 };
 
@@ -133,6 +141,19 @@ const updateJobType = "BLING_PRODUCT_UPDATE";
 const staleJobLeaseMs = 5 * 60 * 1_000;
 const maximumImages = 13;
 const linkMismatchConfirmationMaxAgeMs = 10 * 60 * 1_000;
+
+export class BlingProductImageValidationError extends Error {
+  constructor() {
+    super("As fotos selecionadas nao puderam ser enviadas.");
+    this.name = "BlingProductImageValidationError";
+  }
+}
+
+type BlingProductImageProbe = (url: string) => Promise<{
+  status: number;
+  contentType: string | null;
+  redirected: boolean;
+}>;
 
 type BlingProductLinkMismatchConfirmation = {
   version: 1;
@@ -264,6 +285,85 @@ export function normalizeBlingProductImages(values: readonly unknown[]) {
     if (normalized.length === maximumImages) break;
   }
   return normalized;
+}
+
+function isPrivateIpAddress(value: string) {
+  if (isIP(value) === 4) {
+    const parts = value.split(".").map(Number);
+    return parts[0] === 0
+      || parts[0] === 10
+      || parts[0] === 127
+      || (parts[0] === 169 && parts[1] === 254)
+      || (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31)
+      || (parts[0] === 192 && parts[1] === 168);
+  }
+  if (isIP(value) === 6) {
+    const normalized = value.toLowerCase();
+    return normalized === "::"
+      || normalized === "::1"
+      || normalized.startsWith("fc")
+      || normalized.startsWith("fd")
+      || normalized.startsWith("fe80:");
+  }
+  return true;
+}
+
+async function probeBlingProductImage(value: string) {
+  const normalized = normalizeBlingProductImageUrl(value);
+  if (!normalized) throw new BlingProductImageValidationError();
+  const url = new URL(normalized);
+  const addresses = isIP(url.hostname)
+    ? [{ address: url.hostname }]
+    : await lookup(url.hostname, { all: true });
+  if (!addresses.length || addresses.some((entry) => isPrivateIpAddress(entry.address))) {
+    throw new BlingProductImageValidationError();
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "manual",
+      cache: "no-store",
+      headers: {
+        Range: "bytes=0-0",
+        "User-Agent": "W-Ecommerce-Image-Validation/1.0"
+      },
+      signal: controller.signal
+    });
+    await response.body?.cancel();
+    return {
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+      redirected: [301, 302, 303, 307, 308].includes(response.status)
+    };
+  } catch {
+    throw new BlingProductImageValidationError();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function validateBlingProductImageAccessibility(
+  images: readonly string[],
+  probe: BlingProductImageProbe = probeBlingProductImage
+) {
+  for (const image of images) {
+    let result: Awaited<ReturnType<BlingProductImageProbe>>;
+    try {
+      result = await probe(image);
+    } catch {
+      throw new BlingProductImageValidationError();
+    }
+    if (
+      result.redirected
+      || ![200, 206].includes(result.status)
+      || !result.contentType?.toLowerCase().startsWith("image/")
+    ) {
+      throw new BlingProductImageValidationError();
+    }
+  }
 }
 
 function sameImages(left: readonly string[], right: readonly string[]) {
@@ -450,7 +550,7 @@ export function normalizeBlingProductReview(
   if (input.name !== undefined) {
     const name = normalizedText(input.name);
     if (!name) throw new Error("Informe um titulo para atualizar o produto.");
-    if (name.length > 220) throw new Error("O titulo informado e muito longo.");
+    if (name.length > 120) throw new Error("O titulo informado e muito longo.");
     reviewed.name = name;
   }
 
@@ -509,27 +609,37 @@ export function buildBlingProductUpdatePayload(
     !["A", "I"].includes(situation.toUpperCase()) ||
     format.toUpperCase() !== "S"
   ) {
-    throw new Error("O cadastro atual deste produto nao pode ser preservado com seguranca.");
+    throw new Error("O cadastro precisa de dados adicionais antes de ser atualizado.");
   }
 
   const selected = new Set(fields);
+  if (selected.has("name") && !reviewed.name) {
+    throw new Error("Informe um titulo para atualizar o produto.");
+  }
+  const name = selected.has("name") ? reviewed.name : exactString(remote.nome);
+  if (!name) {
+    throw new Error("O cadastro precisa de dados adicionais antes de ser atualizado.");
+  }
   const payload: JsonRecord = {
+    nome: name,
     tipo: type,
     situacao: situation,
     formato: format
   };
 
-  if (selected.has("name")) {
-    if (!reviewed.name) throw new Error("Informe um titulo para atualizar o produto.");
-    payload.nome = reviewed.name;
-  }
   if (selected.has("brand")) {
     if (!reviewed.brand) throw new Error("Informe a marca para atualizar o produto.");
     payload.marca = reviewed.brand;
   }
   if (selected.has("images")) {
     if (!reviewed.images?.length) throw new Error("Mantenha ao menos uma foto para atualizar a galeria.");
+    const media = record(remote.midia);
+    const video = record(media.video);
+    if (typeof video.url !== "string") {
+      throw new Error("O cadastro precisa de dados adicionais antes de ser atualizado.");
+    }
     payload.midia = {
+      video: { url: video.url },
       imagens: {
         imagensURL: reviewed.images.map((link) => ({ link }))
       }
@@ -549,8 +659,20 @@ export function getBlingProductUpdateErrorMessage(error: unknown) {
   if (error instanceof BlingApiError && ["TOKEN_MISSING", "TOKEN_EXPIRED", "TOKEN_INVALID", "CONNECTION_DISCONNECTED"].includes(error.code)) {
     return "A autorizacao do Bling precisa ser renovada.";
   }
-  if (error instanceof BlingApiError && error.details?.category === "IMAGES") {
-    return "As imagens selecionadas nao puderam ser enviadas.";
+  if (
+    error instanceof BlingProductImageValidationError
+    || (error instanceof BlingApiError && (error.details?.category === "IMAGES" || error.details?.upstreamField === "IMAGES"))
+  ) {
+    return "As fotos selecionadas nao puderam ser enviadas.";
+  }
+  if (error instanceof BlingApiError && error.details?.upstreamField === "BRAND") {
+    return "O Bling nao aceitou a marca informada.";
+  }
+  if (error instanceof BlingApiError && error.details?.upstreamField === "TITLE") {
+    return "O Bling recusou o titulo informado.";
+  }
+  if (error instanceof BlingApiError && error.details?.upstreamField === "REQUIRED") {
+    return "O cadastro precisa de dados adicionais antes de ser atualizado.";
   }
   if (error instanceof BlingApiError && [400, 409, 422].includes(error.status)) {
     return "O Bling recusou os dados informados.";
@@ -571,9 +693,20 @@ export function describeBlingProductUpdateFailure(input: {
   const verificationFailure = input.stage === "VERIFY_GET"
     || (input.stage === "PUT" && apiError?.details?.requestState === "UNKNOWN");
   const unsupported = error instanceof Error && /nao pode ser preservado|nao pode ser atualizado/i.test(error.message);
+  const requiredFieldsMissing = (error instanceof Error && /dados adicionais/i.test(error.message))
+    || apiError?.details?.upstreamField === "REQUIRED"
+    || apiError?.details?.upstreamCode === "MISSING_REQUIRED_FIELD_ERROR";
   const linkConfirmationRequired = error instanceof Error && /Revise o vinculo novamente/i.test(error.message);
-  const imageFailure = apiError?.details?.category === "IMAGES";
   const rejected = Boolean(apiError && [400, 409, 422].includes(apiError.status));
+  const soleAttemptedField = input.fields?.length === 1 ? input.fields[0] : null;
+  const imageFailure = error instanceof BlingProductImageValidationError
+    || apiError?.details?.category === "IMAGES"
+    || apiError?.details?.upstreamField === "IMAGES"
+    || (rejected && soleAttemptedField === "images");
+  const brandFailure = apiError?.details?.upstreamField === "BRAND"
+    || (rejected && soleAttemptedField === "brand");
+  const titleFailure = apiError?.details?.upstreamField === "TITLE"
+    || (rejected && soleAttemptedField === "name");
   const rateLimited = apiError?.code === "RATE_LIMITED";
 
   let code: BlingProductUpdateResult["code"] = "TEMPORARY_FAILURE";
@@ -592,7 +725,16 @@ export function describeBlingProductUpdateFailure(input: {
     message = "O cadastro possui uma estrutura que nao pode ser atualizada por esta tela.";
   } else if (imageFailure) {
     code = "IMAGES_REJECTED";
-    message = "As imagens selecionadas nao puderam ser enviadas.";
+    message = "As fotos selecionadas nao puderam ser enviadas.";
+  } else if (brandFailure) {
+    code = "BRAND_REJECTED";
+    message = "O Bling nao aceitou a marca informada.";
+  } else if (titleFailure) {
+    code = "TITLE_REJECTED";
+    message = "O Bling recusou o titulo informado.";
+  } else if (requiredFieldsMissing) {
+    code = "REQUIRED_FIELDS_MISSING";
+    message = "O cadastro precisa de dados adicionais antes de ser atualizado.";
   } else if (rejected) {
     code = "DATA_REJECTED";
     message = "O Bling recusou os dados informados.";
@@ -614,6 +756,8 @@ export function describeBlingProductUpdateFailure(input: {
       localTimestampUpdated: false,
       upstreamStatus: apiError?.status,
       upstreamCode: apiError?.details?.upstreamCode ?? apiError?.code,
+      upstreamField: apiError?.details?.upstreamField,
+      upstreamFieldCode: apiError?.details?.upstreamFieldCode,
       upstreamRequestIdMasked: apiError?.details?.requestIdMasked
     }
   };
@@ -1042,6 +1186,10 @@ export class BlingProductUpdateService {
             }
           };
         } else {
+          if (changedFields.includes("images") && reviewed.images) {
+            stage = "IMAGE_VALIDATION";
+            await validateBlingProductImageAccessibility(reviewed.images);
+          }
           const body = buildBlingProductUpdatePayload(reviewed, inspection.remoteProduct, changedFields);
           stage = "PUT";
           putRequests = 1;

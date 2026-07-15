@@ -142,6 +142,8 @@ export async function POST(request: Request) {
         localTimestampUpdated: result.audit?.localTimestampUpdated,
         upstreamStatus: result.audit?.upstreamStatus,
         upstreamCode: result.audit?.upstreamCode,
+        upstreamField: result.audit?.upstreamField,
+        upstreamFieldCode: result.audit?.upstreamFieldCode,
         upstreamRequestIdMasked: result.audit?.upstreamRequestIdMasked
       },
       request

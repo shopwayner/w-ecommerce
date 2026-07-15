@@ -19,6 +19,7 @@ import {
   normalizeBlingProductPresentationText,
   normalizeBlingProductReview,
   recordConfirmedBlingMappingSync,
+  validateBlingProductImageAccessibility,
   verifyBlingProductLinkMismatchConfirmation,
   type BlingProductMappingSnapshot
 } from "./bling-product-update-service";
@@ -124,7 +125,7 @@ test("blocks an empty title and an empty visible brand", () => {
     /marca/
   );
   assert.throws(
-    () => normalizeBlingProductReview({ name: "x".repeat(221), brand: "Marca Matrix" }, localProduct),
+    () => normalizeBlingProductReview({ name: "x".repeat(121), brand: "Marca Matrix" }, localProduct),
     /titulo/
   );
   assert.throws(
@@ -197,6 +198,7 @@ test("builds only title, brand, images and exact required remote fields", () => 
     formato: "s",
     marca: "Marca revisada",
     midia: {
+      video: { url: "https://www.youtube.com/watch?v=matrix" },
       imagens: {
         imagensURL: [
           { link: localProduct.images[1] },
@@ -220,8 +222,7 @@ test("builds only title, brand, images and exact required remote fields", () => 
     "estoque",
     "tributacao",
     "variacoes",
-    "fornecedor",
-    "video"
+    "fornecedor"
   ]) {
     assert.doesNotMatch(serialized, new RegExp(forbiddenField, "i"));
   }
@@ -235,6 +236,7 @@ test("preserves the remote title and omits brand and media when they are unchang
   const payload = buildBlingProductUpdatePayload(reviewed, remoteProduct, []);
 
   assert.deepEqual(payload, {
+    nome: "Produto antigo",
     tipo: "p",
     situacao: "a",
     formato: "s"
@@ -300,10 +302,12 @@ test("detects title, brand and photos independently and keeps the official image
   );
   assert.deepEqual(compareBlingProductValues(photosOnly, matchingRemoteProduct()), ["images"]);
   assert.deepEqual(buildBlingProductUpdatePayload(photosOnly, matchingRemoteProduct(), ["images"]), {
+    nome: localProduct.name,
     tipo: "p",
     situacao: "a",
     formato: "s",
     midia: {
+      video: { url: "https://www.youtube.com/watch?v=matrix" },
       imagens: { imagensURL: [{ link: localProduct.images[1] }] }
     }
   });
@@ -313,6 +317,91 @@ test("detects title, brand and photos independently and keeps the official image
     localProduct
   );
   assert.deepEqual(compareBlingProductValues(unchanged, matchingRemoteProduct()), []);
+});
+
+test("builds the five controlled payload groups without unrelated product fields", () => {
+  const remote = matchingRemoteProduct();
+  const groups = [
+    {
+      fields: ["name"] as const,
+      reviewed: { name: "Titulo revisado" },
+      expectedKeys: ["formato", "nome", "situacao", "tipo"]
+    },
+    {
+      fields: ["name", "brand"] as const,
+      reviewed: { name: "Titulo revisado", brand: "Marca revisada" },
+      expectedKeys: ["formato", "marca", "nome", "situacao", "tipo"]
+    },
+    {
+      fields: ["name", "images"] as const,
+      reviewed: { name: "Titulo revisado", images: localProduct.images },
+      expectedKeys: ["formato", "midia", "nome", "situacao", "tipo"]
+    },
+    {
+      fields: ["images"] as const,
+      reviewed: { images: localProduct.images },
+      expectedKeys: ["formato", "midia", "nome", "situacao", "tipo"]
+    },
+    {
+      fields: ["name", "brand", "images"] as const,
+      reviewed: { name: "Titulo revisado", brand: "Marca revisada", images: localProduct.images },
+      expectedKeys: ["formato", "marca", "midia", "nome", "situacao", "tipo"]
+    }
+  ];
+
+  for (const group of groups) {
+    const payload = buildBlingProductUpdatePayload(group.reviewed, remote, group.fields);
+    assert.deepEqual(Object.keys(payload).sort(), group.expectedKeys);
+    if ("midia" in payload) {
+      assert.deepEqual((payload.midia as { video: unknown }).video, remote.data.midia.video);
+    }
+    assert.doesNotMatch(
+      JSON.stringify(payload),
+      /descricao|codigo|sku|gtin|unidade|categoria|peso|dimensoes|preco|custo|estoque|tributacao|variacoes|componentes/i
+    );
+  }
+});
+
+test("requires the remote video shape only when the image gallery changes", () => {
+  const withoutVideo = matchingRemoteProduct({
+    midia: { imagens: { externas: [], internas: [] } }
+  });
+  assert.doesNotThrow(() => buildBlingProductUpdatePayload({ name: "Titulo revisado" }, withoutVideo, ["name"]));
+  assert.throws(
+    () => buildBlingProductUpdatePayload({ images: localProduct.images }, withoutVideo, ["images"]),
+    /dados adicionais/
+  );
+});
+
+test("preserves the required remote title when only photos change", () => {
+  const remoteWithoutName = matchingRemoteProduct({ nome: undefined });
+  assert.throws(
+    () => buildBlingProductUpdatePayload({ images: localProduct.images }, remoteWithoutName, ["images"]),
+    /dados adicionais/
+  );
+});
+
+test("validates selected images before PUT without following redirects", async () => {
+  await assert.doesNotReject(validateBlingProductImageAccessibility(localProduct.images, async () => ({
+    status: 206,
+    contentType: "image/jpeg",
+    redirected: false
+  })));
+  await assert.rejects(validateBlingProductImageAccessibility(localProduct.images, async () => ({
+    status: 404,
+    contentType: "image/jpeg",
+    redirected: false
+  })), /fotos selecionadas/i);
+  await assert.rejects(validateBlingProductImageAccessibility(localProduct.images, async () => ({
+    status: 200,
+    contentType: "text/html",
+    redirected: false
+  })), /fotos selecionadas/i);
+  await assert.rejects(validateBlingProductImageAccessibility(localProduct.images, async () => ({
+    status: 302,
+    contentType: "image/jpeg",
+    redirected: true
+  })), /fotos selecionadas/i);
 });
 
 test("preserves five remote photos when the user changes only the title", () => {
@@ -330,6 +419,7 @@ test("preserves five remote photos when the user changes only the title", () => 
     nome: "Sensor Hibrido PCX 150 13-15 / Lead 110 10-16 T-Mac",
     marca: "T-Mac",
     midia: {
+      video: remoteProduct.data.midia.video,
       imagens: {
         externas: remoteImages.map((link) => ({ link })),
         internas: []
@@ -360,6 +450,7 @@ test("accepts an explicit merged gallery and preserves all remote photos", () =>
   const local = { ...localProduct, images: [localImage] };
   const remote = matchingRemoteProduct({
     midia: {
+      video: remoteProduct.data.midia.video,
       imagens: {
         externas: remoteImages.map((link) => ({ link })),
         internas: []
@@ -431,7 +522,7 @@ test("blocks the PUT payload when required remote fields are absent", () => {
     const remote = { data: { ...current.data, [missing]: undefined } };
     assert.throws(
       () => buildBlingProductUpdatePayload(reviewed, remote, ["name"]),
-      /nao pode ser preservado/
+      /dados adicionais/
     );
   }
 });
@@ -759,10 +850,33 @@ test("classifies only sanitized upstream failure metadata", () => {
   assert.deepEqual(details, {
     category: "IMAGES",
     upstreamCode: "IMAGE_INVALID",
+    upstreamField: "IMAGES",
     requestIdMasked: "requ...7890",
     requestState: "SENT"
   });
   assert.doesNotMatch(JSON.stringify(details), /must-not-be-read|access_token/);
+});
+
+test("extracts only a sanitized field group and numeric field code from Bling validation errors", () => {
+  const details = classifyBlingApiFailure({
+    status: 400,
+    payload: {
+      error: {
+        type: "VALIDATION_ERROR",
+        fields: [{ code: 12, msg: "O campo video e obrigatorio.", element: "midia.video" }],
+        payload: { Authorization: "must-not-be-read" }
+      }
+    }
+  });
+
+  assert.deepEqual(details, {
+    category: "IMAGES",
+    upstreamCode: "VALIDATION_ERROR",
+    upstreamField: "IMAGES",
+    upstreamFieldCode: "12",
+    requestState: "SENT"
+  });
+  assert.doesNotMatch(JSON.stringify(details), /must-not-be-read|Authorization|midia\.video/);
 });
 
 test("maps failures before PUT and rejected PUT responses to friendly states", () => {
@@ -787,7 +901,7 @@ test("maps failures before PUT and rejected PUT responses to friendly states", (
     const failure = describeBlingProductUpdateFailure({
       error: new BlingApiError("raw upstream detail", scenario.status, scenario.code, undefined, details),
       stage: "PUT",
-      fields: ["name"],
+      fields: [400, 422].includes(scenario.status) ? ["name", "brand"] : ["name"],
       putRequests: 1
     });
     assert.equal(failure.code, scenario.expected);
@@ -805,6 +919,45 @@ test("maps failures before PUT and rejected PUT responses to friendly states", (
   assert.equal(localTokenFailure.audit?.putRequestState, "NOT_SENT");
 });
 
+test("maps title, brand, images and missing fields to friendly messages", () => {
+  const rejected = (field: "name" | "brand" | "images") => describeBlingProductUpdateFailure({
+    error: new BlingApiError("raw", 400, "REQUEST_REJECTED", undefined, {
+      category: "VALIDATION",
+      requestState: "SENT"
+    }),
+    stage: "PUT",
+    fields: [field],
+    putRequests: 1
+  });
+
+  assert.deepEqual(
+    { code: rejected("name").code, message: rejected("name").message },
+    { code: "TITLE_REJECTED", message: "O Bling recusou o titulo informado." }
+  );
+  assert.deepEqual(
+    { code: rejected("brand").code, message: rejected("brand").message },
+    { code: "BRAND_REJECTED", message: "O Bling nao aceitou a marca informada." }
+  );
+  assert.deepEqual(
+    { code: rejected("images").code, message: rejected("images").message },
+    { code: "IMAGES_REJECTED", message: "As fotos selecionadas nao puderam ser enviadas." }
+  );
+
+  const missing = describeBlingProductUpdateFailure({
+    error: new BlingApiError("raw", 400, "REQUEST_REJECTED", undefined, {
+      category: "VALIDATION",
+      upstreamCode: "MISSING_REQUIRED_FIELD_ERROR",
+      upstreamField: "REQUIRED",
+      requestState: "SENT"
+    }),
+    stage: "PUT",
+    fields: ["name", "brand"],
+    putRequests: 1
+  });
+  assert.equal(missing.code, "REQUIRED_FIELDS_MISSING");
+  assert.equal(missing.message, "O cadastro precisa de dados adicionais antes de ser atualizado.");
+});
+
 test("distinguishes image rejection and uncertain post-PUT verification", () => {
   const imageFailure = describeBlingProductUpdateFailure({
     error: new BlingApiError("raw", 422, "REQUEST_REJECTED", undefined, {
@@ -818,7 +971,7 @@ test("distinguishes image rejection and uncertain post-PUT verification", () => 
     putRequests: 1
   });
   assert.equal(imageFailure.code, "IMAGES_REJECTED");
-  assert.equal(imageFailure.message, "As imagens selecionadas nao puderam ser enviadas.");
+  assert.equal(imageFailure.message, "As fotos selecionadas nao puderam ser enviadas.");
 
   const verificationFailure = describeBlingProductUpdateFailure({
     error: new Error("verification failed"),
@@ -984,7 +1137,16 @@ test("renders only the simplified single-product modal contract", () => {
   assert.match(modalSource, /linkNeedsReview \? "Fechar" : "Cancelar"/);
   assert.match(modalSource, /setShowLinkReview/);
   assert.match(pageSource, /confirmedLinkMismatch: true/);
-  assert.match(pageSource, /linkMismatchConfirmation: blingUpdatePreview\.linkMismatchConfirmation/);
+  assert.match(pageSource, /linkMismatchConfirmation: activePreview\.linkMismatchConfirmation/);
+  const previewFunction = pageSource.slice(
+    pageSource.indexOf("async function openBlingUpdatePreview"),
+    pageSource.indexOf("async function confirmBlingProductUpdate")
+  );
+  assert.doesNotMatch(previewFunction, /crypto\.randomUUID/);
+  assert.match(pageSource, /blingUpdateIdempotencyKey\.current \?\? crypto\.randomUUID\(\)/);
+  assert.match(pageSource, /result\.status === "FAILED" && result\.code !== "VERIFICATION_REQUIRED"/);
+  assert.match(pageSource, /blingUpdateIdempotencyKey\.current = null/);
+  assert.match(modalSource, /retryBlocked/);
   assert.match(modalSource, /setImages\(item\?\.remote\?\.images \?\? \[\]\)/);
   assert.match(modalSource, /Fotos atuais no Bling/);
   assert.match(modalSource, /Fotos disponíveis no W Ecommerce/);
