@@ -144,6 +144,7 @@ export function BlingProductUpdateModal({
   const [nameTouched, setNameTouched] = useState(false);
   const [imagesEditingEnabled, setImagesEditingEnabled] = useState(false);
   const [removedRemoteImages, setRemovedRemoteImages] = useState<string[]>([]);
+  const [imageReductionAcknowledged, setImageReductionAcknowledged] = useState(false);
 
   useEffect(() => {
     setTitle(item?.remote?.name ?? item?.local?.name ?? "");
@@ -154,6 +155,7 @@ export function BlingProductUpdateModal({
     setNameTouched(false);
     setImagesEditingEnabled(false);
     setRemovedRemoteImages([]);
+    setImageReductionAcknowledged(false);
   }, [item?.productId, item?.local, item?.remote]);
 
   useEffect(() => {
@@ -178,10 +180,13 @@ export function BlingProductUpdateModal({
   const imageRemovalNotExplicit = Boolean(
     imagesChanged && images.length < remoteImages.length && removedRemoteImages.length < removedRemoteCount
   );
+  const galleryReductionRequiresConfirmation = Boolean(imagesChanged && images.length < remoteImages.length);
+  const imageReductionUnconfirmed = galleryReductionRequiresConfirmation && !imageReductionAcknowledged;
   const hasDifferences = nameChanged || imagesChanged;
   const formInvalid = (nameTouched && !normalizedTitle)
     || (imagesEditingEnabled && !images.length)
-    || imageRemovalNotExplicit;
+    || imageRemovalNotExplicit
+    || imageReductionUnconfirmed;
   const presentationOnlyTitleDifference = Boolean(
     item?.local?.name
       && remote?.name
@@ -214,6 +219,7 @@ export function BlingProductUpdateModal({
     if (selected && remoteImages.includes(selected)) {
       setRemovedRemoteImages((current) => current.includes(selected) ? current : [...current, selected]);
     }
+    setImageReductionAcknowledged(false);
     setImages((current) => current.filter((_, index) => index !== selectedImageIndex));
     setSelectedImageIndex((current) => Math.max(0, Math.min(current, images.length - 2)));
   }
@@ -223,6 +229,7 @@ export function BlingProductUpdateModal({
     setImages(merged);
     setImagesEditingEnabled(true);
     setRemovedRemoteImages([]);
+    setImageReductionAcknowledged(false);
     const firstLocalIndex = merged.findIndex((image) => localImages.includes(image));
     setSelectedImageIndex(firstLocalIndex >= 0 ? firstLocalIndex : 0);
   }
@@ -491,6 +498,18 @@ export function BlingProductUpdateModal({
                       As fotos locais foram adicionadas à seleção. Revise antes de atualizar.
                     </p>
                   ) : null}
+                  {galleryReductionRequiresConfirmation ? (
+                    <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-md border border-amber-500/35 bg-amber-500/10 p-3 text-sm text-amber-100">
+                      <input
+                        checked={imageReductionAcknowledged}
+                        className="mt-0.5 h-4 w-4 accent-matrix-gold"
+                        disabled={busy || completed}
+                        onChange={(event) => setImageReductionAcknowledged(event.target.checked)}
+                        type="checkbox"
+                      />
+                      <span>Confirmo que revisei a remoção de fotos desta galeria.</span>
+                    </label>
+                  ) : null}
                 </div>
               </div>
 
@@ -555,7 +574,9 @@ export function BlingProductUpdateModal({
                 ? "Mantenha ao menos uma foto para atualizar a galeria."
                 : imageRemovalNotExplicit
                   ? "Revise as fotos removidas antes de continuar."
-                  : "Preencha os campos exibidos antes de continuar."}
+                  : imageReductionUnconfirmed
+                    ? "Confirme a redução da galeria antes de continuar."
+                    : "Preencha os campos exibidos antes de continuar."}
             </p>
           ) : null}
         </div>

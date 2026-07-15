@@ -142,8 +142,8 @@ export async function POST(request: Request) {
         correlationId,
         idempotencyRef,
         stage: result.audit?.stage,
-        putRequests: result.audit?.putRequests,
-        putRequestState: result.audit?.putRequestState,
+        patchRequests: result.audit?.patchRequests,
+        patchRequestState: result.audit?.patchRequestState,
         verificationGetExecuted: result.audit?.verificationGetExecuted,
         localTimestampUpdated: result.audit?.localTimestampUpdated,
         upstreamStatus: result.audit?.upstreamStatus,
@@ -171,7 +171,7 @@ export async function POST(request: Request) {
       status: "FAILED",
       riskLevel: "HIGH",
       summary: safeError.message,
-      metadata: { correlationId, stage: "ROUTE", putRequests: 0 },
+      metadata: { correlationId, stage: "ROUTE", patchRequests: 0 },
       request
     });
     return NextResponse.json({ error: safeError.message }, { status: safeError.status });

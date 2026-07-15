@@ -15,6 +15,21 @@ type JsonRecord = Record<string, unknown>;
 export const BLING_PRODUCT_UPDATE_FIELDS = ["name", "images"] as const;
 export type BlingProductUpdateField = (typeof BLING_PRODUCT_UPDATE_FIELDS)[number];
 
+export type BlingOfficialFieldClassification =
+  | "SAFE_TO_PRESERVE"
+  | "READ_ONLY"
+  | "UNSUPPORTED"
+  | "AMBIGUOUS"
+  | "INVALID";
+
+export type BlingOfficialFieldPutBehavior = "OMIT" | "PRESERVE" | "BLOCK";
+
+export type BlingOfficialFieldDecision = {
+  classification: BlingOfficialFieldClassification;
+  putBehavior: BlingOfficialFieldPutBehavior;
+  value?: unknown;
+};
+
 
 export type BlingReviewedProductValues = {
   name?: string;
@@ -104,15 +119,15 @@ export type BlingProductUpdateResult = {
 export type BlingProductUpdateStage =
   | "PRECONDITION"
   | "IMAGE_VALIDATION"
-  | "PUT"
+  | "PATCH"
   | "VERIFY_GET"
   | "LOCAL_CONFIRMATION"
   | "COMPLETE";
 
 export type BlingProductUpdateAudit = {
   stage: BlingProductUpdateStage;
-  putRequests: number;
-  putRequestState: "NOT_SENT" | "SENT" | "UNKNOWN";
+  patchRequests: number;
+  patchRequestState: "NOT_SENT" | "SENT" | "UNKNOWN";
   verificationGetExecuted: boolean;
   localTimestampUpdated: boolean;
   upstreamStatus?: number;
@@ -165,7 +180,7 @@ const linkMismatchConfirmationMaxAgeMs = 10 * 60 * 1_000;
 
 export class BlingProductImageValidationError extends Error {
   constructor() {
-    super("As fotos selecionadas nao puderam ser enviadas.");
+    super("As fotos selecionadas não puderam ser enviadas.");
     this.name = "BlingProductImageValidationError";
   }
 }
@@ -591,6 +606,9 @@ export function normalizeBlingProductReview(
   }
 
   if (input.images !== undefined) {
+    if (input.images.some((image) => !normalizeBlingProductImageUrl(image))) {
+      throw new BlingProductImageValidationError();
+    }
     const images = normalizeBlingProductImages(input.images);
     if (!images.length) throw new Error("Mantenha ao menos uma foto para atualizar a galeria.");
     const allowedImages = new Set([...local.images, ...remote.images]);
@@ -618,13 +636,87 @@ export function compareBlingProductValues(
 
 export function isSupportedBlingProductStructure(local: LocalProductValues, remote: JsonRecord) {
   const variations = remote.variacoes;
-  const structure = record(remote.estrutura);
-  const components = Array.isArray(structure.componentes) ? structure.componentes : [];
+  const components = record(remote.estrutura).componentes;
   return !local.parentExternalProductId
     && text(remote.formato).toUpperCase() === "S"
-    && (!Array.isArray(variations) || variations.length === 0)
-    && components.length === 0
-    && Object.keys(structure).length === 0;
+    && Array.isArray(variations)
+    && variations.length === 0
+    && (components === undefined || (Array.isArray(components) && components.length === 0));
+}
+
+export class BlingProductPatchDataError extends Error {
+  constructor(readonly missingFields: string[]) {
+    super("Revise os campos selecionados antes de atualizar.");
+    this.name = "BlingProductPatchDataError";
+  }
+}
+
+export type BlingProductPatchPayload = {
+  nome?: string;
+  midia?: {
+    video: { url: string };
+    imagens: { imagensURL: Array<{ link: string }> };
+  };
+};
+
+export function classifyBlingStockAction(value: unknown): BlingOfficialFieldDecision {
+  // The official product schema makes actionEstoque optional. Its only documented
+  // values are commands used while converting a simple product into variations.
+  if (value === undefined || value === "") {
+    return { classification: "SAFE_TO_PRESERVE", putBehavior: "OMIT" };
+  }
+  if (value === "Z" || value === "T") {
+    return { classification: "UNSUPPORTED", putBehavior: "BLOCK", value };
+  }
+  return { classification: "INVALID", putBehavior: "BLOCK" };
+}
+
+export function classifyBlingProductStructure(input: {
+  format: unknown;
+  variations: unknown;
+  structure: unknown;
+}): BlingOfficialFieldDecision {
+  const format = exactString(input.format).toUpperCase();
+  if (!["S", "V", "E"].includes(format) || !Array.isArray(input.variations)) {
+    return { classification: "INVALID", putBehavior: "BLOCK" };
+  }
+  if (format !== "S" || input.variations.length > 0) {
+    return { classification: "UNSUPPORTED", putBehavior: "BLOCK" };
+  }
+  if (input.structure === undefined) {
+    return { classification: "SAFE_TO_PRESERVE", putBehavior: "OMIT" };
+  }
+  if (!input.structure || typeof input.structure !== "object" || Array.isArray(input.structure)) {
+    return { classification: "INVALID", putBehavior: "BLOCK" };
+  }
+
+  const structure = input.structure as JsonRecord;
+  const allowedKeys = new Set(["tipoEstoque", "lancamentoEstoque", "componentes"]);
+  if (Object.keys(structure).some((key) => !allowedKeys.has(key))) {
+    return { classification: "AMBIGUOUS", putBehavior: "BLOCK" };
+  }
+  if (
+    !["F", "V"].includes(exactString(structure.tipoEstoque))
+    || !["A", "M", "P"].includes(exactString(structure.lancamentoEstoque))
+    || !Array.isArray(structure.componentes)
+  ) {
+    return { classification: "INVALID", putBehavior: "BLOCK" };
+  }
+  if (
+    structure.componentes.length > 0
+  ) {
+    return { classification: "UNSUPPORTED", putBehavior: "BLOCK" };
+  }
+
+  return {
+    classification: "SAFE_TO_PRESERVE",
+    putBehavior: "PRESERVE",
+    value: {
+      tipoEstoque: structure.tipoEstoque,
+      lancamentoEstoque: structure.lancamentoEstoque,
+      componentes: []
+    }
+  };
 }
 
 const blingPutScalarFields = [
@@ -779,6 +871,13 @@ function analyzeBlingIntegralPayload(
   const projectedProductLine = pickedJsonObject(remote.linhaProduto, ["id"]);
   const projectedCustomFields = safeCustomFieldsForPut(remote.camposCustomizados);
   const missing = new Set<string>();
+  const ambiguous = new Set<string>();
+  const stockActionDecision = classifyBlingStockAction(remote.actionEstoque);
+  const structureDecision = classifyBlingProductStructure({
+    format: remote.formato,
+    variations: remote.variacoes,
+    structure: remote.estrutura
+  });
 
   for (const key of ["nome", "codigo", "marca", "tipo", "situacao", "formato", "unidade"] as const) {
     if (!hasString(remote, key)) missing.add(key);
@@ -820,8 +919,7 @@ function analyzeBlingIntegralPayload(
       missing.add("camposCustomizados");
     }
   }
-  // actionEstoque is a command, not stable product state. Replaying it could mutate stock.
-  if (owns(remote, "actionEstoque")) missing.add("actionEstoque");
+  if (stockActionDecision.putBehavior === "BLOCK") ambiguous.add("actionEstoque");
   if (!owns(remote, "midia")) missing.add("midia");
   if (!hasString(video, "url")) missing.add("midia.video.url");
   if (!owns(media, "imagens") || !Object.keys(mediaImages).length) missing.add("midia.imagens");
@@ -834,9 +932,7 @@ function analyzeBlingIntegralPayload(
   if (hasString(remote, "situacao") && !["A", "I"].includes(situation.toUpperCase())) missing.add("situacao");
   if (hasString(remote, "formato") && format.toUpperCase() !== "S") missing.add("formato");
   if (Array.isArray(remote.variacoes) && remote.variacoes.length) missing.add("variacoes");
-  if (Object.keys(record(remote.estrutura)).length) {
-    missing.add("estrutura");
-  }
+  if (structureDecision.putBehavior === "BLOCK") ambiguous.add("estrutura");
 
   const selected = new Set(fields);
   if (selected.has("name") && !reviewed.name) missing.add("nome");
@@ -847,7 +943,6 @@ function analyzeBlingIntegralPayload(
   const finalImages = selected.has("images") ? reviewed.images : remoteGallery.links;
   if (selected.has("images") && !finalImages?.length) missing.add("midia.imagens");
 
-  const ambiguous = new Set<string>();
   for (const field of missing) {
     if (ownsPath(remote, field)) {
       ambiguous.add(field);
@@ -879,6 +974,9 @@ function analyzeBlingIntegralPayload(
   if (projectedProductLine) payload.linhaProduto = projectedProductLine;
   if (projectedCustomFields) payload.camposCustomizados = projectedCustomFields;
   if (owns(remote, "variacoes")) payload.variacoes = [];
+  if (structureDecision.putBehavior === "PRESERVE") {
+    payload.estrutura = cloneJsonValue(structureDecision.value);
+  }
 
   payload.midia = {
     video: { url: exactString(video.url) },
@@ -894,10 +992,73 @@ function analyzeBlingIntegralPayload(
   const preservedFields = [...new Set([
     ...Object.keys(payload),
     "estoque.saldoVirtualTotal",
-    "estrutura",
     "variacoes"
   ])].filter((field) => !changed.has(field)).sort();
   return { payload, missingFields: [], ambiguousFields: [], preservedFields };
+}
+
+type BlingPatchPayloadAnalysis = {
+  payload: BlingProductPatchPayload | null;
+  missingFields: string[];
+  preservedFields: string[];
+};
+
+function analyzeBlingPatchPayload(
+  remoteValue: unknown,
+  reviewed: BlingReviewedProductValues,
+  fields: readonly BlingProductUpdateField[],
+  confirmed: boolean
+): BlingPatchPayloadAnalysis {
+  const remote = remoteData(remoteValue);
+  const selected = new Set(fields);
+  const missing = new Set<string>();
+  const payload: BlingProductPatchPayload = {};
+
+  if (selected.has("name")) {
+    if (!reviewed.name) missing.add("nome");
+    else payload.nome = reviewed.name;
+  }
+
+  if (selected.has("images")) {
+    const images = reviewed.images ?? [];
+    const video = record(record(remote.midia).video);
+    if (!images.length) missing.add("midia.imagens.imagensURL");
+    if (typeof video.url !== "string") missing.add("midia.video.url");
+    if (images.length < remoteImages(remote).length && !confirmed) {
+      missing.add("confirmacaoReducaoGaleria");
+    }
+    if (!missing.size) {
+      payload.midia = {
+        video: { url: exactString(video.url) },
+        imagens: { imagensURL: images.map((link) => ({ link })) }
+      };
+    }
+  }
+
+  if (missing.size) {
+    return { payload: null, missingFields: [...missing].sort(), preservedFields: [] };
+  }
+
+  const changedRemoteKeys = new Set([
+    ...(selected.has("name") ? ["nome"] : []),
+    ...(selected.has("images") ? ["midia", "imagemURL"] : [])
+  ]);
+  return {
+    payload,
+    missingFields: [],
+    preservedFields: Object.keys(remote).filter((key) => !changedRemoteKeys.has(key)).sort()
+  };
+}
+
+export function buildBlingProductPatchPayload(
+  reviewed: BlingReviewedProductValues,
+  remoteValue: unknown,
+  fields: readonly BlingProductUpdateField[],
+  options: { confirmed: boolean }
+) {
+  const analysis = analyzeBlingPatchPayload(remoteValue, reviewed, fields, options.confirmed);
+  if (!analysis.payload) throw new BlingProductPatchDataError(analysis.missingFields);
+  return analysis.payload;
 }
 
 export function createBlingProductUpdateDryRun(input: {
@@ -905,11 +1066,12 @@ export function createBlingProductUpdateDryRun(input: {
   remoteValue: unknown;
   reviewed?: BlingReviewedProductValues;
   fields?: readonly BlingProductUpdateField[];
+  confirmed?: boolean;
 }): BlingProductUpdateDryRun {
   const reviewed = input.reviewed ?? {};
   const fields = [...(input.fields ?? [])];
-  const analysis = analyzeBlingIntegralPayload(input.remoteValue, reviewed, fields);
-  const currentImages = remoteImagesForIntegralPut(remoteData(input.remoteValue)).links;
+  const analysis = analyzeBlingPatchPayload(input.remoteValue, reviewed, fields, input.confirmed ?? false);
+  const currentImages = remoteImages(remoteData(input.remoteValue));
   const finalImages = fields.includes("images") ? reviewed.images ?? [] : currentImages;
   return {
     canUpdate: Boolean(analysis.payload),
@@ -917,7 +1079,7 @@ export function createBlingProductUpdateDryRun(input: {
     changedFields: fields,
     preservedFields: analysis.preservedFields,
     missingFields: analysis.missingFields,
-    ambiguousFields: analysis.ambiguousFields,
+    ambiguousFields: [],
     remoteImageCount: currentImages.length,
     finalImageCount: finalImages.length,
     payloadKeys: analysis.payload ? Object.keys(analysis.payload).sort() : [],
@@ -932,17 +1094,19 @@ export type BlingProductIntegrityMismatch = {
   after: unknown;
 };
 
-export function createBlingProductIntegritySnapshot(remoteValue: unknown) {
-  const remote = remoteData(remoteValue);
-  const analysis = analyzeBlingIntegralPayload(remote, {}, []);
-  return {
-    integralPayload: cloneJsonValue(analysis.payload),
-    missingFields: analysis.missingFields,
-    ambiguousFields: analysis.ambiguousFields,
-    virtualBalance: cloneJsonValue(record(remote.estoque).saldoVirtualTotal),
-    variations: cloneJsonValue(remote.variacoes),
-    structure: cloneJsonValue(remote.estrutura)
-  };
+export function createBlingProductIntegritySnapshot(
+  remoteValue: unknown,
+  changedFields: readonly BlingProductUpdateField[] = []
+) {
+  const protectedState = cloneJsonValue(remoteData(remoteValue)) as JsonRecord;
+  if (changedFields.includes("name")) delete protectedState.nome;
+  if (changedFields.includes("images")) {
+    delete protectedState.imagemURL;
+    const media = record(protectedState.midia);
+    delete media.imagens;
+    protectedState.midia = media;
+  }
+  return protectedState;
 }
 
 export function compareBlingProductIntegrity(
@@ -950,27 +1114,11 @@ export function compareBlingProductIntegrity(
   afterValue: unknown,
   changedFields: readonly BlingProductUpdateField[]
 ) {
-  const before = createBlingProductIntegritySnapshot(beforeValue);
-  const after = createBlingProductIntegritySnapshot(afterValue);
+  const before = createBlingProductIntegritySnapshot(beforeValue, changedFields);
+  const after = createBlingProductIntegritySnapshot(afterValue, changedFields);
   const mismatches: BlingProductIntegrityMismatch[] = [];
-  const beforePayload = record(before.integralPayload);
-  const afterPayload = record(after.integralPayload);
-  const keys = new Set([...Object.keys(beforePayload), ...Object.keys(afterPayload)]);
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
   for (const field of keys) {
-    if (field === "nome" && changedFields.includes("name")) continue;
-    if (field === "midia" && changedFields.includes("images")) {
-      const beforeVideo = record(record(beforePayload.midia).video);
-      const afterVideo = record(record(afterPayload.midia).video);
-      if (JSON.stringify(beforeVideo) !== JSON.stringify(afterVideo)) {
-        mismatches.push({ field: "midia.video", before: beforeVideo, after: afterVideo });
-      }
-      continue;
-    }
-    if (JSON.stringify(beforePayload[field]) !== JSON.stringify(afterPayload[field])) {
-      mismatches.push({ field, before: beforePayload[field], after: afterPayload[field] });
-    }
-  }
-  for (const field of ["missingFields", "ambiguousFields", "virtualBalance", "variations", "structure"] as const) {
     if (JSON.stringify(before[field]) !== JSON.stringify(after[field])) {
       mismatches.push({ field, before: before[field], after: after[field] });
     }
@@ -1193,7 +1341,7 @@ export function createBlingProductRestorationDryRun(input: {
   supplier.precoCusto = input.previous.costPrice?.value;
   restored.fornecedor = supplier;
 
-  const payload = buildBlingProductUpdatePayload({}, restored, []);
+  const payload = buildBlingProductRestorationPayload({}, restored, []);
 
   return {
     ...publicDryRun,
@@ -1203,7 +1351,7 @@ export function createBlingProductRestorationDryRun(input: {
   };
 }
 
-export function buildBlingProductUpdatePayload(
+export function buildBlingProductRestorationPayload(
   reviewed: BlingReviewedProductValues,
   remoteValue: unknown,
   fields: readonly BlingProductUpdateField[]
@@ -1230,10 +1378,10 @@ export function getBlingProductUpdateErrorMessage(error: unknown) {
     error instanceof BlingProductImageValidationError
     || (error instanceof BlingApiError && (error.details?.category === "IMAGES" || error.details?.upstreamField === "IMAGES"))
   ) {
-    return "As fotos selecionadas nao puderam ser enviadas.";
+    return "As fotos selecionadas não puderam ser enviadas.";
   }
   if (error instanceof BlingApiError && error.details?.upstreamField === "TITLE") {
-    return "O Bling recusou o titulo informado.";
+    return "O Bling não aceitou o nome informado.";
   }
   if (error instanceof BlingApiError && error.details?.upstreamField === "REQUIRED") {
     return safeUpdateMissingDataMessage;
@@ -1248,16 +1396,17 @@ export function describeBlingProductUpdateFailure(input: {
   error: unknown;
   stage: BlingProductUpdateStage;
   fields?: readonly BlingProductUpdateField[];
-  putRequests?: number;
+  patchRequests?: number;
   verificationGetExecuted?: boolean;
 }): Pick<BlingProductUpdateResult, "code" | "message" | "audit"> {
   const error = input.error;
   const apiError = error instanceof BlingApiError ? error : null;
   const tokenFailure = Boolean(apiError && ["TOKEN_MISSING", "TOKEN_EXPIRED", "TOKEN_INVALID", "CONNECTION_DISCONNECTED"].includes(apiError.code));
   const verificationFailure = input.stage === "VERIFY_GET"
-    || (input.stage === "PUT" && apiError?.details?.requestState === "UNKNOWN");
+    || (input.stage === "PATCH" && apiError?.details?.requestState === "UNKNOWN");
   const unsupported = error instanceof Error && /nao pode ser preservado|nao pode ser atualizado/i.test(error.message);
-  const requiredFieldsMissing = error instanceof BlingProductIntegralDataError
+  const requiredFieldsMissing = error instanceof BlingProductPatchDataError
+    || error instanceof BlingProductIntegralDataError
     || (error instanceof Error && /dados (adicionais|suficientes)/i.test(error.message))
     || apiError?.details?.upstreamField === "REQUIRED"
     || apiError?.details?.upstreamCode === "MISSING_REQUIRED_FIELD_ERROR";
@@ -1276,7 +1425,7 @@ export function describeBlingProductUpdateFailure(input: {
   let message = "Nao foi possivel atualizar o produto agora.";
   if (verificationFailure) {
     code = "VERIFICATION_REQUIRED";
-    message = "A atualizacao pode ter sido concluida. Verifique novamente antes de tentar.";
+    message = "A atualização pode ter sido concluída. Verifique novamente antes de tentar.";
   } else if (linkConfirmationRequired) {
     code = "LINK_REVIEW_REQUIRED";
     message = "Revise o vinculo novamente antes de atualizar.";
@@ -1288,10 +1437,10 @@ export function describeBlingProductUpdateFailure(input: {
     message = "O cadastro possui uma estrutura que nao pode ser atualizada por esta tela.";
   } else if (imageFailure) {
     code = "IMAGES_REJECTED";
-    message = "As fotos selecionadas nao puderam ser enviadas.";
+    message = "As fotos selecionadas não puderam ser enviadas.";
   } else if (titleFailure) {
     code = "TITLE_REJECTED";
-    message = "O Bling recusou o titulo informado.";
+    message = "O Bling não aceitou o nome informado.";
   } else if (requiredFieldsMissing) {
     code = "REQUIRED_FIELDS_MISSING";
     message = safeUpdateMissingDataMessage;
@@ -1303,15 +1452,15 @@ export function describeBlingProductUpdateFailure(input: {
   }
 
   const requestState = apiError?.details?.requestState
-    ?? (tokenFailure ? "NOT_SENT" : input.putRequests ? "UNKNOWN" : "NOT_SENT");
-  const putRequests = requestState === "NOT_SENT" ? 0 : (input.putRequests ?? 0);
+    ?? (tokenFailure ? "NOT_SENT" : input.patchRequests ? "UNKNOWN" : "NOT_SENT");
+  const patchRequests = requestState === "NOT_SENT" ? 0 : (input.patchRequests ?? 0);
   return {
     code,
     message,
     audit: {
       stage: input.stage,
-      putRequests,
-      putRequestState: requestState,
+      patchRequests,
+      patchRequestState: requestState,
       verificationGetExecuted: input.verificationGetExecuted ?? false,
       localTimestampUpdated: false,
       upstreamStatus: apiError?.status,
@@ -1589,6 +1738,12 @@ async function finishJob(jobId: string, idempotencyKey: string, result: BlingPro
   });
 }
 
+function successfulBlingProductUpdateMessage(fields: readonly BlingProductUpdateField[]) {
+  if (fields.length === 1 && fields[0] === "name") return "Nome atualizado no Bling com sucesso.";
+  if (fields.length === 1 && fields[0] === "images") return "Fotos atualizadas no Bling com sucesso.";
+  return "Produto atualizado no Bling com sucesso.";
+}
+
 export class BlingProductUpdateService {
   async preview(input: { organizationId: string; connectionId: string; productId: string }) {
     await validateConnection(input.organizationId, input.connectionId);
@@ -1664,8 +1819,8 @@ export class BlingProductUpdateService {
         fields: [],
         audit: {
           stage: "PRECONDITION",
-          putRequests: 0,
-          putRequestState: "NOT_SENT",
+          patchRequests: 0,
+          patchRequestState: "NOT_SENT",
           verificationGetExecuted: false,
           localTimestampUpdated: false
         }
@@ -1714,7 +1869,7 @@ export class BlingProductUpdateService {
 
     let result: BlingProductUpdateResult;
     let stage: BlingProductUpdateStage = "PRECONDITION";
-    let putRequests = 0;
+    let patchRequests = 0;
     let verificationGetExecuted = false;
     let externalProductIdMasked: string | null = null;
     let attemptedFields: BlingProductUpdateField[] = [];
@@ -1738,8 +1893,8 @@ export class BlingProductUpdateService {
           fields: [],
           audit: {
             stage,
-            putRequests: 0,
-            putRequestState: "NOT_SENT",
+            patchRequests: 0,
+            patchRequestState: "NOT_SENT",
             verificationGetExecuted: false,
             localTimestampUpdated: false
           }
@@ -1769,8 +1924,8 @@ export class BlingProductUpdateService {
             fields: [],
             audit: {
               stage: "COMPLETE",
-              putRequests: 0,
-              putRequestState: "NOT_SENT",
+              patchRequests: 0,
+              patchRequestState: "NOT_SENT",
               verificationGetExecuted: false,
               localTimestampUpdated: false
             }
@@ -1780,10 +1935,15 @@ export class BlingProductUpdateService {
             stage = "IMAGE_VALIDATION";
             await validateBlingProductImageAccessibility(reviewed.images);
           }
-          const body = buildBlingProductUpdatePayload(reviewed, inspection.remoteProduct, changedFields);
-          stage = "PUT";
-          putRequests = 1;
-          await blingApiClient.request<unknown>({ organizationId: input.organizationId, connectionId: input.connectionId, method: "PUT", path: `/produtos/${inspection.externalProductId}`, body });
+          const body = buildBlingProductPatchPayload(
+            reviewed,
+            inspection.remoteProduct,
+            changedFields,
+            { confirmed: true }
+          );
+          stage = "PATCH";
+          patchRequests = 1;
+          await blingApiClient.request<unknown>({ organizationId: input.organizationId, connectionId: input.connectionId, method: "PATCH", path: `/produtos/${inspection.externalProductId}`, body });
           stage = "VERIFY_GET";
           verificationGetExecuted = true;
           const verification = await verifyUpdatedBlingProduct({ organizationId: input.organizationId, connectionId: input.connectionId, externalProductId: inspection.externalProductId, reviewed, fields: changedFields, beforeRemote: inspection.remoteProduct });
@@ -1792,7 +1952,7 @@ export class BlingProductUpdateService {
               error: new Error("Bling verification mismatch"),
               stage,
               fields: changedFields,
-              putRequests,
+              patchRequests,
               verificationGetExecuted
             });
             result = {
@@ -1812,8 +1972,8 @@ export class BlingProductUpdateService {
               fields: changedFields,
               audit: {
                 stage: "VERIFY_GET",
-                putRequests,
-                putRequestState: "SENT",
+                patchRequests,
+                patchRequestState: "SENT",
                 verificationGetExecuted,
                 localTimestampUpdated: false
               }
@@ -1827,12 +1987,12 @@ export class BlingProductUpdateService {
                     productId: input.productId,
                     externalProductIdMasked: maskBlingProductId(inspection.externalProductId),
                     status: "UPDATED",
-                    message: "Produto atualizado no Bling com sucesso.",
+                    message: successfulBlingProductUpdateMessage(changedFields),
                     fields: changedFields,
                     audit: {
                       stage: "COMPLETE",
-                      putRequests,
-                      putRequestState: "SENT",
+                      patchRequests,
+                      patchRequestState: "SENT",
                       verificationGetExecuted,
                       localTimestampUpdated: true
                     }
@@ -1846,8 +2006,8 @@ export class BlingProductUpdateService {
                     fields: changedFields,
                     audit: {
                       stage,
-                      putRequests,
-                      putRequestState: "SENT",
+                      patchRequests,
+                      patchRequestState: "SENT",
                       verificationGetExecuted,
                       localTimestampUpdated: false
                     }
@@ -1862,8 +2022,8 @@ export class BlingProductUpdateService {
                 fields: changedFields,
                 audit: {
                   stage,
-                  putRequests,
-                  putRequestState: "SENT",
+                  patchRequests,
+                  patchRequestState: "SENT",
                   verificationGetExecuted,
                   localTimestampUpdated: false
                 }
@@ -1876,7 +2036,7 @@ export class BlingProductUpdateService {
       const failure = describeBlingProductUpdateFailure({
         error,
         stage,
-        putRequests,
+        patchRequests,
         verificationGetExecuted
       });
       result = {
