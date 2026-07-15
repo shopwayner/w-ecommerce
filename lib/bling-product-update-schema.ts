@@ -7,7 +7,6 @@ export const BLING_PRODUCT_UPDATE_BLOCK_MESSAGE =
 export const blingProductReviewedFieldsSchema = z
   .object({
     name: z.string().max(120).optional(),
-    brand: z.string().max(120).optional(),
     images: z.array(z.string().max(2_000)).max(13).optional()
   })
   .strict()

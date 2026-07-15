@@ -16,13 +16,11 @@ import { Button } from "@/components/ui";
 
 export type BlingProductEditableValues = {
   name: string;
-  brand: string | null;
   images: string[];
 };
 
 export type BlingProductReviewChanges = {
   name?: string;
-  brand?: string;
   images?: string[];
 };
 
@@ -35,6 +33,19 @@ export type BlingProductUpdatePreview = {
     message: string;
     local: BlingProductEditableValues | null;
     remote: BlingProductEditableValues | null;
+    dryRun?: {
+      canUpdate: boolean;
+      safeToExecute: boolean;
+      changedFields: Array<"name" | "images">;
+      preservedFields: string[];
+      missingFields: string[];
+      ambiguousFields: string[];
+      remoteImageCount: number;
+      finalImageCount: number;
+      payloadKeys: string[];
+      externalProductIdMasked: string | null;
+      payload?: null;
+    };
     linkReview?: {
       status: "VINCULO_PRECISA_REVISAO";
       externalProductIdMasked: string | null;
@@ -52,12 +63,11 @@ export type BlingProductUpdateResult = {
   externalProductIdMasked: string | null;
   status: "UPDATED" | "UNCHANGED" | "FAILED";
   message: string;
-  fields: Array<"name" | "brand" | "images">;
+  fields: Array<"name" | "images">;
   code?:
     | "AUTHORIZATION_REQUIRED"
     | "IMAGES_REJECTED"
     | "TITLE_REJECTED"
-    | "BRAND_REJECTED"
     | "REQUIRED_FIELDS_MISSING"
     | "UNSUPPORTED_STRUCTURE"
     | "DATA_REJECTED"
@@ -113,7 +123,7 @@ const linkMismatchReasonLabels: Record<
   MODEL_MISMATCH: "Os modelos identificados nos títulos são diferentes.",
   SKU_MISMATCH: "Os códigos informados nos dois cadastros são diferentes.",
   GTIN_MISMATCH: "Os identificadores comerciais informados são diferentes.",
-  BRAND_MISMATCH: "As marcas informadas nos dois cadastros são diferentes."
+  BRAND_MISMATCH: "Os fabricantes informados nos dois cadastros são diferentes."
 };
 
 export function BlingProductUpdateModal({
@@ -127,25 +137,21 @@ export function BlingProductUpdateModal({
 }: BlingProductUpdateModalProps) {
   const item = preview?.item ?? null;
   const [title, setTitle] = useState("");
-  const [brand, setBrand] = useState("");
   const [images, setImages] = useState<string[]>([]);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [showLinkReview, setShowLinkReview] = useState(false);
   const [linkMismatchAcknowledged, setLinkMismatchAcknowledged] = useState(false);
   const [nameTouched, setNameTouched] = useState(false);
-  const [brandTouched, setBrandTouched] = useState(false);
   const [imagesEditingEnabled, setImagesEditingEnabled] = useState(false);
   const [removedRemoteImages, setRemovedRemoteImages] = useState<string[]>([]);
 
   useEffect(() => {
     setTitle(item?.remote?.name ?? item?.local?.name ?? "");
-    setBrand(item?.remote?.brand ?? item?.local?.brand ?? "");
     setImages(item?.remote?.images ?? []);
     setSelectedImageIndex(0);
     setShowLinkReview(false);
     setLinkMismatchAcknowledged(false);
     setNameTouched(false);
-    setBrandTouched(false);
     setImagesEditingEnabled(false);
     setRemovedRemoteImages([]);
   }, [item?.productId, item?.local, item?.remote]);
@@ -159,8 +165,6 @@ export function BlingProductUpdateModal({
   }, [busy, onClose]);
 
   const normalizedTitle = normalizeReviewText(title);
-  const normalizedBrand = normalizeReviewText(brand);
-  const brandVisible = Boolean(item?.local?.brand || item?.remote?.brand);
   const remote = item?.remote;
   const remoteImages = remote?.images ?? [];
   const localImages = item?.local?.images ?? [];
@@ -169,17 +173,13 @@ export function BlingProductUpdateModal({
     item?.local && remote && !["VINCULO_PRECISA_REVISAO", "NOT_LINKED", "UNSUPPORTED", "ERROR"].includes(item.status)
   );
   const nameChanged = Boolean(nameTouched && remote && normalizedTitle !== normalizeReviewText(remote.name));
-  const brandChanged = Boolean(
-    brandTouched && remote && brandVisible && normalizedBrand !== normalizeReviewText(remote.brand ?? "")
-  );
   const imagesChanged = Boolean(imagesEditingEnabled && remote && !sameImages(images, remoteImages));
   const removedRemoteCount = remoteImages.filter((image) => !images.includes(image)).length;
   const imageRemovalNotExplicit = Boolean(
     imagesChanged && images.length < remoteImages.length && removedRemoteImages.length < removedRemoteCount
   );
-  const hasDifferences = nameChanged || brandChanged || imagesChanged;
+  const hasDifferences = nameChanged || imagesChanged;
   const formInvalid = (nameTouched && !normalizedTitle)
-    || (brandTouched && brandVisible && !normalizedBrand)
     || (imagesEditingEnabled && !images.length)
     || imageRemovalNotExplicit;
   const presentationOnlyTitleDifference = Boolean(
@@ -233,17 +233,10 @@ export function BlingProductUpdateModal({
     setNameTouched(true);
   }
 
-  function useLocalBrand() {
-    if (!item?.local?.brand) return;
-    setBrand(item.local.brand);
-    setBrandTouched(true);
-  }
-
   function submit() {
     if (!canReview || !hasDifferences || formInvalid || busy || completed) return;
     const fields: BlingProductReviewChanges = {};
     if (nameChanged) fields.name = normalizedTitle;
-    if (brandChanged) fields.brand = normalizedBrand;
     if (imagesChanged) fields.images = images;
     onConfirm(fields);
   }
@@ -268,7 +261,7 @@ export function BlingProductUpdateModal({
             <p className="mt-1 text-sm text-matrix-muted">
               {linkNeedsReview
                 ? "Confira os dois cadastros antes de continuar."
-                : "Revise o título, a marca e as fotos antes de enviar."}
+                : "Revise o título e as fotos antes de enviar."}
             </p>
           </div>
           <button
@@ -531,31 +524,6 @@ export function BlingProductUpdateModal({
                       Usar título do W Ecommerce
                     </button>
                   </div>
-                ) : null}
-                {brandVisible ? (
-                  <label className="grid gap-2 text-sm font-semibold text-matrix-fg">
-                    Marca
-                    <input
-                      className="h-11 rounded-md border border-matrix-gold/35 bg-matrix-panel2 px-3 text-sm font-semibold text-matrix-fg outline-none focus:border-matrix-gold/70"
-                      disabled={busy || completed}
-                      maxLength={120}
-                      onChange={(event) => {
-                        setBrand(event.target.value);
-                        setBrandTouched(true);
-                      }}
-                      value={brand}
-                    />
-                  </label>
-                ) : null}
-                {item.local.brand && item.local.brand !== remote?.brand ? (
-                  <button
-                    className="w-fit text-sm font-semibold text-matrix-goldDark hover:underline disabled:opacity-50"
-                    disabled={busy || completed}
-                    onClick={useLocalBrand}
-                    type="button"
-                  >
-                    Usar marca do W Ecommerce
-                  </button>
                 ) : null}
               </div>
             </div>

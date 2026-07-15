@@ -23,7 +23,7 @@ function safeRouteError(error: unknown) {
   }
   if (message.includes("andamento")) return { status: 409, message: "Ja existe uma atualizacao em andamento para esta conta." };
   if (message.toLowerCase().includes("vinculo")) return { status: 409, message: "Revise o vinculo novamente antes de atualizar." };
-  if (message.includes("titulo") || message.includes("marca") || message.includes("fotos")) return { status: 400, message };
+  if (message.includes("titulo") || message.includes("fotos")) return { status: 400, message };
   return { status: 503, message: "Nao foi possivel atualizar o produto no Bling agora." };
 }
 
@@ -97,7 +97,7 @@ export async function POST(request: Request) {
       confirmation: true,
       status: "SUCCESS",
       riskLevel: "CRITICAL",
-      summary: "Atualizacao de titulo, marca ou fotos no Bling confirmada pelo usuario.",
+      summary: "Atualizacao de titulo ou fotos no Bling confirmada pelo usuario.",
       metadata: {
         connectionId: parsed.data.connectionId,
         productId: parsed.data.productId,
