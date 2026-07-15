@@ -3,14 +3,21 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { Prisma } from "@prisma/client";
-import { blingProductUpdateRequestSchema } from "@/lib/bling-product-update-schema";
+import {
+  BLING_PRODUCT_UPDATE_BLOCK_MESSAGE,
+  BLING_PRODUCT_UPDATE_WRITES_BLOCKED,
+  blingProductUpdateRequestSchema
+} from "@/lib/bling-product-update-schema";
 import {
   BLING_PRODUCT_UPDATE_FIELDS,
   acquireBlingProductUpdateLock,
   assessBlingProductIdentity,
+  blingProductUpdateService,
   buildBlingProductUpdatePayload,
   compareBlingProductValues,
+  compareBlingProductIntegrity,
   createBlingProductLinkMismatchConfirmation,
+  createBlingProductRestorationDryRun,
   describeBlingProductUpdateFailure,
   getBlingProductUpdateErrorMessage,
   isSupportedBlingProductStructure,
@@ -21,7 +28,8 @@ import {
   recordConfirmedBlingMappingSync,
   validateBlingProductImageAccessibility,
   verifyBlingProductLinkMismatchConfirmation,
-  type BlingProductMappingSnapshot
+  type BlingProductMappingSnapshot,
+  type BlingRestorationEvidence
 } from "./bling-product-update-service";
 import { BlingApiError, classifyBlingApiFailure } from "./bling-api-client";
 
@@ -52,8 +60,20 @@ const remoteProduct = {
     pesoLiquido: 1.25,
     dimensoes: { largura: 1, altura: 2, profundidade: 3 },
     preco: 999.99,
-    precoCusto: 777.77,
-    estoque: { saldoVirtualTotal: 99 },
+    estoque: {
+      minimo: 2,
+      maximo: 50,
+      crossdocking: 3,
+      localizacao: "A-1",
+      saldoVirtualTotal: 99
+    },
+    fornecedor: {
+      id: 77,
+      contato: { id: 88, nome: "Fornecedor Matrix" },
+      codigo: "FOR-1",
+      precoCusto: 777.77,
+      precoCompra: 700
+    },
     tributacao: { ncm: "00000000" },
     variacoes: [{ id: 1 }],
     midia: {
@@ -80,6 +100,49 @@ function matchingRemoteProduct(overrides: Record<string, unknown> = {}) {
         }
       },
       ...overrides
+    }
+  };
+}
+
+type RestorationEvidenceMap = Partial<Record<
+  | "brand"
+  | "price"
+  | "costPrice"
+  | "stockMinimum"
+  | "stockMaximum"
+  | "crossdocking"
+  | "location"
+  | "unit"
+  | "category"
+  | "netWeight"
+  | "grossWeight"
+  | "dimensions"
+  | "taxation"
+  | "supplierIdentity",
+  BlingRestorationEvidence
+>>;
+
+function confirmedRestorationEvidence(): RestorationEvidenceMap {
+  return {
+    brand: { confidence: "CONFIRMED" as const, value: "Marca restaurada" },
+    price: { confidence: "CONFIRMED" as const, value: 999.99 },
+    costPrice: { confidence: "CONFIRMED" as const, value: 777.77 },
+    stockMinimum: { confidence: "CONFIRMED" as const, value: 2 },
+    stockMaximum: { confidence: "CONFIRMED" as const, value: 50 },
+    crossdocking: { confidence: "CONFIRMED" as const, value: 3 },
+    location: { confidence: "CONFIRMED" as const, value: "A-1" },
+    unit: { confidence: "CONFIRMED" as const, value: "UN" },
+    category: { confidence: "CONFIRMED" as const, value: { id: 654321 } },
+    netWeight: { confidence: "CONFIRMED" as const, value: 1.25 },
+    grossWeight: { confidence: "CONFIRMED" as const, value: 1.5 },
+    dimensions: {
+      confidence: "CONFIRMED" as const,
+      value: { largura: 1, altura: 2, profundidade: 3, unidadeMedida: 1 }
+    },
+    taxation: { confidence: "CONFIRMED" as const, value: { ncm: "00000000" } },
+    supplierIdentity: {
+      confidence: "CONFIRMED" as const,
+      value: { id: 77, contato: { id: 88, nome: "Fornecedor Matrix" }, codigo: "FOR-1", precoCompra: 700 }
     }
   };
 }
@@ -149,7 +212,7 @@ test("does not allow a brand when the local product has no valid brand", () => {
     matchingRemoteProduct({ nome: "Produto antigo", marca: "Marca remota" }),
     ["name"]
   );
-  assert.equal("marca" in payload, false);
+  assert.equal(payload.marca, "Marca remota");
 });
 
 test("accepts only public HTTPS image URLs and removes duplicates", () => {
@@ -180,7 +243,7 @@ test("rejects photos that are not part of the reviewed local gallery", () => {
   );
 });
 
-test("builds only title, brand, images and exact required remote fields", () => {
+test("builds an integral payload and applies only the reviewed title, brand and images", () => {
   const reviewed = normalizeBlingProductReview(
     {
       name: "Produto Matrix revisado",
@@ -191,55 +254,51 @@ test("builds only title, brand, images and exact required remote fields", () => 
   );
   const payload = buildBlingProductUpdatePayload(reviewed, remoteProduct, BLING_PRODUCT_UPDATE_FIELDS);
 
-  assert.deepEqual(payload, {
-    nome: "Produto Matrix revisado",
-    tipo: "p",
-    situacao: "a",
-    formato: "s",
-    marca: "Marca revisada",
-    midia: {
-      video: { url: "https://www.youtube.com/watch?v=matrix" },
-      imagens: {
-        imagensURL: [
-          { link: localProduct.images[1] },
-          { link: localProduct.images[0] }
-        ]
-      }
+  assert.equal(payload.nome, "Produto Matrix revisado");
+  assert.equal(payload.marca, "Marca revisada");
+  assert.equal(payload.preco, remoteProduct.data.preco);
+  assert.deepEqual(payload.estoque, {
+    minimo: 2,
+    maximo: 50,
+    crossdocking: 3,
+    localizacao: "A-1"
+  });
+  assert.deepEqual(payload.fornecedor, remoteProduct.data.fornecedor);
+  assert.deepEqual(payload.midia, {
+    video: { url: "https://www.youtube.com/watch?v=matrix" },
+    imagens: {
+      imagensURL: [
+        { link: localProduct.images[1] },
+        { link: localProduct.images[0] }
+      ]
     }
   });
-
-  const serialized = JSON.stringify(payload);
-  for (const forbiddenField of [
-    "codigo",
-    "gtin",
-    "unidade",
-    "descricao",
-    "categoria",
-    "peso",
-    "dimensoes",
-    "preco",
-    "custo",
-    "estoque",
-    "tributacao",
-    "variacoes",
-    "fornecedor"
-  ]) {
-    assert.doesNotMatch(serialized, new RegExp(forbiddenField, "i"));
-  }
+  assert.equal("id" in payload, false);
+  assert.equal("imagemURL" in payload, false);
+  assert.equal("saldoVirtualTotal" in (payload.estoque as Record<string, unknown>), false);
+  assert.equal("variacoes" in payload, false);
 });
 
-test("preserves the remote title and omits brand and media when they are unchanged", () => {
+test("preserves the integral remote state when the reviewed values are unchanged", () => {
   const reviewed = normalizeBlingProductReview(
     { name: "Produto Matrix", brand: "Marca Matrix" },
     localProduct
   );
   const payload = buildBlingProductUpdatePayload(reviewed, remoteProduct, []);
 
-  assert.deepEqual(payload, {
-    nome: "Produto antigo",
-    tipo: "p",
-    situacao: "a",
-    formato: "s"
+  assert.equal(payload.nome, "Produto antigo");
+  assert.equal(payload.marca, "Marca antiga");
+  assert.equal(payload.preco, 999.99);
+  assert.deepEqual(payload.estoque, {
+    minimo: 2,
+    maximo: 50,
+    crossdocking: 3,
+    localizacao: "A-1"
+  });
+  assert.deepEqual(payload.fornecedor, remoteProduct.data.fornecedor);
+  assert.deepEqual(payload.midia, {
+    video: remoteProduct.data.midia.video,
+    imagens: { imagensURL: [{ link: "https://cdn.example.com/antiga.jpg" }] }
   });
 });
 
@@ -258,10 +317,11 @@ test("does not delete remote images when no valid image remains selected", () =>
     remoteProduct
   );
   assert.deepEqual(compareBlingProductValues(reviewed, remoteProduct), ["name", "brand"]);
-  assert.doesNotMatch(
-    JSON.stringify(buildBlingProductUpdatePayload(reviewed, remoteProduct, ["name", "brand"])),
-    /midia|imagens/i
-  );
+  const payload = buildBlingProductUpdatePayload(reviewed, remoteProduct, ["name", "brand"]);
+  assert.deepEqual(payload.midia, {
+    video: remoteProduct.data.midia.video,
+    imagens: { imagensURL: [{ link: "https://cdn.example.com/antiga.jpg" }] }
+  });
 });
 
 test("compares only title, valid brand and selected images", () => {
@@ -283,11 +343,13 @@ test("detects title, brand and photos independently and keeps the official image
     localProduct
   );
   assert.deepEqual(compareBlingProductValues(titleOnly, matchingRemoteProduct()), ["name"]);
-  assert.deepEqual(buildBlingProductUpdatePayload(titleOnly, matchingRemoteProduct(), ["name"]), {
-    nome: "Titulo revisado",
-    tipo: "p",
-    situacao: "a",
-    formato: "s"
+  const titlePayload = buildBlingProductUpdatePayload(titleOnly, matchingRemoteProduct(), ["name"]);
+  assert.equal(titlePayload.nome, "Titulo revisado");
+  assert.equal(titlePayload.marca, localProduct.brand);
+  assert.equal(titlePayload.preco, remoteProduct.data.preco);
+  assert.deepEqual(titlePayload.midia, {
+    video: remoteProduct.data.midia.video,
+    imagens: { imagensURL: localProduct.images.map((link) => ({ link })) }
   });
 
   const brandOnly = normalizeBlingProductReview(
@@ -301,15 +363,13 @@ test("detects title, brand and photos independently and keeps the official image
     localProduct
   );
   assert.deepEqual(compareBlingProductValues(photosOnly, matchingRemoteProduct()), ["images"]);
-  assert.deepEqual(buildBlingProductUpdatePayload(photosOnly, matchingRemoteProduct(), ["images"]), {
-    nome: localProduct.name,
-    tipo: "p",
-    situacao: "a",
-    formato: "s",
-    midia: {
-      video: { url: "https://www.youtube.com/watch?v=matrix" },
-      imagens: { imagensURL: [{ link: localProduct.images[1] }] }
-    }
+  const photosPayload = buildBlingProductUpdatePayload(photosOnly, matchingRemoteProduct(), ["images"]);
+  assert.equal(photosPayload.nome, localProduct.name);
+  assert.equal(photosPayload.marca, localProduct.brand);
+  assert.equal(photosPayload.preco, remoteProduct.data.preco);
+  assert.deepEqual(photosPayload.midia, {
+    video: { url: "https://www.youtube.com/watch?v=matrix" },
+    imagens: { imagensURL: [{ link: localProduct.images[1] }] }
   });
 
   const unchanged = normalizeBlingProductReview(
@@ -319,54 +379,61 @@ test("detects title, brand and photos independently and keeps the official image
   assert.deepEqual(compareBlingProductValues(unchanged, matchingRemoteProduct()), []);
 });
 
-test("builds the five controlled payload groups without unrelated product fields", () => {
+test("builds every controlled change on top of the same integral remote payload", () => {
   const remote = matchingRemoteProduct();
+  const preservedKeys = Object.keys(buildBlingProductUpdatePayload({}, remote, [])).sort();
   const groups = [
     {
       fields: ["name"] as const,
       reviewed: { name: "Titulo revisado" },
-      expectedKeys: ["formato", "nome", "situacao", "tipo"]
+      expectedName: "Titulo revisado"
     },
     {
       fields: ["name", "brand"] as const,
       reviewed: { name: "Titulo revisado", brand: "Marca revisada" },
-      expectedKeys: ["formato", "marca", "nome", "situacao", "tipo"]
+      expectedName: "Titulo revisado"
     },
     {
       fields: ["name", "images"] as const,
       reviewed: { name: "Titulo revisado", images: localProduct.images },
-      expectedKeys: ["formato", "midia", "nome", "situacao", "tipo"]
+      expectedName: "Titulo revisado"
     },
     {
       fields: ["images"] as const,
       reviewed: { images: localProduct.images },
-      expectedKeys: ["formato", "midia", "nome", "situacao", "tipo"]
+      expectedName: localProduct.name
     },
     {
       fields: ["name", "brand", "images"] as const,
       reviewed: { name: "Titulo revisado", brand: "Marca revisada", images: localProduct.images },
-      expectedKeys: ["formato", "marca", "midia", "nome", "situacao", "tipo"]
+      expectedName: "Titulo revisado"
     }
   ];
 
   for (const group of groups) {
     const payload = buildBlingProductUpdatePayload(group.reviewed, remote, group.fields);
-    assert.deepEqual(Object.keys(payload).sort(), group.expectedKeys);
-    if ("midia" in payload) {
-      assert.deepEqual((payload.midia as { video: unknown }).video, remote.data.midia.video);
-    }
-    assert.doesNotMatch(
-      JSON.stringify(payload),
-      /descricao|codigo|sku|gtin|unidade|categoria|peso|dimensoes|preco|custo|estoque|tributacao|variacoes|componentes/i
-    );
+    assert.deepEqual(Object.keys(payload).sort(), preservedKeys);
+    assert.equal(payload.nome, group.expectedName);
+    assert.equal(payload.preco, remote.data.preco);
+    assert.deepEqual((payload.midia as { video: unknown }).video, remote.data.midia.video);
+    assert.deepEqual(payload.estoque, {
+      minimo: 2,
+      maximo: 50,
+      crossdocking: 3,
+      localizacao: "A-1"
+    });
+    assert.equal("saldoVirtualTotal" in (payload.estoque as Record<string, unknown>), false);
   }
 });
 
-test("requires the remote video shape only when the image gallery changes", () => {
+test("requires the remote video shape for every integral update", () => {
   const withoutVideo = matchingRemoteProduct({
     midia: { imagens: { externas: [], internas: [] } }
   });
-  assert.doesNotThrow(() => buildBlingProductUpdatePayload({ name: "Titulo revisado" }, withoutVideo, ["name"]));
+  assert.throws(
+    () => buildBlingProductUpdatePayload({ name: "Titulo revisado" }, withoutVideo, ["name"]),
+    /dados adicionais/
+  );
   assert.throws(
     () => buildBlingProductUpdatePayload({ images: localProduct.images }, withoutVideo, ["images"]),
     /dados adicionais/
@@ -430,15 +497,13 @@ test("preserves five remote photos when the user changes only the title", () => 
 
   assert.deepEqual(compareBlingProductValues(reviewed, remote), ["name"]);
   const payload = buildBlingProductUpdatePayload(reviewed, remote, ["name"]);
-  assert.deepEqual(payload, {
-    nome: local.name,
-    tipo: "p",
-    situacao: "a",
-    formato: "s"
+  assert.equal(payload.nome, local.name);
+  assert.equal(payload.marca, "T-Mac");
+  assert.equal(payload.preco, remoteProduct.data.preco);
+  assert.deepEqual(payload.midia, {
+    video: remoteProduct.data.midia.video,
+    imagens: { imagensURL: remoteImages.map((link) => ({ link })) }
   });
-  assert.equal("marca" in payload, false);
-  assert.equal("midia" in payload, false);
-  assert.equal(remoteImages.length, 5);
 });
 
 test("accepts an explicit merged gallery and preserves all remote photos", () => {
@@ -820,6 +885,211 @@ test("binds a link mismatch confirmation to one user and operation", () => {
   }
 });
 
+test("detects the field loss caused by a substitutive minimal PUT mock", () => {
+  const afterMinimalPut = {
+    data: {
+      nome: remoteProduct.data.nome,
+      tipo: remoteProduct.data.tipo,
+      situacao: remoteProduct.data.situacao,
+      formato: remoteProduct.data.formato,
+      marca: "",
+      preco: 0,
+      estoque: {
+        minimo: 0,
+        maximo: 0,
+        crossdocking: 0,
+        localizacao: ""
+      },
+      fornecedor: { precoCusto: 0 },
+      midia: remoteProduct.data.midia
+    }
+  };
+
+  const mismatches = compareBlingProductIntegrity(remoteProduct, afterMinimalPut, ["images"]);
+  const fields = mismatches.map((mismatch) => mismatch.field);
+  assert.ok(fields.includes("brand"));
+  assert.ok(fields.includes("price"));
+  assert.ok(fields.includes("costPrice"));
+  assert.ok(fields.includes("stock"));
+});
+
+test("preserves integral remote data for image-only, title-only and brand-only changes", () => {
+  const scenarios = [
+    {
+      fields: ["images"] as const,
+      reviewed: { images: [...localProduct.images].reverse() }
+    },
+    {
+      fields: ["name"] as const,
+      reviewed: { name: "Titulo revisado" }
+    },
+    {
+      fields: ["brand"] as const,
+      reviewed: { brand: "Marca revisada" }
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    const payload = buildBlingProductUpdatePayload(scenario.reviewed, remoteProduct, scenario.fields);
+    const responseMedia = scenario.fields.some((field) => field === "images")
+      ? {
+          video: remoteProduct.data.midia.video,
+          imagens: {
+            externas: (scenario.reviewed.images ?? []).map((link) => ({ link })),
+            internas: []
+          }
+        }
+      : remoteProduct.data.midia;
+    const mismatches = compareBlingProductIntegrity(
+      remoteProduct,
+      { data: { ...payload, midia: responseMedia } },
+      scenario.fields
+    );
+    assert.deepEqual(mismatches, []);
+    assert.equal(payload.preco, remoteProduct.data.preco);
+    assert.deepEqual(payload.estoque, {
+      minimo: 2,
+      maximo: 50,
+      crossdocking: 3,
+      localizacao: "A-1"
+    });
+    assert.deepEqual(payload.fornecedor, remoteProduct.data.fornecedor);
+  }
+});
+
+test("detects integrity loss after PUT even when the reviewed photos match", () => {
+  const payload = buildBlingProductUpdatePayload(
+    { images: localProduct.images },
+    remoteProduct,
+    ["images"]
+  );
+  const after = {
+    data: {
+      ...payload,
+      marca: "",
+      preco: 0,
+      estoque: {
+        minimo: 0,
+        maximo: 0,
+        crossdocking: 0,
+        localizacao: ""
+      }
+    }
+  };
+  const fields = compareBlingProductIntegrity(remoteProduct, after, ["images"])
+    .map((mismatch) => mismatch.field);
+
+  assert.ok(fields.includes("brand"));
+  assert.ok(fields.includes("price"));
+  assert.ok(fields.includes("stock"));
+  assert.equal(fields.includes("images"), false);
+});
+
+test("blocks restoration when any previous value is unknown or only probable", () => {
+  const unknown = confirmedRestorationEvidence();
+  unknown.location = { confidence: "UNKNOWN" };
+  const unknownDryRun = createBlingProductRestorationDryRun({
+    currentRemote: remoteProduct,
+    previous: unknown
+  });
+  assert.equal(unknownDryRun.safeToExecute, false);
+  assert.equal(unknownDryRun.payload, null);
+  assert.ok(unknownDryRun.blockedFields.includes("location"));
+
+  const probable = confirmedRestorationEvidence();
+  probable.costPrice = { confidence: "PROBABLE", value: 777.77 };
+  const probableDryRun = createBlingProductRestorationDryRun({
+    currentRemote: remoteProduct,
+    previous: probable
+  });
+  assert.equal(probableDryRun.safeToExecute, false);
+  assert.equal(probableDryRun.payload, null);
+  assert.ok(probableDryRun.blockedFields.includes("costPrice"));
+});
+
+test("never uses zero as a restoration fallback", () => {
+  const incomplete = confirmedRestorationEvidence();
+  delete incomplete.stockMaximum;
+  delete incomplete.costPrice;
+  const dryRun = createBlingProductRestorationDryRun({
+    currentRemote: remoteProduct,
+    previous: incomplete
+  });
+
+  assert.equal(dryRun.safeToExecute, false);
+  assert.equal(dryRun.payload, null);
+  assert.deepEqual(dryRun.blockedFields.sort(), ["costPrice", "stockMaximum"]);
+
+  const labelOnly = confirmedRestorationEvidence();
+  labelOnly.location = { confidence: "CONFIRMED" };
+  const labelOnlyDryRun = createBlingProductRestorationDryRun({
+    currentRemote: remoteProduct,
+    previous: labelOnly
+  });
+  assert.equal(labelOnlyDryRun.safeToExecute, false);
+  assert.equal(labelOnlyDryRun.payload, null);
+  assert.ok(labelOnlyDryRun.blockedFields.includes("location"));
+});
+
+test("builds an integral restoration dry-run only from confirmed evidence", () => {
+  const currentRemote = {
+    data: {
+      ...remoteProduct.data,
+      marca: "",
+      preco: 0,
+      pesoBruto: 0,
+      estoque: {
+        minimo: 0,
+        maximo: 0,
+        crossdocking: 0,
+        localizacao: "",
+        saldoVirtualTotal: 4
+      },
+      fornecedor: { id: 77, contato: { id: 88, nome: "Fornecedor Matrix" }, precoCusto: 0 },
+      midia: {
+        video: { url: "" },
+        imagens: {
+          externas: localProduct.images.map((link) => ({ link })),
+          internas: []
+        }
+      }
+    }
+  };
+  const dryRun = createBlingProductRestorationDryRun({
+    currentRemote,
+    previous: confirmedRestorationEvidence()
+  });
+
+  assert.equal(dryRun.safeToExecute, true);
+  assert.equal(dryRun.payload.marca, "Marca restaurada");
+  assert.equal(dryRun.payload.preco, 999.99);
+  assert.deepEqual(dryRun.payload.estoque, {
+    minimo: 2,
+    maximo: 50,
+    crossdocking: 3,
+    localizacao: "A-1"
+  });
+  assert.equal((dryRun.payload.fornecedor as { precoCusto: number }).precoCusto, 777.77);
+  assert.deepEqual(
+    (dryRun.payload.midia as { imagens: { imagensURL: Array<{ link: string }> } }).imagens.imagensURL,
+    localProduct.images.map((link) => ({ link }))
+  );
+  assert.equal("saldoVirtualTotal" in (dryRun.payload.estoque as Record<string, unknown>), false);
+});
+
+test("keeps restoration dry-run pure and free of external or database writes", () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-product-update-service.ts"),
+    "utf8"
+  );
+  const start = source.indexOf("export function createBlingProductRestorationDryRun");
+  const end = source.indexOf("export function buildBlingProductUpdatePayload", start);
+  const dryRunSource = source.slice(start, end);
+
+  assert.ok(start >= 0 && end > start);
+  assert.doesNotMatch(dryRunSource, /blingApiClient|prisma\.|method:\s*"PUT"|fetch\(/);
+});
+
 test("masks product identity and returns only friendly connection errors", () => {
   assert.equal(maskBlingProductId("123456789"), "***6789");
   assert.equal(maskBlingProductId("123"), "***123");
@@ -1088,6 +1358,63 @@ test("never retries a mutating Bling request automatically after authorization f
     /response\.status === 401[\s\S]*allowRefresh && options\.method === "GET"/
   );
   assert.doesNotMatch(source, /allowRefresh\) \{[\s\S]*return this\.performRequest<T>\(options, true/);
+});
+
+test("blocks product writes in the UI, route and service before a job or PUT can start", async () => {
+  const routeSource = readFileSync(
+    path.join(process.cwd(), "app/api/products/bling/update/route.ts"),
+    "utf8"
+  );
+  const serviceSource = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-product-update-service.ts"),
+    "utf8"
+  );
+  const pageSource = readFileSync(
+    path.join(process.cwd(), "components/pages/products-page.tsx"),
+    "utf8"
+  );
+  const updateStart = serviceSource.indexOf("  async updateOne(input:");
+  const updateSource = serviceSource.slice(updateStart);
+  const routeBlock = routeSource.indexOf("if (parsed.data.confirmed && BLING_PRODUCT_UPDATE_WRITES_BLOCKED)");
+  const routeUpdate = routeSource.indexOf("blingProductUpdateService.updateOne");
+  const serviceBlock = updateSource.indexOf("BLING_PRODUCT_UPDATE_WRITES_BLOCKED");
+  const serviceJob = updateSource.indexOf("createUpdateJob(input)");
+  const servicePut = updateSource.indexOf('method: "PUT"');
+  const previewStart = pageSource.indexOf("async function openBlingUpdatePreview");
+  const previewEnd = pageSource.indexOf("async function confirmBlingProductUpdate", previewStart);
+  const previewSource = pageSource.slice(previewStart, previewEnd);
+
+  assert.equal(BLING_PRODUCT_UPDATE_WRITES_BLOCKED, true);
+  assert.equal(
+    BLING_PRODUCT_UPDATE_BLOCK_MESSAGE,
+    "A atualização de produtos no Bling está temporariamente bloqueada para revisão."
+  );
+  assert.ok(routeBlock >= 0 && routeBlock < routeUpdate);
+  assert.match(routeSource, /status:\s*423/);
+  assert.ok(serviceBlock >= 0 && serviceBlock < serviceJob && serviceBlock < servicePut);
+  assert.match(updateSource, /code:\s*"TEMPORARILY_BLOCKED"[\s\S]*putRequests:\s*0/);
+  assert.match(previewSource, /BLING_PRODUCT_UPDATE_WRITES_BLOCKED/);
+  assert.match(previewSource, /BLING_PRODUCT_UPDATE_BLOCK_MESSAGE/);
+  assert.match(pageSource, /disabled=\{[\s\S]*BLING_PRODUCT_UPDATE_WRITES_BLOCKED \|\|/);
+  assert.ok(
+    previewSource.indexOf("BLING_PRODUCT_UPDATE_WRITES_BLOCKED")
+      < previewSource.indexOf("fetch(")
+  );
+
+  const blocked = await blingProductUpdateService.updateOne({
+    userId: "user-never-loaded",
+    organizationId: "organization-never-loaded",
+    connectionId: "connection-never-loaded",
+    productId: "product-never-loaded",
+    fields: { name: "Nao deve ser enviado" },
+    idempotencyKey: "blocked_request_123456"
+  });
+  assert.equal(blocked.code, "TEMPORARILY_BLOCKED");
+  assert.ok(blocked.audit);
+  assert.equal(blocked.audit.putRequests, 0);
+  assert.equal(blocked.audit.putRequestState, "NOT_SENT");
+  assert.equal(blocked.audit.verificationGetExecuted, false);
+  assert.equal(blocked.audit.localTimestampUpdated, false);
 });
 
 test("requires both write permissions, an administrator and explicit confirmation", () => {

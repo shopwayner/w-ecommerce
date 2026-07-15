@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { requireApiAuth } from "@/lib/auth/api";
 import { can } from "@/lib/auth/permissions";
 import {
+  BLING_PRODUCT_UPDATE_BLOCK_MESSAGE,
+  BLING_PRODUCT_UPDATE_WRITES_BLOCKED,
   blingProductUpdateRequestSchema,
   type BlingProductReviewInput
 } from "@/lib/bling-product-update-schema";
@@ -36,6 +38,10 @@ export async function POST(request: Request) {
   const parsed = blingProductUpdateRequestSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json({ error: "Revise o produto e tente novamente." }, { status: 400 });
+  }
+
+  if (parsed.data.confirmed && BLING_PRODUCT_UPDATE_WRITES_BLOCKED) {
+    return NextResponse.json({ error: BLING_PRODUCT_UPDATE_BLOCK_MESSAGE }, { status: 423 });
   }
 
   const correlationId = maskedReference(randomUUID());

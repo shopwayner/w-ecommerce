@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+export const BLING_PRODUCT_UPDATE_WRITES_BLOCKED = true;
+export const BLING_PRODUCT_UPDATE_BLOCK_MESSAGE =
+  "A atualização de produtos no Bling está temporariamente bloqueada para revisão.";
+
 export const blingProductReviewedFieldsSchema = z
   .object({
     name: z.string().max(120).optional(),

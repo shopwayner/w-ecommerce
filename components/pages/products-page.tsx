@@ -43,6 +43,10 @@ import {
 } from "@/components/bling-product-update-modal";
 import { ProductCopyButton } from "@/components/product-copy-button";
 import { Badge, Button, Card, DataTable, KpiCard, PageHeader } from "@/components/ui";
+import {
+  BLING_PRODUCT_UPDATE_BLOCK_MESSAGE,
+  BLING_PRODUCT_UPDATE_WRITES_BLOCKED
+} from "@/lib/bling-product-update-schema";
 
 const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre-oval.png";
 
@@ -613,7 +617,9 @@ export function ProductsPage() {
     filteredProducts.length === 1 ? "1 produto visivel" : `${filteredProducts.length} produtos visiveis`;
   const pageStart = filteredProducts.length ? (currentPage - 1) * pageSize + 1 : 0;
   const pageEnd = Math.min(currentPage * pageSize, filteredProducts.length);
-  const blingUpdateSelectionMessage = !selectedBlingConnectionId
+  const blingUpdateSelectionMessage = BLING_PRODUCT_UPDATE_WRITES_BLOCKED
+    ? BLING_PRODUCT_UPDATE_BLOCK_MESSAGE
+    : !selectedBlingConnectionId
     ? "Selecione uma conta Bling no topo para atualizar produtos vinculados."
     : selectedProducts.length > 1
       ? "Selecione apenas um produto para atualizar no Bling."
@@ -669,6 +675,11 @@ export function ProductsPage() {
     setBlingUpdateMessage("");
     blingUpdateIdempotencyKey.current = null;
     blingUpdateRequestInFlight.current = false;
+
+    if (BLING_PRODUCT_UPDATE_WRITES_BLOCKED) {
+      setBlingUpdateMessage(BLING_PRODUCT_UPDATE_BLOCK_MESSAGE);
+      return;
+    }
 
     if (!selectedBlingConnectionId) {
       setBlingUpdateMessage("Selecione uma conta Bling no topo antes de atualizar produtos.");
@@ -1142,12 +1153,14 @@ export function ProductsPage() {
               <Button
                 className="w-full sm:w-auto"
                 disabled={
+                  BLING_PRODUCT_UPDATE_WRITES_BLOCKED ||
                   !selectedBlingConnectionId ||
                   accountContext?.selectedOption?.status !== "ACTIVE" ||
                   !selectedBlingProduct ||
                   blingUpdateBusy
                 }
                 onClick={() => void openBlingUpdatePreview()}
+                title={BLING_PRODUCT_UPDATE_WRITES_BLOCKED ? BLING_PRODUCT_UPDATE_BLOCK_MESSAGE : undefined}
                 type="button"
                 variant="secondary"
               >

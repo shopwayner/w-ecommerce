@@ -2,7 +2,11 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { ERPProvider, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import type { BlingProductReviewInput } from "@/lib/bling-product-update-schema";
+import {
+  BLING_PRODUCT_UPDATE_BLOCK_MESSAGE,
+  BLING_PRODUCT_UPDATE_WRITES_BLOCKED,
+  type BlingProductReviewInput
+} from "@/lib/bling-product-update-schema";
 import { decryptSecret, encryptSecret } from "@/lib/security/encryption";
 import { BlingApiError, blingApiClient } from "@/lib/services/bling-api-client";
 
@@ -76,6 +80,8 @@ export type BlingProductUpdateResult = {
     | "TEMPORARY_FAILURE"
     | "VERIFICATION_REQUIRED"
     | "LINK_REVIEW_REQUIRED"
+    | "TEMPORARILY_BLOCKED"
+    | "EXTERNAL_UPDATE_INTEGRITY_FAILED"
     | "LOCAL_MAPPING_CONCURRENT_UPDATE"
     | "LOCAL_MAPPING_RECORD_FAILED"
     | "LOCAL_AUDIT_RECORD_FAILED";
@@ -595,6 +601,243 @@ export function isSupportedBlingProductStructure(local: LocalProductValues, remo
   return !local.parentExternalProductId && text(remote.formato).toUpperCase() === "S";
 }
 
+const blingPutScalarFields = [
+  "codigo",
+  "preco",
+  "descricaoCurta",
+  "dataValidade",
+  "unidade",
+  "pesoLiquido",
+  "pesoBruto",
+  "volumes",
+  "itensPorCaixa",
+  "gtin",
+  "gtinEmbalagem",
+  "tipoProducao",
+  "condicao",
+  "freteGratis",
+  "marca",
+  "descricaoComplementar",
+  "linkExterno",
+  "observacoes",
+  "descricaoEmbalagemDiscreta",
+  "artigoPerigoso"
+] as const;
+
+const blingPutTaxFields = [
+  "origem",
+  "nFCI",
+  "ncm",
+  "cest",
+  "codigoListaServicos",
+  "spedTipoItem",
+  "codigoItem",
+  "percentualTributos",
+  "valorBaseStRetencao",
+  "valorStRetencao",
+  "valorICMSSubstituto",
+  "codigoExcecaoTipi",
+  "classeEnquadramentoIpi",
+  "valorIpiFixo",
+  "codigoSeloIpi",
+  "valorPisFixo",
+  "valorCofinsFixo",
+  "codigoANP",
+  "descricaoANP",
+  "percentualGLP",
+  "percentualGasNacional",
+  "percentualGasImportado",
+  "valorPartida",
+  "tipoArmamento",
+  "descricaoCompletaArmamento",
+  "dadosAdicionais",
+  "grupoProduto"
+] as const;
+
+function owns(value: JsonRecord, key: string) {
+  return Object.prototype.hasOwnProperty.call(value, key) && value[key] !== undefined;
+}
+
+function cloneJsonValue(value: unknown): unknown {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+function copyJsonFields(target: JsonRecord, source: JsonRecord, fields: readonly string[]) {
+  for (const field of fields) {
+    if (owns(source, field)) target[field] = cloneJsonValue(source[field]);
+  }
+}
+
+function pickedJsonObject(sourceValue: unknown, fields: readonly string[]) {
+  const source = record(sourceValue);
+  const output: JsonRecord = {};
+  copyJsonFields(output, source, fields);
+  return Object.keys(output).length ? output : null;
+}
+
+function safeSupplierForPut(value: unknown) {
+  const supplier = record(value);
+  const output = pickedJsonObject(supplier, ["id", "codigo", "precoCusto", "precoCompra"]) ?? {};
+  const contact = pickedJsonObject(supplier.contato, ["id", "nome"]);
+  if (contact) output.contato = contact;
+  return Object.keys(output).length ? output : null;
+}
+
+function safeStockForPut(value: unknown) {
+  // saldoVirtualTotal is read-only commercial state and must never be replayed by this flow.
+  return pickedJsonObject(value, ["minimo", "maximo", "crossdocking", "localizacao"]);
+}
+
+function safeCustomFieldsForPut(value: unknown) {
+  if (!Array.isArray(value)) return null;
+  const fields = value
+    .map((item) => pickedJsonObject(item, ["idCampoCustomizado", "idVinculo", "valor", "item"]))
+    .filter((item): item is JsonRecord => Boolean(item));
+  return fields.length ? fields : null;
+}
+
+export type BlingProductIntegrityMismatch = {
+  field: string;
+  before: unknown;
+  after: unknown;
+};
+
+export function createBlingProductIntegritySnapshot(remoteValue: unknown) {
+  const remote = remoteData(remoteValue);
+  const stock = record(remote.estoque);
+  const supplier = record(remote.fornecedor);
+  const media = record(remote.midia);
+  const video = record(media.video);
+  return {
+    name: remote.nome,
+    brand: remote.marca,
+    images: remoteImages(remote),
+    price: remote.preco,
+    costPrice: supplier.precoCusto,
+    type: remote.tipo,
+    situation: remote.situacao,
+    format: remote.formato,
+    code: remote.codigo,
+    gtin: remote.gtin,
+    packagingGtin: remote.gtinEmbalagem,
+    unit: remote.unidade,
+    shortDescription: remote.descricaoCurta,
+    complementaryDescription: remote.descricaoComplementar,
+    category: cloneJsonValue(remote.categoria),
+    netWeight: remote.pesoLiquido,
+    grossWeight: remote.pesoBruto,
+    dimensions: cloneJsonValue(remote.dimensoes),
+    stock: {
+      minimum: stock.minimo,
+      maximum: stock.maximo,
+      crossdocking: stock.crossdocking,
+      location: stock.localizacao
+    },
+    taxation: cloneJsonValue(remote.tributacao),
+    supplier: cloneJsonValue(safeSupplierForPut(remote.fornecedor)),
+    videoUrl: video.url,
+    customFields: cloneJsonValue(safeCustomFieldsForPut(remote.camposCustomizados)),
+    dangerousArticle: remote.artigoPerigoso
+  };
+}
+
+export function compareBlingProductIntegrity(
+  beforeValue: unknown,
+  afterValue: unknown,
+  changedFields: readonly BlingProductUpdateField[]
+) {
+  const before = createBlingProductIntegritySnapshot(beforeValue) as Record<string, unknown>;
+  const after = createBlingProductIntegritySnapshot(afterValue) as Record<string, unknown>;
+  const ignored = new Set<string>([
+    ...(changedFields.includes("name") ? ["name"] : []),
+    ...(changedFields.includes("brand") ? ["brand"] : []),
+    ...(changedFields.includes("images") ? ["images"] : [])
+  ]);
+  const mismatches: BlingProductIntegrityMismatch[] = [];
+  for (const field of Object.keys(before)) {
+    if (ignored.has(field)) continue;
+    if (JSON.stringify(before[field]) !== JSON.stringify(after[field])) {
+      mismatches.push({ field, before: before[field], after: after[field] });
+    }
+  }
+  return mismatches;
+}
+
+export type BlingRestorationConfidence = "CONFIRMED" | "PROBABLE" | "UNKNOWN";
+export type BlingRestorationEvidence = {
+  confidence: BlingRestorationConfidence;
+  value?: unknown;
+};
+
+const blingRestorationRequiredFields = [
+  "brand",
+  "price",
+  "costPrice",
+  "stockMinimum",
+  "stockMaximum",
+  "crossdocking",
+  "location",
+  "unit",
+  "category",
+  "netWeight",
+  "grossWeight",
+  "dimensions",
+  "taxation",
+  "supplierIdentity"
+] as const;
+
+function isConfirmedRestorationEvidence(value: BlingRestorationEvidence | undefined) {
+  return value?.confidence === "CONFIRMED"
+    && Object.prototype.hasOwnProperty.call(value, "value");
+}
+
+export function createBlingProductRestorationDryRun(input: {
+  currentRemote: unknown;
+  previous: Partial<Record<(typeof blingRestorationRequiredFields)[number], BlingRestorationEvidence>>;
+}) {
+  const blockedFields = blingRestorationRequiredFields.filter(
+    (field) => !isConfirmedRestorationEvidence(input.previous[field])
+  );
+  const confirmedFields = blingRestorationRequiredFields.filter(
+    (field) => isConfirmedRestorationEvidence(input.previous[field])
+  );
+  if (blockedFields.length) {
+    return {
+      safeToExecute: false as const,
+      payload: null,
+      confirmedFields,
+      blockedFields
+    };
+  }
+
+  const remote = remoteData(input.currentRemote);
+  const restored = cloneJsonValue(remote) as JsonRecord;
+  restored.marca = input.previous.brand?.value;
+  restored.preco = input.previous.price?.value;
+  restored.unidade = input.previous.unit?.value;
+  restored.categoria = cloneJsonValue(input.previous.category?.value);
+  restored.pesoLiquido = input.previous.netWeight?.value;
+  restored.pesoBruto = input.previous.grossWeight?.value;
+  restored.dimensoes = cloneJsonValue(input.previous.dimensions?.value);
+  restored.tributacao = cloneJsonValue(input.previous.taxation?.value);
+  const stock = record(restored.estoque);
+  stock.minimo = input.previous.stockMinimum?.value;
+  stock.maximo = input.previous.stockMaximum?.value;
+  stock.crossdocking = input.previous.crossdocking?.value;
+  stock.localizacao = input.previous.location?.value;
+  restored.estoque = stock;
+  const supplier = record(cloneJsonValue(input.previous.supplierIdentity?.value));
+  supplier.precoCusto = input.previous.costPrice?.value;
+  restored.fornecedor = supplier;
+
+  return {
+    safeToExecute: true as const,
+    payload: buildBlingProductUpdatePayload({}, restored, []),
+    confirmedFields,
+    blockedFields: [] as string[]
+  };
+}
+
 export function buildBlingProductUpdatePayload(
   reviewed: BlingReviewedProductValues,
   remoteValue: unknown,
@@ -627,24 +870,46 @@ export function buildBlingProductUpdatePayload(
     formato: format
   };
 
+  copyJsonFields(payload, remote, blingPutScalarFields);
+  payload.nome = name;
+  payload.tipo = type;
+  payload.situacao = situation;
+  payload.formato = format;
+
+  const category = pickedJsonObject(remote.categoria, ["id"]);
+  if (category) payload.categoria = category;
+  const stock = safeStockForPut(remote.estoque);
+  if (stock) payload.estoque = stock;
+  const supplier = safeSupplierForPut(remote.fornecedor);
+  if (supplier) payload.fornecedor = supplier;
+  const dimensions = pickedJsonObject(remote.dimensoes, ["largura", "altura", "profundidade", "unidadeMedida"]);
+  if (dimensions) payload.dimensoes = dimensions;
+  const taxation = pickedJsonObject(remote.tributacao, blingPutTaxFields);
+  if (taxation) payload.tributacao = taxation;
+  const productLine = pickedJsonObject(remote.linhaProduto, ["id"]);
+  if (productLine) payload.linhaProduto = productLine;
+  const customFields = safeCustomFieldsForPut(remote.camposCustomizados);
+  if (customFields) payload.camposCustomizados = customFields;
+
   if (selected.has("brand")) {
     if (!reviewed.brand) throw new Error("Informe a marca para atualizar o produto.");
     payload.marca = reviewed.brand;
   }
-  if (selected.has("images")) {
-    if (!reviewed.images?.length) throw new Error("Mantenha ao menos uma foto para atualizar a galeria.");
-    const media = record(remote.midia);
-    const video = record(media.video);
-    if (typeof video.url !== "string") {
-      throw new Error("O cadastro precisa de dados adicionais antes de ser atualizado.");
-    }
-    payload.midia = {
-      video: { url: video.url },
-      imagens: {
-        imagensURL: reviewed.images.map((link) => ({ link }))
-      }
-    };
+  const media = record(remote.midia);
+  const video = record(media.video);
+  if (typeof video.url !== "string") {
+    throw new Error("O cadastro precisa de dados adicionais antes de ser atualizado.");
   }
+  const images = selected.has("images") ? reviewed.images : remoteImages(remote);
+  if (selected.has("images") && !images?.length) {
+    throw new Error("Mantenha ao menos uma foto para atualizar a galeria.");
+  }
+  payload.midia = {
+    video: { url: video.url },
+    imagens: images?.length
+      ? { imagensURL: images.map((link) => ({ link })) }
+      : {}
+  };
   return payload;
 }
 
@@ -946,10 +1211,15 @@ async function verifyUpdatedBlingProduct(input: {
   externalProductId: string;
   reviewed: BlingReviewedProductValues;
   fields: BlingProductUpdateField[];
+  beforeRemote: unknown;
 }) {
   const payload = await blingApiClient.request<unknown>({ organizationId: input.organizationId, connectionId: input.connectionId, method: "GET", path: `/produtos/${input.externalProductId}` });
-  const remaining = compareBlingProductValues(input.reviewed, remoteData(payload));
-  return input.fields.every((field) => !remaining.includes(field));
+  const afterRemote = remoteData(payload);
+  const remaining = compareBlingProductValues(input.reviewed, afterRemote);
+  return {
+    updatedFieldsMatch: input.fields.every((field) => !remaining.includes(field)),
+    integrityMismatches: compareBlingProductIntegrity(input.beforeRemote, afterRemote, input.fields)
+  };
 }
 
 function parseJobCursor(value: string | null) {
@@ -1082,6 +1352,24 @@ export class BlingProductUpdateService {
     confirmedLinkMismatch?: boolean;
     linkMismatchConfirmation?: string;
   }): Promise<BlingProductUpdateResult> {
+    if (BLING_PRODUCT_UPDATE_WRITES_BLOCKED) {
+      return {
+        productId: input.productId,
+        externalProductIdMasked: null,
+        status: "FAILED",
+        code: "TEMPORARILY_BLOCKED",
+        message: BLING_PRODUCT_UPDATE_BLOCK_MESSAGE,
+        fields: [],
+        audit: {
+          stage: "PRECONDITION",
+          putRequests: 0,
+          putRequestState: "NOT_SENT",
+          verificationGetExecuted: false,
+          localTimestampUpdated: false
+        }
+      };
+    }
+
     let prepared: Awaited<ReturnType<typeof createUpdateJob>>;
     let confirmedLinkMismatchExternalProductId: string | undefined;
     try {
@@ -1196,8 +1484,8 @@ export class BlingProductUpdateService {
           await blingApiClient.request<unknown>({ organizationId: input.organizationId, connectionId: input.connectionId, method: "PUT", path: `/produtos/${inspection.externalProductId}`, body });
           stage = "VERIFY_GET";
           verificationGetExecuted = true;
-          const verified = await verifyUpdatedBlingProduct({ organizationId: input.organizationId, connectionId: input.connectionId, externalProductId: inspection.externalProductId, reviewed, fields: changedFields });
-          if (!verified) {
+          const verification = await verifyUpdatedBlingProduct({ organizationId: input.organizationId, connectionId: input.connectionId, externalProductId: inspection.externalProductId, reviewed, fields: changedFields, beforeRemote: inspection.remoteProduct });
+          if (!verification.updatedFieldsMatch) {
             const failure = describeBlingProductUpdateFailure({
               error: new Error("Bling verification mismatch"),
               stage,
@@ -1211,6 +1499,22 @@ export class BlingProductUpdateService {
               status: "FAILED",
               fields: changedFields,
               ...failure
+            };
+          } else if (verification.integrityMismatches.length) {
+            result = {
+              productId: input.productId,
+              externalProductIdMasked: maskBlingProductId(inspection.externalProductId),
+              status: "FAILED",
+              code: "EXTERNAL_UPDATE_INTEGRITY_FAILED",
+              message: "O Bling atualizou o produto, mas outros dados precisam ser revisados antes de continuar.",
+              fields: changedFields,
+              audit: {
+                stage: "VERIFY_GET",
+                putRequests,
+                putRequestState: "SENT",
+                verificationGetExecuted,
+                localTimestampUpdated: false
+              }
             };
           } else {
             stage = "LOCAL_CONFIRMATION";
