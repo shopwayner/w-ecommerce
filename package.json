@@ -13,6 +13,7 @@
     "seed:production": "tsx scripts/seed-production.ts",
     "security:audit": "tsx scripts/audit-api-security.ts",
     "bling:backfill-product-status": "tsx scripts/backfill-bling-product-status.ts",
+    "bling:enrich-product-details": "tsx scripts/enrich-bling-product-details.ts",
     "ml:backfill-shipping-cache": "tsx scripts/backfill-mercado-livre-shipping-cache.ts",
     "amazon:import-sandbox-token": "tsx scripts/import-amazon-sandbox-token.ts",
     "seed:test-products": "tsx scripts/seed-test-products.ts"

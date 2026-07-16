@@ -137,6 +137,18 @@ enum JobStatus {
   CANCELED
 }
 
+enum ProductCondition {
+  UNSPECIFIED
+  NEW
+  USED
+}
+
+enum ProductDimensionUnit {
+  METER
+  CENTIMETER
+  MILLIMETER
+}
+
 enum AuditLogStatus {
   SUCCESS
   FAILED
@@ -657,9 +669,12 @@ model Product {
   source           String?
   confidenceScore  Int                      @default(0)
   weight           Decimal?                 @db.Decimal(10, 3)
+  grossWeight      Decimal?                 @db.Decimal(10, 3)
   height           Decimal?                 @db.Decimal(10, 3)
   width            Decimal?                 @db.Decimal(10, 3)
   depth            Decimal?                 @db.Decimal(10, 3)
+  dimensionUnit    ProductDimensionUnit?
+  condition        ProductCondition?
   attributes       Json?
   blockedFields    Json?
   createdAt        DateTime                 @default(now())
@@ -970,6 +985,7 @@ model ProductExternalMapping {
   connectionId       String
   externalProductId  String
   lastExternalSyncAt DateTime?
+  lastDetailSyncAt   DateTime?
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
   product            Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
