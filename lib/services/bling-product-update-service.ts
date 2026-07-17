@@ -1998,14 +1998,12 @@ export class BlingProductUpdateService {
       externalProductId: inspection.externalProductId,
       idempotencyKey: input.idempotencyKey
     });
-    const item = inspection.publicItem.status === "VINCULO_PRECISA_REVISAO"
-      ? inspection.publicItem
-      : reviewableItem(
-          input.productId,
-          inspection.localValues,
-          inspection.remoteProduct,
-          inspection.externalProductId
-        );
+    const item = reviewableItem(
+      input.productId,
+      inspection.localValues,
+      inspection.remoteProduct,
+      inspection.externalProductId
+    );
 
     return {
       preview: {
@@ -2235,7 +2233,8 @@ export class BlingProductUpdateService {
         connectionId: input.connectionId,
         productId: input.productId,
         readOnly: false,
-        confirmedLinkMismatchExternalProductId
+        confirmedLinkMismatchExternalProductId:
+          confirmedLinkMismatchExternalProductId ?? incidentReviewExternalProductId
       });
       if (
         incidentReviewExternalProductId

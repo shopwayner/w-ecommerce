@@ -1988,9 +1988,15 @@ test("keeps incident review read-only and bypasses history only for a scoped NAM
 
   assert.match(reviewSource, /readOnly: true/);
   assert.doesNotMatch(reviewSource, /createUpdateJob|method: "PATCH"/);
+  assert.doesNotMatch(reviewSource, /inspection\.publicItem\.status === "VINCULO_PRECISA_REVISAO"/);
+  assert.match(reviewSource, /const item = reviewableItem\(/);
   assert.ok(incidentGuard >= 0 && grantVerification > incidentGuard && jobCreation > grantVerification);
   assert.match(updateSource, /input\.operation !== "NAME_ONLY"/);
   assert.match(updateSource, /input\.fields\.images !== undefined/);
+  assert.match(
+    updateSource,
+    /confirmedLinkMismatchExternalProductId:\s*confirmedLinkMismatchExternalProductId \?\? incidentReviewExternalProductId/
+  );
   assert.match(updateSource, /incidentReviewExternalProductId[\s\S]*inspection\.externalProductId/);
   assert.match(routeSource, /BLING_PRODUCT_INCIDENT_REVIEW_CONFIRMED/);
   assert.match(routeSource, /operation: "NAME_ONLY"/);
