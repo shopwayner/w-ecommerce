@@ -3307,7 +3307,7 @@ export function IntelligentProductRegistrationPage() {
                   ) : null}
                 </div>
                 {rankedMercadoLivreItems.length ? (
-                  <div className="grid min-h-0 gap-4 p-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(360px,1.05fr)]">
+                  <div className="grid min-h-0 gap-4 p-4 2xl:grid-cols-[minmax(0,0.95fr)_minmax(360px,1.05fr)]">
                     <div className="flex max-h-[calc(100vh-8rem)] min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-matrix-border bg-matrix-panel/72">
                       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-matrix-border px-4 py-3">
                         <div>
