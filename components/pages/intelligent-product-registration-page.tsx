@@ -844,6 +844,206 @@ function MercadoLivreImageGallery({ item, alt }: { item: MercadoLivreSearchItem;
   );
 }
 
+function mercadoLivreConditionLabel(value: string | null | undefined) {
+  if (value === "new") return "Novo";
+  if (value === "used") return "Usado";
+  if (value === "not_specified") return "Não especificada";
+  return value?.trim() || null;
+}
+
+function mercadoLivreLocationLabel(item: MercadoLivreSearchItem) {
+  return item.location?.trim() || [item.cityName?.trim(), item.stateName?.trim()].filter(Boolean).join(" - ") || null;
+}
+
+function mercadoLivreCompactItemId(value: string | null | undefined) {
+  const normalized = value?.replace(/[^A-Z0-9]/gi, "").toUpperCase();
+  if (!normalized) return null;
+  if (normalized.length <= 10) return normalized;
+  return `${normalized.slice(0, 5)}...${normalized.slice(-4)}`;
+}
+
+function MercadoLivreReferenceDetails({
+  compatibility,
+  error,
+  item,
+  loading,
+  onClose,
+  onUse
+}: {
+  compatibility: ProductSuggestionCompatibilityResult | null;
+  error: string | null;
+  item: MercadoLivreSearchItem;
+  loading: boolean;
+  onClose: () => void;
+  onUse: () => void;
+}) {
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+  const itemKey = mercadoLivreDetailCacheKey(item) ?? item.externalItemId ?? item.title ?? "resultado";
+  const title = item.title?.trim() || item.externalItemId || "Resultado Mercado Livre";
+  const description = item.description?.trim() || null;
+  const seller = mercadoLivreSellerLabel(item);
+  const location = mercadoLivreLocationLabel(item);
+  const category = mercadoLivreCategoryLabel(item);
+  const condition = mercadoLivreConditionLabel(item.condition);
+  const attributes = item.attributes?.filter((attribute) => (attribute.id || attribute.name) && attribute.value).slice(0, 12) ?? [];
+
+  useEffect(() => {
+    setDescriptionExpanded(false);
+  }, [itemKey]);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex items-start justify-between gap-3 border-b border-matrix-border px-4 py-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 id="mercado-livre-reference-details-title" className="font-semibold text-matrix-fg">
+              Detalhes do anúncio selecionado
+            </h3>
+            {compatibility ? (
+              <Badge tone={compatibilityTone(compatibility.level)}>{productSuggestionBadgeLabel(compatibility.level)}</Badge>
+            ) : null}
+          </div>
+          <p className="mt-1 text-xs text-matrix-muted">Revise as informações antes de usar esta referência.</p>
+        </div>
+        <button
+          aria-label="Voltar para resultados"
+          className="inline-flex min-h-9 shrink-0 items-center gap-2 rounded-md border border-matrix-border px-2.5 text-xs font-semibold text-matrix-muted transition hover:border-matrix-gold/50 hover:text-matrix-fg lg:hidden"
+          onClick={onClose}
+          type="button"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Voltar
+        </button>
+      </div>
+
+      <div className="matrix-scroll min-h-0 flex-1 overflow-x-hidden overflow-y-auto p-4">
+        {loading ? (
+          <p className="mb-4 rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/18 px-3 py-2 text-xs text-matrix-muted">
+            Carregando detalhes desta referência.
+          </p>
+        ) : null}
+        {error ? (
+          <p className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-100">{error}</p>
+        ) : null}
+
+        <div className="grid gap-5 xl:grid-cols-[minmax(190px,0.8fr)_minmax(0,1.2fr)] xl:items-start">
+          <MercadoLivreImageGallery item={item} alt={title} />
+          <div className="min-w-0">
+            <h4 className="text-lg font-semibold leading-snug text-matrix-fg">{title}</h4>
+            {typeof item.price === "number" ? (
+              <p className="mt-3 text-2xl font-semibold text-matrix-fg">{formatCurrency(item.price)}</p>
+            ) : null}
+            <dl className="mt-4 grid gap-x-4 gap-y-2 text-sm sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+              {item.gtin ? (
+                <div>
+                  <dt className="text-xs text-matrix-muted">GTIN</dt>
+                  <dd className="mt-0.5 font-medium text-matrix-fg">{item.gtin}</dd>
+                </div>
+              ) : null}
+              {item.brand ? (
+                <div>
+                  <dt className="text-xs text-matrix-muted">Marca</dt>
+                  <dd className="mt-0.5 font-medium text-matrix-fg">{item.brand}</dd>
+                </div>
+              ) : null}
+              {condition ? (
+                <div>
+                  <dt className="text-xs text-matrix-muted">Condição</dt>
+                  <dd className="mt-0.5 font-medium text-matrix-fg">{condition}</dd>
+                </div>
+              ) : null}
+              {item.externalItemId ? (
+                <div>
+                  <dt className="text-xs text-matrix-muted">ID do anúncio</dt>
+                  <dd className="mt-0.5 font-medium text-matrix-fg">{item.externalItemId}</dd>
+                </div>
+              ) : null}
+              {seller ? (
+                <div>
+                  <dt className="text-xs text-matrix-muted">Vendedor</dt>
+                  <dd className="mt-0.5 font-medium text-matrix-fg">{seller}</dd>
+                </div>
+              ) : null}
+              {item.sellerReputation || item.sellerReputationLevel ? (
+                <div>
+                  <dt className="text-xs text-matrix-muted">Reputação</dt>
+                  <dd className="mt-0.5 font-medium text-matrix-fg">{item.sellerReputation ?? item.sellerReputationLevel}</dd>
+                </div>
+              ) : null}
+              {typeof item.soldQuantity === "number" ? (
+                <div>
+                  <dt className="text-xs text-matrix-muted">Vendas</dt>
+                  <dd className="mt-0.5 font-medium text-matrix-fg">{item.soldQuantity.toLocaleString("pt-BR")}</dd>
+                </div>
+              ) : null}
+              {location ? (
+                <div>
+                  <dt className="text-xs text-matrix-muted">Localização</dt>
+                  <dd className="mt-0.5 font-medium text-matrix-fg">{location}</dd>
+                </div>
+              ) : null}
+            </dl>
+          </div>
+        </div>
+
+        {category ? (
+          <section className="mt-4 rounded-md border border-matrix-border bg-matrix-panel2/55 p-3">
+            <h5 className="text-xs font-semibold uppercase text-matrix-goldDark">Categoria no Mercado Livre</h5>
+            <p className="mt-1 text-sm text-matrix-muted">{category}</p>
+          </section>
+        ) : null}
+
+        {attributes.length ? (
+          <section className="mt-3 rounded-md border border-matrix-border bg-matrix-panel2/55 p-3">
+            <h5 className="text-xs font-semibold uppercase text-matrix-goldDark">Variações e atributos</h5>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {attributes.map((attribute, attributeIndex) => (
+                <span
+                  key={`${attribute.id ?? attribute.name ?? "atributo"}-${attributeIndex}`}
+                  className="rounded-md border border-matrix-border bg-matrix-panel px-2 py-1 text-xs text-matrix-muted"
+                >
+                  {attribute.name ?? attribute.id}: <span className="text-matrix-fg">{attribute.value}</span>
+                </span>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
+        {description ? (
+          <section className="mt-3 rounded-md border border-matrix-border bg-matrix-panel2/55 p-3">
+            <h5 className="text-xs font-semibold uppercase text-matrix-goldDark">Descrição do anúncio</h5>
+            <p className={`mt-2 whitespace-pre-line text-sm leading-6 text-matrix-muted ${descriptionExpanded ? "" : "line-clamp-4"}`}>
+              {description}
+            </p>
+            <button
+              className="mt-2 text-xs font-semibold text-matrix-goldDark transition hover:text-matrix-gold"
+              onClick={() => setDescriptionExpanded((current) => !current)}
+              type="button"
+            >
+              {descriptionExpanded ? "Resumir descrição" : "Ver descrição completa"}
+            </button>
+          </section>
+        ) : null}
+
+        {productSuggestionNeedsAttention(compatibility) ? (
+          <p className="mt-4 rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/18 px-3 py-2 text-sm text-matrix-fg">
+            Confira as fotos e o título antes de salvar.
+          </p>
+        ) : null}
+      </div>
+
+      <div className="flex flex-wrap justify-end gap-2 border-t border-matrix-border px-4 py-3">
+        <Button className="lg:hidden" onClick={onClose} type="button" variant="secondary">
+          Voltar para resultados
+        </Button>
+        <Button onClick={onUse} type="button">
+          Usar esta referência
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function mercadoLivreItemKey(item: MercadoLivreSearchItem, index: number) {
   return `${item.externalItemId ?? item.permalink ?? item.title ?? "resultado"}-${index}`;
 }
@@ -1264,8 +1464,6 @@ export function IntelligentProductRegistrationPage() {
       : selectedMercadoLivreResultKeyForRender && mercadoLivreDetailError?.key === selectedMercadoLivreResultKeyForRender
         ? mercadoLivreDetailError.message
         : null;
-  const selectedMercadoLivreDetailAttributes =
-    selectedMercadoLivreDetailItem?.attributes?.filter((attribute) => (attribute.id || attribute.name) && attribute.value).slice(0, 8) ?? [];
   useEffect(() => {
     const selectedStillExists = filteredMercadoLivreItems.some(({ item, rankedIndex }) => mercadoLivreItemKey(item, rankedIndex) === selectedMercadoLivreResultKey);
     if (selectedMercadoLivreResultKey && !selectedStillExists) setSelectedMercadoLivreResultKey(null);
@@ -2708,8 +2906,8 @@ export function IntelligentProductRegistrationPage() {
         </div>
       </Card>
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
-        <aside className="space-y-4 rounded-lg border border-matrix-border bg-matrix-panel/88 p-4 shadow-glow">
+      <div className="mt-4 grid gap-4 2xl:grid-cols-[300px_minmax(0,1fr)]">
+        <aside className="w-full max-w-md space-y-4 rounded-lg border border-matrix-border bg-matrix-panel/88 p-4 shadow-glow 2xl:max-w-none">
           <form onSubmit={search}>
             <div className="flex items-center gap-2 text-matrix-goldDark">
               <Search className="h-5 w-5" />
@@ -3241,7 +3439,7 @@ export function IntelligentProductRegistrationPage() {
                   ) : null}
                 </div>
                 {rankedMercadoLivreItems.length ? (
-                  <div className="p-4">
+                  <div className="grid items-start gap-3 p-4 lg:grid-cols-[minmax(0,44fr)_minmax(0,56fr)]">
                     <div className="min-w-0 overflow-hidden rounded-lg border border-matrix-border bg-matrix-panel/72">
                       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-matrix-border px-4 py-3">
                         <div>
@@ -3389,59 +3587,68 @@ export function IntelligentProductRegistrationPage() {
                           </div>
                         </div>
                       </div>
-                      <div className="grid gap-3 p-3 sm:grid-cols-2 lg:grid-cols-3">
+                      <div className="matrix-scroll grid gap-2 p-2 lg:max-h-[calc(100dvh-13rem)] lg:overflow-y-auto">
                         {filteredMercadoLivreItems.length ? filteredMercadoLivreItems.map(({ item, compatibility: itemCompatibility, rankedIndex }) => {
                           const itemKey = mercadoLivreItemKey(item, rankedIndex);
                           const isSelected = itemKey === selectedMercadoLivreResultKeyForRender;
                           const itemTitle = item.title?.trim() || item.externalItemId || "Resultado Mercado Livre";
                           const hasPrice = typeof item.price === "number";
+                          const seller = mercadoLivreSellerLabel(item);
+                          const location = mercadoLivreLocationLabel(item);
+                          const compactItemId = mercadoLivreCompactItemId(item.externalItemId);
 
                           return (
                             <article
                               key={itemKey}
-                              className={`flex min-h-40 flex-col rounded-lg border p-3 transition ${
+                              className={`overflow-hidden rounded-md border transition ${
                                 isSelected
                                   ? "border-matrix-gold bg-matrix-goldSoft/20 shadow-glow"
                                   : "border-matrix-border bg-matrix-panel2/72 hover:border-matrix-gold/45"
                               }`}
                             >
                               <button
-                                aria-label={`Ver detalhes de ${itemTitle}`}
-                                className="grid w-full grid-cols-[56px_minmax(0,1fr)] gap-3 text-left"
+                                aria-label={`Selecionar ${itemTitle}`}
+                                aria-pressed={isSelected}
+                                className="grid w-full grid-cols-[18px_56px_minmax(0,1fr)] items-start gap-2.5 p-2.5 text-left"
                                 onClick={() => void selectMercadoLivreResult(item, rankedIndex)}
                                 type="button"
                               >
-                                <ProductImage alt={itemTitle} size="sm" src={item.imageUrl} />
+                                <span
+                                  aria-hidden="true"
+                                  className={`mt-5 grid h-4 w-4 place-items-center rounded-full border ${
+                                    isSelected
+                                      ? "border-matrix-gold bg-matrix-gold text-black"
+                                      : "border-matrix-muted/60 bg-matrix-panel"
+                                  }`}
+                                >
+                                  {isSelected ? <Check className="h-3 w-3" /> : null}
+                                </span>
+                                <ProductImage alt={itemTitle} size="sm" src={item.imageUrl ?? item.thumbnail} />
                                 <div className="min-w-0">
-                                  <p className="line-clamp-2 text-sm font-semibold leading-snug text-matrix-fg">{itemTitle}</p>
-                                  {item.brand ? <p className="mt-1 truncate text-xs text-matrix-muted">Marca: {item.brand}</p> : null}
-                                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                                    {hasPrice ? <span className="text-base font-semibold text-matrix-fg">{formatCurrency(item.price)}</span> : null}
+                                  <div className="flex min-w-0 flex-wrap items-start justify-between gap-1.5">
+                                    <p className="line-clamp-2 min-w-0 flex-1 text-sm font-semibold leading-snug text-matrix-fg">{itemTitle}</p>
                                     {itemCompatibility ? (
                                       <span className={compactBadgeClass(compatibilityTone(itemCompatibility.level))}>
                                         {productSuggestionBadgeLabel(itemCompatibility.level)}
                                       </span>
                                     ) : null}
                                   </div>
+                                  <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-matrix-muted">
+                                    {hasPrice ? <span className="text-base font-semibold text-matrix-fg">{formatCurrency(item.price)}</span> : null}
+                                    {item.brand ? <span className="truncate">Marca: {item.brand}</span> : null}
+                                    {item.gtin ? <span className="truncate">GTIN: {item.gtin}</span> : null}
+                                  </div>
+                                  <div className="mt-1.5 grid gap-x-3 gap-y-1 text-[11px] leading-4 text-matrix-muted 2xl:grid-cols-2">
+                                    {seller ? <span className="truncate">Vendedor: {seller}</span> : null}
+                                    {typeof item.soldQuantity === "number" ? <span>{item.soldQuantity.toLocaleString("pt-BR")} venda(s)</span> : null}
+                                    {item.sellerReputation || item.sellerReputationLevel ? (
+                                      <span className="truncate">Reputação: {item.sellerReputation ?? item.sellerReputationLevel}</span>
+                                    ) : null}
+                                    {location ? <span className="truncate">Localização: {location}</span> : null}
+                                    {compactItemId ? <span className="truncate">Anúncio: {compactItemId}</span> : null}
+                                  </div>
                                 </div>
                               </button>
-                              <div className="mt-auto flex flex-wrap justify-end gap-2 pt-3">
-                                <Button
-                                  className="min-h-8 px-2.5 py-1 text-xs"
-                                  onClick={() => void selectMercadoLivreResult(item, rankedIndex)}
-                                  type="button"
-                                  variant="secondary"
-                                >
-                                  Ver detalhes
-                                </Button>
-                                <Button
-                                  className="min-h-8 px-2.5 py-1 text-xs"
-                                  onClick={() => selectMercadoLivreSuggestion(item, itemCompatibility)}
-                                  type="button"
-                                >
-                                  Usar esta referência
-                                </Button>
-                              </div>
                             </article>
                           );
                         }) : (
@@ -3456,6 +3663,41 @@ export function IntelligentProductRegistrationPage() {
                       </div>
                     </div>
 
+                    {selectedMercadoLivreDetailItem ? (
+                      <div
+                        className="fixed inset-0 z-[60] grid place-items-center bg-black/80 p-3 lg:sticky lg:inset-auto lg:top-4 lg:z-auto lg:block lg:border-l lg:border-matrix-gold/30 lg:bg-transparent lg:pl-3 lg:pr-0"
+                        onMouseDown={(event) => {
+                          if (event.currentTarget === event.target) closeMercadoLivreDetails();
+                        }}
+                      >
+                        <aside
+                          aria-labelledby="mercado-livre-reference-details-title"
+                          className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-matrix-gold/40 bg-matrix-panel shadow-glow lg:max-h-[calc(100dvh-8rem)] lg:max-w-none"
+                        >
+                          <MercadoLivreReferenceDetails
+                            compatibility={selectedMercadoLivreResultCompatibility}
+                            error={selectedMercadoLivreDetailError}
+                            item={selectedMercadoLivreDetailItem}
+                            loading={selectedMercadoLivreDetailLoading}
+                            onClose={closeMercadoLivreDetails}
+                            onUse={() => {
+                              const item = selectedMercadoLivreDetailItem;
+                              const compatibility = selectedMercadoLivreResultCompatibility;
+                              closeMercadoLivreDetails();
+                              selectMercadoLivreSuggestion(item, compatibility);
+                            }}
+                          />
+                        </aside>
+                      </div>
+                    ) : (
+                      <aside className="hidden min-h-[28rem] items-center justify-center rounded-lg border border-dashed border-matrix-border bg-matrix-panel/45 p-6 text-center lg:flex">
+                        <div className="max-w-xs">
+                          <PackageSearch className="mx-auto h-8 w-8 text-matrix-goldDark" />
+                          <h3 className="mt-3 font-semibold text-matrix-fg">Detalhes do anúncio selecionado</h3>
+                          <p className="mt-2 text-sm leading-6 text-matrix-muted">Selecione um resultado para conferir os detalhes.</p>
+                        </div>
+                      </aside>
+                    )}
                   </div>
                 ) : mercadoLivreSearch ? (
                   <div className="px-4 py-5 text-sm text-matrix-muted">
@@ -3512,114 +3754,6 @@ export function IntelligentProductRegistrationPage() {
           </div>
         </main>
       </div>
-
-      {selectedMercadoLivreDetailItem ? (
-        <div
-          aria-labelledby="mercado-livre-reference-details-title"
-          aria-modal="true"
-          className="fixed inset-0 z-[60] grid place-items-center bg-black/80 p-3 sm:p-4"
-          onMouseDown={(event) => {
-            if (event.currentTarget === event.target) closeMercadoLivreDetails();
-          }}
-          role="dialog"
-        >
-          <div className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-matrix-gold/40 bg-matrix-panel shadow-glow sm:max-h-[min(90dvh,760px)]">
-            <div className="flex items-start justify-between gap-3 border-b border-matrix-border px-4 py-3 sm:px-5">
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h3 id="mercado-livre-reference-details-title" className="font-semibold text-matrix-fg">
-                    Detalhes da referência
-                  </h3>
-                  {selectedMercadoLivreResultCompatibility ? (
-                    <Badge tone={compatibilityTone(selectedMercadoLivreResultCompatibility.level)}>
-                      {productSuggestionBadgeLabel(selectedMercadoLivreResultCompatibility.level)}
-                    </Badge>
-                  ) : null}
-                </div>
-                <p className="mt-1 text-xs text-matrix-muted">Revise esta referência antes de usar.</p>
-              </div>
-              <button
-                aria-label="Fechar detalhes da referência"
-                className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-matrix-border text-matrix-muted transition hover:border-matrix-gold/50 hover:text-matrix-fg"
-                onClick={closeMercadoLivreDetails}
-                type="button"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <div className="matrix-scroll min-h-0 flex-1 overflow-x-hidden overflow-y-auto p-4 sm:p-5">
-              {selectedMercadoLivreDetailLoading ? (
-                <p className="mb-4 rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/18 px-3 py-2 text-xs text-matrix-muted">
-                  Carregando detalhes desta referência.
-                </p>
-              ) : null}
-              {selectedMercadoLivreDetailError ? (
-                <p className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-100">
-                  {selectedMercadoLivreDetailError}
-                </p>
-              ) : null}
-
-              <div className="grid gap-5 md:grid-cols-[minmax(180px,280px)_minmax(0,1fr)] md:items-start">
-                <MercadoLivreImageGallery
-                  item={selectedMercadoLivreDetailItem}
-                  alt={selectedMercadoLivreDetailItem.title?.trim() || selectedMercadoLivreDetailItem.externalItemId || "Anúncio Mercado Livre"}
-                />
-                <div className="min-w-0">
-                  <h4 className="text-lg font-semibold leading-snug text-matrix-fg">
-                    {selectedMercadoLivreDetailItem.title?.trim() || selectedMercadoLivreDetailItem.externalItemId || "Resultado Mercado Livre"}
-                  </h4>
-                  {selectedMercadoLivreDetailItem.brand ? (
-                    <p className="mt-2 text-sm text-matrix-muted">Marca: {selectedMercadoLivreDetailItem.brand}</p>
-                  ) : null}
-                  {typeof selectedMercadoLivreDetailItem.price === "number" ? (
-                    <p className="mt-3 text-xl font-semibold text-matrix-fg">{formatCurrency(selectedMercadoLivreDetailItem.price)}</p>
-                  ) : null}
-
-                  {selectedMercadoLivreDetailAttributes.length ? (
-                    <div className="mt-4">
-                      <p className="text-xs font-semibold uppercase text-matrix-goldDark">Informações do anúncio</p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {selectedMercadoLivreDetailAttributes.map((attribute, attributeIndex) => (
-                          <span
-                            key={`${attribute.id ?? attribute.name ?? "atributo"}-${attributeIndex}`}
-                            className="rounded-md border border-matrix-border bg-matrix-panel2 px-2 py-1 text-xs text-matrix-muted"
-                          >
-                            {attribute.name ?? attribute.id}: <span className="text-matrix-fg">{attribute.value}</span>
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {productSuggestionNeedsAttention(selectedMercadoLivreResultCompatibility) ? (
-                    <p className="mt-4 rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/18 px-3 py-2 text-sm text-matrix-fg">
-                      Confira as fotos e o título antes de salvar.
-                    </p>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap justify-end gap-2 border-t border-matrix-border px-4 py-3 sm:px-5">
-              <Button onClick={closeMercadoLivreDetails} type="button" variant="secondary">
-                Fechar
-              </Button>
-              <Button
-                onClick={() => {
-                  const item = selectedMercadoLivreDetailItem;
-                  const compatibility = selectedMercadoLivreResultCompatibility;
-                  closeMercadoLivreDetails();
-                  selectMercadoLivreSuggestion(item, compatibility);
-                }}
-                type="button"
-              >
-                Usar esta referência
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       {activePanel ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/80 p-0 sm:p-4">
