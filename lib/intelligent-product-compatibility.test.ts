@@ -4,8 +4,10 @@ import {
   buildProductReferenceSearchQueries,
   calculateProductSuggestionCompatibility,
   extractProductTitleSignals,
-  isProductSuggestionPreviewAllowed,
-  shouldContinueCompatibleReferenceSearch
+  productSuggestionBadgeLabel,
+  productSuggestionNeedsAttention,
+  shouldContinueReferenceSearch,
+  sortProductSuggestionResults
 } from "./intelligent-product-compatibility";
 
 const localSensor = {
@@ -21,7 +23,7 @@ test("classifies Titan 160 Magnetron as a different product", () => {
   });
 
   assert.equal(result.level, "DIFFERENT");
-  assert.equal(isProductSuggestionPreviewAllowed(result), false);
+  assert.equal(productSuggestionNeedsAttention(result), true);
   assert.ok(result.blockingReasons.some((reason) => reason.includes("Modelo")));
 });
 
@@ -32,7 +34,7 @@ test("classifies the matching PCX 150 and Lead 110 reference as high compatibili
   });
 
   assert.equal(result.level, "HIGH");
-  assert.equal(isProductSuggestionPreviewAllowed(result), true);
+  assert.equal(productSuggestionNeedsAttention(result), false);
 });
 
 test("blocks the same part type when the application model is different", () => {
@@ -51,7 +53,7 @@ test("keeps a matching model with a different relevant brand below the preview t
   });
 
   assert.equal(result.level, "LOW");
-  assert.equal(isProductSuggestionPreviewAllowed(result), false);
+  assert.equal(productSuggestionNeedsAttention(result), true);
 });
 
 test("gives exact GTIN the maximum compatibility priority", () => {
@@ -61,7 +63,7 @@ test("gives exact GTIN the maximum compatibility priority", () => {
   );
 
   assert.equal(result.level, "HIGH");
-  assert.equal(isProductSuggestionPreviewAllowed(result), true);
+  assert.equal(productSuggestionNeedsAttention(result), false);
 });
 
 test("blocks divergent GTIN values", () => {
@@ -71,17 +73,17 @@ test("blocks divergent GTIN values", () => {
   );
 
   assert.equal(result.level, "DIFFERENT");
-  assert.equal(isProductSuggestionPreviewAllowed(result), false);
+  assert.equal(productSuggestionNeedsAttention(result), true);
 });
 
-test("does not open the preview for a generic title without application evidence", () => {
+test("marks a generic title without application evidence for attention", () => {
   const result = calculateProductSuggestionCompatibility(
     { name: "Sensor hibrido" },
     { title: "Sensor hibrido" }
   );
 
   assert.ok(result.level === "LOW" || result.level === "INSUFFICIENT");
-  assert.equal(isProductSuggestionPreviewAllowed(result), false);
+  assert.equal(productSuggestionNeedsAttention(result), true);
 });
 
 test("builds staged title queries without falling back to the generic part name", () => {
@@ -115,36 +117,62 @@ test("keeps SKU 8650 applications in search and blocks another motorcycle model"
   assert.ok(queries.some((query) => query.toLocaleLowerCase("pt-BR").includes("twister 250") && query.toLocaleLowerCase("pt-BR").includes("cb 300")));
   assert.equal(queries.some((query) => query.toLocaleLowerCase("pt-BR") === "tubo interno bengala"), false);
   assert.equal(result.level, "DIFFERENT");
-  assert.equal(isProductSuggestionPreviewAllowed(result), false);
+  assert.equal(productSuggestionNeedsAttention(result), true);
 });
 
-test("allows a controlled second page and stops at the configured page limit", () => {
-  const firstPageResult = calculateProductSuggestionCompatibility(localSensor, {
-    title: "Sensor Hibrido Titan160 Magnetron",
-    brand: "Magnetron"
-  });
-  const secondPageResult = calculateProductSuggestionCompatibility(localSensor, {
-    title: "Sensor Hibrido PCX 150 Lead 110 T-Mac",
-    brand: "T-Mac"
-  });
-
+test("continues a controlled search independently of compatibility and stops at the page limit", () => {
   assert.equal(
-    shouldContinueCompatibleReferenceSearch({
+    shouldContinueReferenceSearch({
       page: 1,
       maxPages: 3,
-      hasNextPage: true,
-      hasAcceptableResult: isProductSuggestionPreviewAllowed(firstPageResult)
+      hasNextPage: true
     }),
     true
   );
-  assert.equal(isProductSuggestionPreviewAllowed(secondPageResult), true);
   assert.equal(
-    shouldContinueCompatibleReferenceSearch({
+    shouldContinueReferenceSearch({
       page: 3,
       maxPages: 3,
-      hasNextPage: true,
-      hasAcceptableResult: false
+      hasNextPage: true
     }),
     false
   );
+});
+
+test("uses simple compatibility badges without turning them into access rules", () => {
+  assert.equal(productSuggestionBadgeLabel("HIGH"), "Mais provável");
+  assert.equal(productSuggestionBadgeLabel("MEDIUM"), "Possível referência");
+  assert.equal(productSuggestionBadgeLabel("LOW"), "Revisar com atenção");
+  assert.equal(productSuggestionBadgeLabel("DIFFERENT"), "Pouco relacionado");
+  assert.equal(productSuggestionBadgeLabel("INSUFFICIENT"), "Pouco relacionado");
+});
+
+test("keeps all 30 SKU 10309 results and ranks the most likely references first", () => {
+  const localProduct = {
+    name: "ROLETE EMB PRIM PCX 160 2023/25 DANIDREA",
+    brand: "DANIDREA"
+  };
+  const titles = [
+    "Rolete Embreagem Primaria PCX 160 2023 2025 Danidrea",
+    "Rolete Embreagem Primaria Honda PCX 160 2023 a 2025",
+    ...Array.from({ length: 8 }, (_, index) => `Kit Embreagem PCX 160 2023 2025 item ${index + 1}`),
+    ...Array.from({ length: 20 }, (_, index) => `Produto pouco relacionado modelo ${index + 1}`)
+  ];
+  const results = titles.map((title, originalIndex) => ({
+    id: `MLB${String(originalIndex + 1).padStart(10, "0")}`,
+    title,
+    originalIndex,
+    useful: true,
+    compatibility: calculateProductSuggestionCompatibility(localProduct, { title })
+  }));
+
+  const sorted = sortProductSuggestionResults(results);
+
+  assert.equal(sorted.length, 30);
+  assert.deepEqual(
+    new Set(sorted.map((result) => result.id)),
+    new Set(results.map((result) => result.id))
+  );
+  assert.match(sorted[0].title, /Rolete Embreagem Primaria PCX 160/i);
+  assert.ok(sorted.findIndex((result) => result.title.startsWith("Kit Embreagem")) < sorted.findIndex((result) => result.title.startsWith("Produto pouco relacionado")));
 });

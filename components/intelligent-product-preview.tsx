@@ -11,6 +11,7 @@ type IntelligentProductPreviewProps = {
   showBrand: boolean;
   images: string[];
   selectedIndex: number;
+  notice?: string | null;
   saving: boolean;
   canSave: boolean;
   onTitleChange: (value: string) => void;
@@ -29,6 +30,7 @@ export function IntelligentProductPreview({
   showBrand,
   images,
   selectedIndex,
+  notice,
   saving,
   canSave,
   onTitleChange,
@@ -49,6 +51,11 @@ export function IntelligentProductPreview({
         <div>
           <h4 className="text-lg font-semibold text-matrix-goldDark">Prévia do produto</h4>
           <p className="mt-1 text-sm text-matrix-muted">Confira o título e as fotos antes de salvar.</p>
+          {notice ? (
+            <p className="mt-3 rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/18 px-3 py-2 text-sm text-matrix-fg">
+              {notice}
+            </p>
+          ) : null}
         </div>
 
         <div className="mt-5 grid gap-5 lg:grid-cols-[minmax(0,1.05fr)_minmax(18rem,1fr)] lg:items-start">

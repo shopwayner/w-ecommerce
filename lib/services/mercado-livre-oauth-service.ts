@@ -6,11 +6,7 @@ import { decryptSecret, encryptSecret } from "@/lib/security/encryption";
 import { getUserAccountContext } from "@/lib/services/account-context-service";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { sanitizeLogPayload } from "@/lib/utils";
-import {
-  buildProductReferenceSearchQueries,
-  calculateProductSuggestionCompatibility,
-  isProductSuggestionPreviewAllowed
-} from "@/lib/intelligent-product-compatibility";
+import { buildProductReferenceSearchQueries } from "@/lib/intelligent-product-compatibility";
 
 const tokenUrl = "https://api.mercadolibre.com/oauth/token";
 const apiBaseUrl = "https://api.mercadolibre.com";
@@ -268,33 +264,6 @@ function mergeUniqueMercadoLivreSearchItems(
     merged.push(item);
   }
   return merged;
-}
-
-function hasAcceptableMercadoLivreReference(
-  localProduct: LocalProductSearchRecord | null,
-  items: NormalizedMercadoLivreSearchItem[]
-) {
-  if (!localProduct) return false;
-  return items.some((item) =>
-    isProductSuggestionPreviewAllowed(
-      calculateProductSuggestionCompatibility(
-        {
-          name: localProduct.name,
-          gtin: localProduct.ean,
-          brand: localProduct.brand
-        },
-        {
-          title: item.title,
-          gtin: item.gtin,
-          brand: item.brand,
-          categoryId: item.categoryId,
-          categoryName: item.categoryName,
-          categoryPath: item.categoryPath,
-          attributes: item.attributes
-        }
-      )
-    )
-  );
 }
 
 function pauseMercadoLivreTitleSearch() {
@@ -784,16 +753,16 @@ function withMercadoLivreDataAvailability(
   };
 }
 
-function prioritizeMercadoLivreSearchItems(items: NormalizedMercadoLivreSearchItem[], pageSize: number) {
+function prioritizeMercadoLivreSearchItems(items: NormalizedMercadoLivreSearchItem[]) {
   const useful = items.filter(isUsefulMercadoLivreSearchItem);
   const incomplete = items.filter((item) => !isUsefulMercadoLivreSearchItem(item));
 
   return {
-    items: [...useful.slice(0, pageSize), ...incomplete],
+    items: [...useful, ...incomplete],
     analyzedResultsCount: items.length,
     usefulResultsCount: useful.length,
-    displayedResultsCount: Math.min(useful.length, pageSize),
-    hiddenIncompleteResultsCount: incomplete.length
+    displayedResultsCount: items.length,
+    hiddenIncompleteResultsCount: 0
   };
 }
 
@@ -1757,7 +1726,6 @@ export class MercadoLivreOAuthService {
 
       for (const searchValue of titleSearchQueries) {
         if (titleSearchQueriesAttempted >= mercadoLivreTitleSearchMaxQueries) break;
-        if (hasAcceptableMercadoLivreReference(localLookup.product, items)) break;
         const normalizedSearchValue = searchValue.trim().toLocaleLowerCase("pt-BR").replace(/\s+/g, " ");
         if (attemptedQueries.has(normalizedSearchValue)) continue;
         attemptedQueries.add(normalizedSearchValue);
@@ -1780,16 +1748,13 @@ export class MercadoLivreOAuthService {
       if (titleSearchQueriesAttempted > 1) {
         warnings.push("A busca por titulo foi refinada mantendo tipo da peca, modelo, aplicacao e marca quando disponiveis.");
       }
-      if (!hasAcceptableMercadoLivreReference(localLookup.product, items)) {
-        warnings.push("Nenhuma referencia compativel foi encontrada nas consultas seguras por titulo.");
-      }
     }
 
     if (mercadoLivreError?.httpStatus === 403) {
       warnings.push(mercadoLivreSearchBlockedWarning);
     }
 
-    const prioritizedSearchItems = prioritizeMercadoLivreSearchItems(items, pagingInput.pageSize);
+    const prioritizedSearchItems = prioritizeMercadoLivreSearchItems(items);
     const enrichedItems = prioritizedSearchItems.items;
 
     return {

@@ -345,17 +345,63 @@ export function compatibilityLabel(level: ProductSuggestionCompatibilityLevel) {
   return "Dados insuficientes";
 }
 
-export function isProductSuggestionPreviewAllowed(result: ProductSuggestionCompatibilityResult | null | undefined) {
-  return result?.level === "HIGH" || result?.level === "MEDIUM";
+export function productSuggestionBadgeLabel(level: ProductSuggestionCompatibilityLevel) {
+  if (level === "HIGH") return "Mais provável";
+  if (level === "MEDIUM") return "Possível referência";
+  if (level === "LOW") return "Revisar com atenção";
+  return "Pouco relacionado";
 }
 
-export function shouldContinueCompatibleReferenceSearch(input: {
+export function productSuggestionNeedsAttention(
+  result: ProductSuggestionCompatibilityResult | null | undefined
+) {
+  return result?.level === "LOW" || result?.level === "DIFFERENT" || result?.level === "INSUFFICIENT";
+}
+
+function productSuggestionOrder(level: ProductSuggestionCompatibilityLevel | null | undefined) {
+  if (level === "HIGH") return 4;
+  if (level === "MEDIUM") return 3;
+  if (level === "LOW") return 2;
+  if (level === "DIFFERENT" || level === "INSUFFICIENT") return 1;
+  return 0;
+}
+
+export function sortProductSuggestionResults<
+  T extends {
+    compatibility: ProductSuggestionCompatibilityResult | null;
+    originalIndex: number;
+    useful?: boolean;
+  }
+>(results: readonly T[]) {
+  return [...results].sort((left, right) => {
+    const levelDifference = productSuggestionOrder(right.compatibility?.level) - productSuggestionOrder(left.compatibility?.level);
+    if (levelDifference) return levelDifference;
+
+    const scoreDifference = (right.compatibility?.score ?? -1) - (left.compatibility?.score ?? -1);
+    if (scoreDifference) return scoreDifference;
+
+    const gtinDifference = Number(right.compatibility?.gtin.match === true) - Number(left.compatibility?.gtin.match === true);
+    if (gtinDifference) return gtinDifference;
+
+    const brandDifference = Number(right.compatibility?.brand.match === true) - Number(left.compatibility?.brand.match === true);
+    if (brandDifference) return brandDifference;
+
+    const wordDifference = (right.compatibility?.matchedWords.length ?? 0) - (left.compatibility?.matchedWords.length ?? 0);
+    if (wordDifference) return wordDifference;
+
+    const usefulnessDifference = Number(right.useful === true) - Number(left.useful === true);
+    if (usefulnessDifference) return usefulnessDifference;
+
+    return left.originalIndex - right.originalIndex;
+  });
+}
+
+export function shouldContinueReferenceSearch(input: {
   page: number;
   maxPages: number;
   hasNextPage: boolean;
-  hasAcceptableResult: boolean;
 }) {
-  return !input.hasAcceptableResult && input.hasNextPage && input.page < input.maxPages;
+  return input.hasNextPage && input.page < input.maxPages;
 }
 
 export function calculateProductSuggestionCompatibility(

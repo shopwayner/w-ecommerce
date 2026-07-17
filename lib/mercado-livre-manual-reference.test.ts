@@ -6,7 +6,7 @@ import {
 } from "./mercado-livre-manual-reference";
 import {
   calculateProductSuggestionCompatibility,
-  isProductSuggestionPreviewAllowed
+  productSuggestionNeedsAttention
 } from "./intelligent-product-compatibility";
 
 test("accepts a Mercado Livre item ID", () => {
@@ -101,10 +101,10 @@ test("allows a compatible manually informed listing", () => {
   });
 
   assert.equal(compatibility.level, "HIGH");
-  assert.equal(isProductSuggestionPreviewAllowed(compatibility), true);
+  assert.equal(productSuggestionNeedsAttention(compatibility), false);
 });
 
-test("blocks a divergent GTIN in the manual flow", () => {
+test("keeps a divergent GTIN available with an attention warning in the manual flow", () => {
   const compatibility = calculateProductSuggestionCompatibility(localProduct, {
     title: "Sensor Hibrido PCX 150 Lead 110 T-Mac",
     brand: "T-Mac",
@@ -112,10 +112,10 @@ test("blocks a divergent GTIN in the manual flow", () => {
   });
 
   assert.equal(compatibility.level, "DIFFERENT");
-  assert.equal(isProductSuggestionPreviewAllowed(compatibility), false);
+  assert.equal(productSuggestionNeedsAttention(compatibility), true);
 });
 
-test("blocks incompatible model and relevant brand in the manual flow", () => {
+test("keeps incompatible model and brand references available with an attention warning", () => {
   const differentModel = calculateProductSuggestionCompatibility(localProduct, {
     title: "Sensor Hibrido Titan 160 T-Mac",
     brand: "T-Mac"
@@ -125,6 +125,6 @@ test("blocks incompatible model and relevant brand in the manual flow", () => {
     brand: "Magnetron"
   });
 
-  assert.equal(isProductSuggestionPreviewAllowed(differentModel), false);
-  assert.equal(isProductSuggestionPreviewAllowed(differentBrand), false);
+  assert.equal(productSuggestionNeedsAttention(differentModel), true);
+  assert.equal(productSuggestionNeedsAttention(differentBrand), true);
 });
