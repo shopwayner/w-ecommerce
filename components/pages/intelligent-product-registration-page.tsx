@@ -633,15 +633,6 @@ function mercadoLivrePublicSearchUrl(value: string | null | undefined) {
   return `https://lista.mercadolivre.com.br/${encodeURIComponent(value)}`;
 }
 
-function mercadoLivreItemPublicUrl(item: MercadoLivreSearchItem) {
-  if (item.permalink) return item.permalink;
-  const id = item.externalItemId?.trim();
-  if (id && /^MLB\d+$/i.test(id)) return `https://produto.mercadolivre.com.br/MLB-${id.replace(/^MLB/i, "")}`;
-  if (item.catalogProductId && /^MLB\d+$/i.test(item.catalogProductId)) return `https://www.mercadolivre.com.br/p/${item.catalogProductId.toUpperCase()}`;
-  if (!id) return null;
-  return mercadoLivrePublicSearchUrl(id);
-}
-
 function mercadoLivreSourceLabel(source: string | null | undefined) {
   if (source === "MERCADO_LIVRE_PRODUCT_SEARCH") return "Catalogo Mercado Livre";
   if (source === "MERCADO_LIVRE_PUBLIC_SEARCH") return "Busca publica Mercado Livre";
@@ -726,30 +717,11 @@ function mercadoLivreItemToCompatibilitySuggestion(item: MercadoLivreSearchItem)
   };
 }
 
-function CompatibilityDetails({
-  compatibility
-}: {
-  compatibility: ProductSuggestionCompatibilityResult;
-}) {
-  const needsAttention = productSuggestionNeedsAttention(compatibility);
-
-  return (
-    <div className="mt-2 rounded-md border border-matrix-border bg-matrix-panel2/60 p-3 text-xs text-matrix-muted">
-      <Badge tone={compatibilityTone(compatibility.level)}>{productSuggestionBadgeLabel(compatibility.level)}</Badge>
-      <p className="mt-2">
-        {needsAttention
-          ? "Confira as fotos e o título antes de salvar."
-          : "Revise a referência antes de continuar."}
-      </p>
-    </div>
-  );
-}
-
 function ProductImage({ src, alt, size = "md" }: { src: string | null | undefined; alt: string; size?: "sm" | "md" }) {
   const imageSize = size === "sm" ? 56 : 64;
   return (
-    <span className={`${size === "sm" ? "h-14 w-14" : "h-16 w-16"} grid shrink-0 place-items-center overflow-hidden rounded-md border border-matrix-border bg-white`}>
-      {src ? <Image alt={alt} className="h-full w-full object-contain" height={imageSize} src={src} unoptimized width={imageSize} /> : <ImageIcon className="h-6 w-6 text-matrix-muted" />}
+    <span className={`${size === "sm" ? "h-14 w-14" : "h-16 w-16"} grid shrink-0 place-items-center overflow-hidden rounded-md border border-matrix-border ${src ? "bg-white" : "bg-matrix-panel"}`}>
+      {src ? <Image alt={alt} className="h-full w-full object-contain" height={imageSize} src={src} unoptimized width={imageSize} /> : <ImageIcon className="h-5 w-5 text-matrix-muted/70" />}
     </span>
   );
 }
@@ -823,7 +795,7 @@ function MercadoLivreImageGallery({ item, alt }: { item: MercadoLivreSearchItem;
   return (
     <div className="min-w-0">
       <div
-        className="grid min-h-48 w-full cursor-zoom-in place-items-center overflow-hidden rounded-lg border border-matrix-gold/35 bg-white p-2 sm:min-h-64"
+        className={`grid w-full place-items-center overflow-hidden rounded-lg border p-2 ${selected ? "min-h-48 cursor-zoom-in border-matrix-gold/35 bg-white sm:min-h-64" : "h-28 border-matrix-border bg-matrix-panel2"}`}
         onMouseLeave={() => setZoom((current) => ({ ...current, active: false }))}
         onMouseMove={moveZoom}
       >
@@ -841,7 +813,7 @@ function MercadoLivreImageGallery({ item, alt }: { item: MercadoLivreSearchItem;
             width={360}
           />
         ) : (
-          <ImageIcon className="h-10 w-10 text-matrix-muted" />
+          <ImageIcon className="h-7 w-7 text-matrix-muted/70" />
         )}
       </div>
       {images.length ? (
@@ -1015,38 +987,6 @@ function mercadoLivreSellerLabel(item: MercadoLivreSearchItem) {
   return optionalItemText(item, ["sellerName", "sellerNickname", "seller", "sellerId", "sellerCustomField"]);
 }
 
-function mercadoLivreReputationLabel(item: MercadoLivreSearchItem) {
-  return optionalItemText(item, ["sellerReputation", "sellerReputationLevel", "reputation", "sellerLevel"]);
-}
-
-function mercadoLivreSalesLabel(item: MercadoLivreSearchItem) {
-  if (typeof item.soldQuantity === "number") return `${item.soldQuantity.toLocaleString("pt-BR")} venda(s)`;
-  if (typeof item.sellerTransactionsCompleted === "number") return `${item.sellerTransactionsCompleted.toLocaleString("pt-BR")} transações concluídas`;
-  if (typeof item.sellerTransactionsTotal === "number") return `${item.sellerTransactionsTotal.toLocaleString("pt-BR")} transações`;
-  const value = optionalItemText(item, ["soldQuantity", "soldCount", "sales", "sold", "soldQuantityText", "salesCount"]);
-  if (!value) return null;
-  if (/^\d+$/.test(value)) return `${Number(value).toLocaleString("pt-BR")} venda(s)`;
-  return value;
-}
-
-function mercadoLivreLocationLabel(item: MercadoLivreSearchItem) {
-  const direct = optionalItemText(item, ["location", "sellerLocation"]);
-  if (direct) return direct;
-  const city = optionalItemText(item, ["city", "sellerCity"]);
-  const state = optionalItemText(item, ["state", "sellerState"]);
-  return [city, state].filter(Boolean).join(" - ") || null;
-}
-
-function mercadoLivreConditionLabel(item: MercadoLivreSearchItem) {
-  const value = optionalItemText(item, ["condition", "itemCondition"]) ?? item.status ?? null;
-  if (value === "new") return "Novo";
-  if (value === "used") return "Usado";
-  if (value === "active") return "Ativo";
-  if (value === "paused") return "Pausado";
-  if (value === "closed") return "Encerrado";
-  return value;
-}
-
 function mercadoLivreListingTypeLabel(item: MercadoLivreSearchItem) {
   return optionalItemText(item, ["listingTypeLabel", "listingTypeId"]);
 }
@@ -1091,20 +1031,6 @@ function mercadoLivreDataCompleteness(item: MercadoLivreSearchItem) {
   }
 
   return { label: "Poucos dados", tone: "muted" as const };
-}
-
-function mercadoLivreIncompleteNotice(item: MercadoLivreSearchItem) {
-  if (item.dataAvailabilityMessage?.trim()) return item.dataAvailabilityMessage;
-
-  if (item.dataAvailability === "catalog_without_public_offer") {
-    return "Este resultado veio do Catalogo Mercado Livre, mas a API oficial nao retornou uma oferta publica vencedora para completar preco, vendedor e anuncio.";
-  }
-
-  if (item.source === "MERCADO_LIVRE_PRODUCT_SEARCH" && item.catalogProductId && !item.externalItemId && typeof item.price !== "number") {
-    return "Produto de catalogo localizado. A API oficial ainda nao retornou uma oferta publica para este resultado.";
-  }
-
-  return "Alguns dados de oferta nao foram retornados pela API do Mercado Livre para este resultado.";
 }
 
 function isUsefulMercadoLivreCard(item: MercadoLivreSearchItem) {
@@ -1339,16 +1265,7 @@ export function IntelligentProductRegistrationPage() {
         ? mercadoLivreDetailError.message
         : null;
   const selectedMercadoLivreDetailAttributes =
-    selectedMercadoLivreDetailItem?.attributes?.filter((attribute) => (attribute.id || attribute.name) && attribute.value).slice(0, 12) ?? [];
-  const selectedMercadoLivreDetailSeller = selectedMercadoLivreDetailItem ? mercadoLivreSellerLabel(selectedMercadoLivreDetailItem) : null;
-  const selectedMercadoLivreDetailReputation = selectedMercadoLivreDetailItem ? mercadoLivreReputationLabel(selectedMercadoLivreDetailItem) : null;
-  const selectedMercadoLivreDetailSales = selectedMercadoLivreDetailItem ? mercadoLivreSalesLabel(selectedMercadoLivreDetailItem) : null;
-  const selectedMercadoLivreDetailLocation = selectedMercadoLivreDetailItem ? mercadoLivreLocationLabel(selectedMercadoLivreDetailItem) : null;
-  const selectedMercadoLivreDetailCondition = selectedMercadoLivreDetailItem ? mercadoLivreConditionLabel(selectedMercadoLivreDetailItem) : null;
-  const selectedMercadoLivreDetailListingType = selectedMercadoLivreDetailItem ? mercadoLivreListingTypeLabel(selectedMercadoLivreDetailItem) : null;
-  const selectedMercadoLivreDetailCategory = selectedMercadoLivreDetailItem ? mercadoLivreCategoryLabel(selectedMercadoLivreDetailItem) : null;
-  const selectedMercadoLivreDetailUrl = selectedMercadoLivreDetailItem ? mercadoLivreItemPublicUrl(selectedMercadoLivreDetailItem) : null;
-  const selectedMercadoLivreDataCompleteness = selectedMercadoLivreDetailItem ? mercadoLivreDataCompleteness(selectedMercadoLivreDetailItem) : null;
+    selectedMercadoLivreDetailItem?.attributes?.filter((attribute) => (attribute.id || attribute.name) && attribute.value).slice(0, 8) ?? [];
   useEffect(() => {
     const selectedStillExists = filteredMercadoLivreItems.some(({ item, rankedIndex }) => mercadoLivreItemKey(item, rankedIndex) === selectedMercadoLivreResultKey);
     if (selectedMercadoLivreResultKey && !selectedStillExists) setSelectedMercadoLivreResultKey(null);
@@ -2227,6 +2144,23 @@ export function IntelligentProductRegistrationPage() {
     });
   }, [loadMercadoLivreItemDetail, mercadoLivreDetailCompletedById, mercadoLivreDetailErrorsById]);
 
+  const closeMercadoLivreDetails = useCallback(() => {
+    setSelectedMercadoLivreResultKey(null);
+    setMercadoLivreDetailLoadingKey(null);
+    setMercadoLivreDetailError(null);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedMercadoLivreDetailItem) return;
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") closeMercadoLivreDetails();
+    }
+
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [closeMercadoLivreDetails, selectedMercadoLivreDetailItem]);
+
   useEffect(() => {
     const pageItems = mercadoLivreSearch?.items ?? [];
     if (!pageItems.length) return;
@@ -2774,7 +2708,7 @@ export function IntelligentProductRegistrationPage() {
         </div>
       </Card>
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-[330px_minmax(0,1fr)]">
+      <div className="mt-4 grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
         <aside className="space-y-4 rounded-lg border border-matrix-border bg-matrix-panel/88 p-4 shadow-glow">
           <form onSubmit={search}>
             <div className="flex items-center gap-2 text-matrix-goldDark">
@@ -3307,8 +3241,8 @@ export function IntelligentProductRegistrationPage() {
                   ) : null}
                 </div>
                 {rankedMercadoLivreItems.length ? (
-                  <div className="grid min-h-0 gap-4 p-4 2xl:grid-cols-[minmax(0,0.95fr)_minmax(360px,1.05fr)]">
-                    <div className="flex max-h-[calc(100vh-8rem)] min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-matrix-border bg-matrix-panel/72">
+                  <div className="p-4">
+                    <div className="min-w-0 overflow-hidden rounded-lg border border-matrix-border bg-matrix-panel/72">
                       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-matrix-border px-4 py-3">
                         <div>
                           <p className="flex items-center gap-2 font-semibold text-matrix-fg">
@@ -3455,7 +3389,7 @@ export function IntelligentProductRegistrationPage() {
                           </div>
                         </div>
                       </div>
-                      <div className="matrix-scroll min-h-0 flex-1 space-y-3 overflow-x-hidden overflow-y-auto p-3">
+                      <div className="grid gap-3 p-3 sm:grid-cols-2 lg:grid-cols-3">
                         {filteredMercadoLivreItems.length ? filteredMercadoLivreItems.map(({ item, compatibility: itemCompatibility, rankedIndex }) => {
                           const itemKey = mercadoLivreItemKey(item, rankedIndex);
                           const isSelected = itemKey === selectedMercadoLivreResultKeyForRender;
@@ -3463,12 +3397,12 @@ export function IntelligentProductRegistrationPage() {
                           const hasPrice = typeof item.price === "number";
 
                           return (
-                            <div
+                            <article
                               key={itemKey}
-                              className={`h-auto min-h-fit rounded-lg border p-3 transition ${
+                              className={`flex min-h-40 flex-col rounded-lg border p-3 transition ${
                                 isSelected
                                   ? "border-matrix-gold bg-matrix-goldSoft/20 shadow-glow"
-                                  : "border-matrix-border bg-matrix-panel2/72"
+                                  : "border-matrix-border bg-matrix-panel2/72 hover:border-matrix-gold/45"
                               }`}
                             >
                               <button
@@ -3491,14 +3425,24 @@ export function IntelligentProductRegistrationPage() {
                                   </div>
                                 </div>
                               </button>
-                              <Button
-                                className="mt-3 w-full justify-center"
-                                onClick={() => selectMercadoLivreSuggestion(item, itemCompatibility)}
-                                type="button"
-                              >
-                                Usar esta referência
-                              </Button>
-                            </div>
+                              <div className="mt-auto flex flex-wrap justify-end gap-2 pt-3">
+                                <Button
+                                  className="min-h-8 px-2.5 py-1 text-xs"
+                                  onClick={() => void selectMercadoLivreResult(item, rankedIndex)}
+                                  type="button"
+                                  variant="secondary"
+                                >
+                                  Ver detalhes
+                                </Button>
+                                <Button
+                                  className="min-h-8 px-2.5 py-1 text-xs"
+                                  onClick={() => selectMercadoLivreSuggestion(item, itemCompatibility)}
+                                  type="button"
+                                >
+                                  Usar esta referência
+                                </Button>
+                              </div>
+                            </article>
                           );
                         }) : (
                           <div className="rounded-lg border border-dashed border-matrix-border bg-matrix-panel2/50 p-5 text-sm text-matrix-muted">
@@ -3512,163 +3456,6 @@ export function IntelligentProductRegistrationPage() {
                       </div>
                     </div>
 
-                    <div className="min-w-0 rounded-lg border border-matrix-border bg-matrix-panel/78 xl:sticky xl:top-4 xl:self-start">
-                      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-matrix-border px-4 py-3">
-                        <div>
-                          <p className="font-semibold text-matrix-fg">Detalhes do anuncio selecionado</p>
-                          <p className="text-xs text-matrix-muted">Revise as informacoes antes de carregar a sugestao para comparacao.</p>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          {selectedMercadoLivreDataCompleteness ? (
-                            <Badge tone={selectedMercadoLivreDataCompleteness.tone}>{selectedMercadoLivreDataCompleteness.label}</Badge>
-                          ) : null}
-                          {selectedMercadoLivreResultCompatibility ? (
-                            <Badge tone={compatibilityTone(selectedMercadoLivreResultCompatibility.level)}>
-                              {productSuggestionBadgeLabel(selectedMercadoLivreResultCompatibility.level)}
-                            </Badge>
-                          ) : (
-                            <Badge tone="muted">Revisao manual</Badge>
-                          )}
-                          {selectedMercadoLivreDetailListingType ? (
-                            <Badge tone={selectedMercadoLivreDetailListingType === "Premium" ? "success" : selectedMercadoLivreDetailListingType === "Clássico" || selectedMercadoLivreDetailListingType === "Classico" ? "info" : "muted"}>
-                              {selectedMercadoLivreDetailListingType}
-                            </Badge>
-                          ) : null}
-                        </div>
-                      </div>
-                      {selectedMercadoLivreDetailItem ? (
-                        <div className="matrix-scroll max-h-[calc(100vh-8rem)] overflow-x-hidden overflow-y-auto p-3 md:p-4">
-                          {selectedMercadoLivreDetailLoading ? (
-                            <div className="mb-4 rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/18 px-3 py-2 text-xs text-matrix-muted">
-                              Carregando detalhes completos deste anuncio em segundo plano. A lista basica ja esta disponivel para revisao.
-                            </div>
-                          ) : null}
-                          {selectedMercadoLivreDetailError ? (
-                            <div className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-100">
-                              {selectedMercadoLivreDetailError}
-                            </div>
-                          ) : null}
-                          <div className="grid gap-4 lg:grid-cols-[minmax(180px,260px)_minmax(0,1fr)]">
-                            <MercadoLivreImageGallery
-                              item={selectedMercadoLivreDetailItem}
-                              alt={selectedMercadoLivreDetailItem.title?.trim() || selectedMercadoLivreDetailItem.externalItemId || "Anuncio Mercado Livre"}
-                            />
-                            <div className="min-w-0">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <Badge tone="info">
-                                  <span className="inline-flex items-center gap-1">
-                                    <MercadoLivreLogo size={14} />
-                                    Mercado Livre
-                                  </span>
-                                </Badge>
-                                {selectedMercadoLivreDetailItem.categoryId ? <Badge tone="muted">{selectedMercadoLivreDetailItem.categoryId}</Badge> : null}
-                              </div>
-                              <h5 className="mt-3 text-lg font-semibold text-matrix-fg">{selectedMercadoLivreDetailItem.title?.trim() || selectedMercadoLivreDetailItem.externalItemId || "Anuncio Mercado Livre"}</h5>
-                              {typeof selectedMercadoLivreDetailItem.price === "number" ? (
-                                <p className="mt-3 text-2xl font-semibold text-matrix-fg">{formatCurrency(selectedMercadoLivreDetailItem.price)}</p>
-                              ) : null}
-                              <div className="mt-3 grid gap-2 text-sm text-matrix-muted sm:grid-cols-2">
-                                {selectedMercadoLivreDetailItem.gtin ? <span>GTIN/EAN: {selectedMercadoLivreDetailItem.gtin}</span> : null}
-                                {selectedMercadoLivreDetailCondition ? <span>Status/condicao: {selectedMercadoLivreDetailCondition}</span> : null}
-                                {selectedMercadoLivreDetailItem.brand ? <span>Marca: {selectedMercadoLivreDetailItem.brand}</span> : null}
-                                {selectedMercadoLivreDetailItem.sku ? <span>SKU: {selectedMercadoLivreDetailItem.sku}</span> : null}
-                                {selectedMercadoLivreDetailSeller ? <span>Vendedor: {selectedMercadoLivreDetailSeller}</span> : null}
-                                {selectedMercadoLivreDetailReputation ? <span>Reputacao: {selectedMercadoLivreDetailReputation}</span> : null}
-                                {selectedMercadoLivreDetailSales ? <span>Vendas: {selectedMercadoLivreDetailSales}</span> : null}
-                                {selectedMercadoLivreDetailListingType ? <span>Tipo: {selectedMercadoLivreDetailListingType}</span> : null}
-                                {selectedMercadoLivreDetailLocation ? <span>Localizacao: {selectedMercadoLivreDetailLocation}</span> : null}
-                                <span>Fonte: {mercadoLivreSourceLabel(selectedMercadoLivreDetailItem.source)}</span>
-                              </div>
-                              {selectedMercadoLivreDataCompleteness?.label !== "Dados completos" ? (
-                                <p className="mt-3 rounded-md border border-matrix-border bg-matrix-panel2/60 px-3 py-2 text-xs text-matrix-muted">
-                                  {mercadoLivreIncompleteNotice(selectedMercadoLivreDetailItem)}
-                                </p>
-                              ) : null}
-                              <div className="mt-3 flex flex-wrap gap-2 text-sm">
-                                {selectedMercadoLivreDetailUrl && selectedMercadoLivreDetailItem.externalItemId ? (
-                                  <a
-                                    className="inline-flex items-center gap-1 font-semibold text-matrix-goldDark hover:text-matrix-gold"
-                                    href={selectedMercadoLivreDetailUrl}
-                                    rel="noopener noreferrer"
-                                    target="_blank"
-                                  >
-                                    Anuncio {selectedMercadoLivreDetailItem.externalItemId}
-                                    <ExternalLink className="h-3.5 w-3.5" />
-                                  </a>
-                                ) : selectedMercadoLivreDetailItem.externalItemId ? (
-                                  <span className="text-matrix-muted">Anuncio: {selectedMercadoLivreDetailItem.externalItemId}</span>
-                                ) : null}
-                              </div>
-                            </div>
-                          </div>
-
-                          {selectedMercadoLivreDetailCategory || selectedMercadoLivreDetailItem.categoryId ? (
-                            <div className="mt-4 rounded-lg border border-matrix-border bg-matrix-panel2/62 p-3">
-                              <p className="font-semibold text-matrix-fg">Categoria no Mercado Livre</p>
-                              {selectedMercadoLivreDetailCategory ? <p className="mt-2 text-sm text-matrix-muted">{selectedMercadoLivreDetailCategory}</p> : null}
-                              {selectedMercadoLivreDetailItem.categoryId ? <p className="mt-1 text-xs text-matrix-muted">CategoryId: {selectedMercadoLivreDetailItem.categoryId}</p> : null}
-                            </div>
-                          ) : null}
-
-                          <div className="mt-4 rounded-lg border border-matrix-border bg-matrix-panel2/62 p-3">
-                            <p className="font-semibold text-matrix-fg">Variacoes / Atributos</p>
-                            {selectedMercadoLivreDetailAttributes.length ? (
-                              <div className="mt-3 flex flex-wrap gap-2">
-                                {selectedMercadoLivreDetailAttributes.map((attribute, attributeIndex) => (
-                                  <span key={`${attribute.id ?? attribute.name ?? "atributo"}-${attributeIndex}`} className="rounded-md border border-matrix-border bg-matrix-panel px-2 py-1 text-xs text-matrix-muted">
-                                    {attribute.name ?? attribute.id}: <span className="text-matrix-fg">{attribute.value}</span>
-                                  </span>
-                                ))}
-                              </div>
-                            ) : (
-                              <p className="mt-2 text-sm text-matrix-muted">Nenhum atributo adicional retornado nesta consulta read-only.</p>
-                            )}
-                          </div>
-
-                          {selectedMercadoLivreResultCompatibility ? (
-                            <CompatibilityDetails compatibility={selectedMercadoLivreResultCompatibility} />
-                          ) : null}
-
-                          <div className="mt-4 grid gap-3 rounded-lg border border-matrix-border bg-matrix-panel2/62 p-3 md:grid-cols-[minmax(0,1fr)_220px]">
-                            <div>
-                              <p className="font-semibold text-matrix-fg">Acoes disponiveis</p>
-                              <p className="mt-1 text-xs text-matrix-muted">Essas acoes carregam a comparacao local. Nada e salvo automaticamente.</p>
-                              <div className="mt-3 flex flex-wrap gap-2">
-                                <Button
-                                  onClick={() => selectMercadoLivreSuggestion(selectedMercadoLivreDetailItem, selectedMercadoLivreResultCompatibility)}
-                                  type="button"
-                                >
-                                  Usar esta referência
-                                </Button>
-                                {selectedMercadoLivreDetailUrl ? (
-                                  <a
-                                    className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 py-2 text-sm font-semibold text-matrix-fg transition hover:border-matrix-gold/50 hover:bg-matrix-goldSoft/40"
-                                    href={selectedMercadoLivreDetailUrl}
-                                    rel="noopener noreferrer"
-                                    target="_blank"
-                                  >
-                                    <ExternalLink className="h-4 w-4" />
-                                    Abrir anuncio
-                                  </a>
-                                ) : null}
-                              </div>
-                            </div>
-                            <div className="rounded-md border border-matrix-border bg-matrix-panel p-3">
-                              <p className="font-semibold text-matrix-fg">Compatibilidade</p>
-                              <p className="mt-2 text-xs text-matrix-muted">
-                                {productSuggestionNeedsAttention(selectedMercadoLivreResultCompatibility)
-                                  ? "Confira as fotos e o título antes de salvar."
-                                  : "Revise os campos antes de salvar localmente."}
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="grid min-h-64 place-items-center p-6 text-center text-sm text-matrix-muted">
-                          Selecione um resultado na lista para ver os detalhes.
-                        </div>
-                      )}
-                    </div>
                   </div>
                 ) : mercadoLivreSearch ? (
                   <div className="px-4 py-5 text-sm text-matrix-muted">
@@ -3725,6 +3512,114 @@ export function IntelligentProductRegistrationPage() {
           </div>
         </main>
       </div>
+
+      {selectedMercadoLivreDetailItem ? (
+        <div
+          aria-labelledby="mercado-livre-reference-details-title"
+          aria-modal="true"
+          className="fixed inset-0 z-[60] grid place-items-center bg-black/80 p-3 sm:p-4"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) closeMercadoLivreDetails();
+          }}
+          role="dialog"
+        >
+          <div className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-matrix-gold/40 bg-matrix-panel shadow-glow sm:max-h-[min(90dvh,760px)]">
+            <div className="flex items-start justify-between gap-3 border-b border-matrix-border px-4 py-3 sm:px-5">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 id="mercado-livre-reference-details-title" className="font-semibold text-matrix-fg">
+                    Detalhes da referência
+                  </h3>
+                  {selectedMercadoLivreResultCompatibility ? (
+                    <Badge tone={compatibilityTone(selectedMercadoLivreResultCompatibility.level)}>
+                      {productSuggestionBadgeLabel(selectedMercadoLivreResultCompatibility.level)}
+                    </Badge>
+                  ) : null}
+                </div>
+                <p className="mt-1 text-xs text-matrix-muted">Revise esta referência antes de usar.</p>
+              </div>
+              <button
+                aria-label="Fechar detalhes da referência"
+                className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-matrix-border text-matrix-muted transition hover:border-matrix-gold/50 hover:text-matrix-fg"
+                onClick={closeMercadoLivreDetails}
+                type="button"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="matrix-scroll min-h-0 flex-1 overflow-x-hidden overflow-y-auto p-4 sm:p-5">
+              {selectedMercadoLivreDetailLoading ? (
+                <p className="mb-4 rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/18 px-3 py-2 text-xs text-matrix-muted">
+                  Carregando detalhes desta referência.
+                </p>
+              ) : null}
+              {selectedMercadoLivreDetailError ? (
+                <p className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-100">
+                  {selectedMercadoLivreDetailError}
+                </p>
+              ) : null}
+
+              <div className="grid gap-5 md:grid-cols-[minmax(180px,280px)_minmax(0,1fr)] md:items-start">
+                <MercadoLivreImageGallery
+                  item={selectedMercadoLivreDetailItem}
+                  alt={selectedMercadoLivreDetailItem.title?.trim() || selectedMercadoLivreDetailItem.externalItemId || "Anúncio Mercado Livre"}
+                />
+                <div className="min-w-0">
+                  <h4 className="text-lg font-semibold leading-snug text-matrix-fg">
+                    {selectedMercadoLivreDetailItem.title?.trim() || selectedMercadoLivreDetailItem.externalItemId || "Resultado Mercado Livre"}
+                  </h4>
+                  {selectedMercadoLivreDetailItem.brand ? (
+                    <p className="mt-2 text-sm text-matrix-muted">Marca: {selectedMercadoLivreDetailItem.brand}</p>
+                  ) : null}
+                  {typeof selectedMercadoLivreDetailItem.price === "number" ? (
+                    <p className="mt-3 text-xl font-semibold text-matrix-fg">{formatCurrency(selectedMercadoLivreDetailItem.price)}</p>
+                  ) : null}
+
+                  {selectedMercadoLivreDetailAttributes.length ? (
+                    <div className="mt-4">
+                      <p className="text-xs font-semibold uppercase text-matrix-goldDark">Informações do anúncio</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {selectedMercadoLivreDetailAttributes.map((attribute, attributeIndex) => (
+                          <span
+                            key={`${attribute.id ?? attribute.name ?? "atributo"}-${attributeIndex}`}
+                            className="rounded-md border border-matrix-border bg-matrix-panel2 px-2 py-1 text-xs text-matrix-muted"
+                          >
+                            {attribute.name ?? attribute.id}: <span className="text-matrix-fg">{attribute.value}</span>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {productSuggestionNeedsAttention(selectedMercadoLivreResultCompatibility) ? (
+                    <p className="mt-4 rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/18 px-3 py-2 text-sm text-matrix-fg">
+                      Confira as fotos e o título antes de salvar.
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap justify-end gap-2 border-t border-matrix-border px-4 py-3 sm:px-5">
+              <Button onClick={closeMercadoLivreDetails} type="button" variant="secondary">
+                Fechar
+              </Button>
+              <Button
+                onClick={() => {
+                  const item = selectedMercadoLivreDetailItem;
+                  const compatibility = selectedMercadoLivreResultCompatibility;
+                  closeMercadoLivreDetails();
+                  selectMercadoLivreSuggestion(item, compatibility);
+                }}
+                type="button"
+              >
+                Usar esta referência
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {activePanel ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/80 p-0 sm:p-4">
