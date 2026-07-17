@@ -777,6 +777,9 @@ export function ProductsPage() {
                 confirmedLinkMismatch: true,
                 linkMismatchConfirmation: activePreview.linkMismatchConfirmation
               }
+            : {}),
+          ...(activePreview.confirmedIncidentReview && activePreview.incidentReviewConfirmation
+            ? { incidentReviewConfirmation: activePreview.incidentReviewConfirmation }
             : {})
         })
       });
@@ -834,7 +837,10 @@ export function ProductsPage() {
           productId: blingUpdatePreview.item.productId,
           confirmed: false,
           confirmedLinkMismatch: true,
-          idempotencyKey
+          idempotencyKey,
+          ...(blingUpdatePreview.confirmedIncidentReview && blingUpdatePreview.incidentReviewConfirmation
+            ? { incidentReviewConfirmation: blingUpdatePreview.incidentReviewConfirmation }
+            : {})
         })
       });
       const payload = await response.json().catch(() => ({}));
@@ -846,6 +852,53 @@ export function ProductsPage() {
       setBlingUpdateMessage("");
     } catch {
       setBlingUpdateMessage("Não foi possível confirmar este vínculo agora.");
+    } finally {
+      blingUpdateRequestInFlight.current = false;
+      setBlingUpdateBusy(false);
+    }
+  }
+
+  async function confirmBlingProductIncidentReview() {
+    if (
+      !selectedBlingConnectionId
+      || !blingUpdatePreview
+      || blingUpdatePreview.item.status !== "INCIDENT_REVIEW_REQUIRED"
+      || blingUpdateBusy
+      || blingUpdateRequestInFlight.current
+    ) return;
+    const idempotencyKey = blingUpdateIdempotencyKey.current ?? crypto.randomUUID();
+    blingUpdateIdempotencyKey.current = idempotencyKey;
+
+    blingUpdateRequestInFlight.current = true;
+    setBlingUpdateBusy(true);
+    setBlingUpdateMessage("Liberando somente a atualização do nome...");
+    try {
+      const response = await fetch("/api/products/bling/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          connectionId: selectedBlingConnectionId,
+          productId: blingUpdatePreview.item.productId,
+          confirmed: false,
+          confirmIncidentReview: true,
+          idempotencyKey
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (
+        !response.ok
+        || !payload.data?.confirmedIncidentReview
+        || !payload.data?.incidentReviewConfirmation
+      ) {
+        blingUpdateIdempotencyKey.current = null;
+        setBlingUpdateMessage(payload.error ?? "Não foi possível concluir esta revisão agora.");
+        return;
+      }
+      setBlingUpdatePreview(payload.data as BlingProductUpdatePreview);
+      setBlingUpdateMessage("");
+    } catch {
+      blingUpdateIdempotencyKey.current = null;
+      setBlingUpdateMessage("Não foi possível concluir esta revisão agora.");
     } finally {
       blingUpdateRequestInFlight.current = false;
       setBlingUpdateBusy(false);
@@ -1274,6 +1327,7 @@ export function ProductsPage() {
           message={blingUpdateMessage}
           onClose={closeBlingUpdateModal}
           onConfirm={(fields) => void confirmBlingProductUpdate(fields)}
+          onConfirmIncidentReview={() => void confirmBlingProductIncidentReview()}
           onConfirmLinkMismatch={() => void confirmBlingProductLinkMismatch()}
           preview={blingUpdatePreview}
           result={blingUpdateResult}

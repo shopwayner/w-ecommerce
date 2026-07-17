@@ -32,7 +32,9 @@ function safeRouteError(error: unknown) {
     return { status: 409, message: "Reconecte a conta Bling para continuar." };
   }
   if (message.includes("andamento")) return { status: 409, message: "Ja existe uma atualizacao em andamento para esta conta." };
-  if (message.includes("revisão pendente")) return { status: 423, message };
+  if (message.toLowerCase().includes("revis") && message.toLowerCase().includes("pendente")) {
+    return { status: 423, message };
+  }
   if (message.toLowerCase().includes("vinculo")) return { status: 409, message: "Revise o vinculo novamente antes de atualizar." };
   if (message.includes("titulo") || message.includes("fotos")) return { status: 400, message };
   return { status: 503, message: "Nao foi possivel atualizar o produto no Bling agora." };
@@ -69,9 +71,48 @@ export async function POST(request: Request) {
       );
     }
   }
+  if (parsed.data.confirmIncidentReview) {
+    const capabilityBlock = getBlingProductPatchBlock("NAME_ONLY");
+    if (capabilityBlock) {
+      return NextResponse.json(
+        { error: capabilityBlock.message, code: capabilityBlock.code },
+        { status: 423 }
+      );
+    }
+  }
 
   const correlationId = maskedReference(randomUUID());
   try {
+    if (parsed.data.confirmIncidentReview) {
+      const confirmation = await blingProductUpdateService.confirmIncidentReview({
+        userId: auth.context.user.id,
+        organizationId: auth.context.organizationId,
+        connectionId: parsed.data.connectionId,
+        productId: parsed.data.productId,
+        idempotencyKey: parsed.data.idempotencyKey as string
+      });
+      await logDangerousAction({
+        authContext: auth.context,
+        action: "BLING_PRODUCT_INCIDENT_REVIEW_CONFIRMED",
+        entityType: "Product",
+        entityId: parsed.data.productId,
+        route: "/api/products/bling/update",
+        method: "POST",
+        confirmation: true,
+        status: "SUCCESS",
+        riskLevel: "CRITICAL",
+        summary: "Usuario revisou o incidente e liberou somente a atualizacao do nome nesta operacao.",
+        metadata: {
+          connectionId: parsed.data.connectionId,
+          externalProductIdMasked: confirmation.externalProductIdMasked,
+          operation: "NAME_ONLY",
+          result: "CONFIRMED"
+        },
+        request,
+        requirePersist: true
+      });
+      return NextResponse.json({ data: confirmation.preview });
+    }
     if (!parsed.data.confirmed) {
       if (parsed.data.confirmedLinkMismatch) {
         const confirmation = await blingProductUpdateService.confirmLinkMismatch({
@@ -79,7 +120,8 @@ export async function POST(request: Request) {
           organizationId: auth.context.organizationId,
           connectionId: parsed.data.connectionId,
           productId: parsed.data.productId,
-          idempotencyKey: parsed.data.idempotencyKey as string
+          idempotencyKey: parsed.data.idempotencyKey as string,
+          incidentReviewConfirmation: parsed.data.incidentReviewConfirmation
         });
         await logDangerousAction({
           authContext: auth.context,
@@ -95,6 +137,7 @@ export async function POST(request: Request) {
           metadata: {
             connectionId: parsed.data.connectionId,
             externalProductIdMasked: confirmation.externalProductIdMasked,
+            incidentReviewConfirmed: Boolean(parsed.data.incidentReviewConfirmation),
             result: "CONFIRMED"
           },
           request,
@@ -130,6 +173,7 @@ export async function POST(request: Request) {
         allowedFields: Object.keys(fields),
         operation: parsed.data.operation,
         confirmedLinkMismatch: parsed.data.confirmedLinkMismatch,
+        incidentReviewConfirmed: Boolean(parsed.data.incidentReviewConfirmation),
         correlationId,
         idempotencyRef
       },
@@ -145,6 +189,7 @@ export async function POST(request: Request) {
       fields,
       operation: parsed.data.operation as NonNullable<typeof parsed.data.operation>,
       idempotencyKey,
+      incidentReviewConfirmation: parsed.data.incidentReviewConfirmation,
       confirmedLinkMismatch: parsed.data.confirmedLinkMismatch,
       linkMismatchConfirmation: parsed.data.linkMismatchConfirmation
     });
@@ -195,7 +240,7 @@ export async function POST(request: Request) {
       entityId: parsed.data.productId,
       route: "/api/products/bling/update",
       method: "POST",
-      confirmation: parsed.data.confirmed || parsed.data.confirmedLinkMismatch,
+      confirmation: parsed.data.confirmed || parsed.data.confirmedLinkMismatch || parsed.data.confirmIncidentReview,
       status: "FAILED",
       riskLevel: "HIGH",
       summary: safeError.message,

@@ -85,6 +85,8 @@ export const blingProductUpdateRequestSchema = z
     operation: blingProductPatchOperationSchema.optional(),
     confirmed: z.boolean().optional().default(false),
     idempotencyKey: z.string().trim().min(16).max(200).regex(/^[A-Za-z0-9:_-]+$/).optional(),
+    confirmIncidentReview: z.boolean().optional().default(false),
+    incidentReviewConfirmation: z.string().trim().min(32).max(4_000).optional(),
     confirmedLinkMismatch: z.boolean().optional().default(false),
     linkMismatchConfirmation: z.string().trim().min(32).max(4_000).optional()
   })
@@ -130,6 +132,37 @@ export const blingProductUpdateRequestSchema = z
         message: "Confirme novamente esta revisao de vinculo."
       });
     }
+    if (value.confirmIncidentReview && !value.idempotencyKey) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["idempotencyKey"],
+        message: "Confirme novamente esta revisao do produto."
+      });
+    }
+    if (value.confirmIncidentReview && (
+      value.confirmed
+      || value.fields !== undefined
+      || value.operation !== undefined
+      || value.confirmedLinkMismatch
+      || value.linkMismatchConfirmation !== undefined
+      || value.incidentReviewConfirmation !== undefined
+    )) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["confirmIncidentReview"],
+        message: "A revisao do produto deve ser confirmada separadamente."
+      });
+    }
+    if (value.incidentReviewConfirmation && value.confirmed && (
+      value.operation !== "NAME_ONLY"
+      || value.fields?.images !== undefined
+    )) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["incidentReviewConfirmation"],
+        message: "A revisao concluida permite somente a atualizacao do nome."
+      });
+    }
     if (value.confirmed && value.confirmedLinkMismatch && !value.linkMismatchConfirmation) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -158,9 +191,10 @@ export const blingProductUpdateRequestSchema = z
         message: "Revise o vinculo antes de editar o produto."
       });
     }
-    if (!value.confirmed && !value.confirmedLinkMismatch && (
+    if (!value.confirmed && !value.confirmedLinkMismatch && !value.confirmIncidentReview && (
       value.fields !== undefined
       || value.idempotencyKey !== undefined
+      || value.incidentReviewConfirmation !== undefined
       || value.linkMismatchConfirmation !== undefined
     )) {
       context.addIssue({
@@ -173,6 +207,13 @@ export const blingProductUpdateRequestSchema = z
         code: z.ZodIssueCode.custom,
         path: ["linkMismatchConfirmation"],
         message: "A revisao inicial nao aceita uma confirmacao anterior."
+      });
+    }
+    if (!value.confirmed && !value.confirmIncidentReview && value.incidentReviewConfirmation !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["incidentReviewConfirmation"],
+        message: "A confirmacao da revisao nao corresponde a esta etapa."
       });
     }
   });

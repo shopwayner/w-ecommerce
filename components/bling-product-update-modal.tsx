@@ -25,6 +25,8 @@ export type BlingProductReviewChanges = {
 };
 
 export type BlingProductUpdatePreview = {
+  confirmedIncidentReview?: true;
+  incidentReviewConfirmation?: string;
   confirmedLinkMismatch?: true;
   linkMismatchConfirmation?: string;
   capabilities: {
@@ -33,7 +35,7 @@ export type BlingProductUpdatePreview = {
   };
   item: {
     productId: string;
-    status: "READY" | "UNCHANGED" | "VINCULO_PRECISA_REVISAO" | "NOT_LINKED" | "UNSUPPORTED" | "ERROR";
+    status: "READY" | "UNCHANGED" | "INCIDENT_REVIEW_REQUIRED" | "VINCULO_PRECISA_REVISAO" | "NOT_LINKED" | "UNSUPPORTED" | "ERROR";
     message: string;
     local: BlingProductEditableValues | null;
     remote: BlingProductEditableValues | null;
@@ -59,6 +61,12 @@ export type BlingProductUpdatePreview = {
       localMeasures: string[];
       remoteMeasures: string[];
       reasons: Array<"KIT_VS_UNIT" | "MEASURES_MISMATCH" | "MODEL_MISMATCH" | "SKU_MISMATCH" | "GTIN_MISMATCH" | "BRAND_MISMATCH">;
+    };
+    incidentReview?: {
+      status: "INCIDENT_REVIEW_REQUIRED";
+      externalProductIdMasked: string | null;
+      localName: string;
+      remoteName: string;
     };
   };
 };
@@ -96,6 +104,7 @@ type BlingProductUpdateModalProps = {
   message: string;
   onClose: () => void;
   onConfirm: (fields: BlingProductReviewChanges) => void;
+  onConfirmIncidentReview: () => void;
   onConfirmLinkMismatch: () => void;
   preview: BlingProductUpdatePreview | null;
   result: BlingProductUpdateResult | null;
@@ -139,6 +148,7 @@ export function BlingProductUpdateModal({
   message,
   onClose,
   onConfirm,
+  onConfirmIncidentReview,
   onConfirmLinkMismatch,
   preview,
   result
@@ -149,6 +159,8 @@ export function BlingProductUpdateModal({
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [showLinkReview, setShowLinkReview] = useState(false);
   const [linkMismatchAcknowledged, setLinkMismatchAcknowledged] = useState(false);
+  const [showIncidentReview, setShowIncidentReview] = useState(false);
+  const [incidentReviewAcknowledged, setIncidentReviewAcknowledged] = useState(false);
   const [nameTouched, setNameTouched] = useState(false);
   const [imagesEditingEnabled, setImagesEditingEnabled] = useState(false);
   const [removedRemoteImages, setRemovedRemoteImages] = useState<string[]>([]);
@@ -160,6 +172,8 @@ export function BlingProductUpdateModal({
     setSelectedImageIndex(0);
     setShowLinkReview(false);
     setLinkMismatchAcknowledged(false);
+    setShowIncidentReview(false);
+    setIncidentReviewAcknowledged(false);
     setNameTouched(false);
     setImagesEditingEnabled(false);
     setRemovedRemoteImages([]);
@@ -182,13 +196,15 @@ export function BlingProductUpdateModal({
   const imagesPatchEnabled = preview?.capabilities.imagesPatchEnabled === true;
   const imagesAlreadySynced = item?.imageComparison === "IMAGES_ALREADY_SYNCED";
   const imagesDifferent = item?.imageComparison === "IMAGES_DIFFERENT";
+  const incidentNeedsReview = item?.status === "INCIDENT_REVIEW_REQUIRED";
+  const incidentNameOnly = preview?.confirmedIncidentReview === true;
   const linkNeedsReview = item?.status === "VINCULO_PRECISA_REVISAO";
   const canReview = Boolean(
-    item?.local && remote && !["VINCULO_PRECISA_REVISAO", "NOT_LINKED", "UNSUPPORTED", "ERROR"].includes(item.status)
+    item?.local && remote && !["INCIDENT_REVIEW_REQUIRED", "VINCULO_PRECISA_REVISAO", "NOT_LINKED", "UNSUPPORTED", "ERROR"].includes(item.status)
   );
   const nameChanged = Boolean(nameTouched && remote && normalizedTitle !== normalizeReviewText(remote.name));
   const imagesChanged = Boolean(
-    imagesPatchEnabled && imagesEditingEnabled && remote && !sameImages(images, remoteImages)
+    !incidentNameOnly && imagesPatchEnabled && imagesEditingEnabled && remote && !sameImages(images, remoteImages)
   );
   const removedRemoteCount = remoteImages.filter((image) => !images.includes(image)).length;
   const imageRemovalNotExplicit = Boolean(
@@ -259,7 +275,7 @@ export function BlingProductUpdateModal({
     if (!canReview || !hasDifferences || formInvalid || busy || completed) return;
     const fields: BlingProductReviewChanges = {};
     if (nameChanged && namePatchEnabled) fields.name = normalizedTitle;
-    if (imagesChanged && imagesPatchEnabled) fields.images = images;
+    if (!incidentNameOnly && imagesChanged && imagesPatchEnabled) fields.images = images;
     onConfirm(fields);
   }
 
@@ -278,12 +294,20 @@ export function BlingProductUpdateModal({
         <header className="flex items-start justify-between gap-4 border-b border-matrix-border px-4 py-4 sm:px-5">
           <div className="min-w-0">
             <h3 id="bling-product-update-title" className="text-xl font-semibold text-matrix-fg">
-              {linkNeedsReview ? "Revisar vínculo" : "Atualizar produto no Bling"}
+              {incidentNeedsReview
+                ? "Revisão necessária"
+                : linkNeedsReview
+                  ? "Revisar vínculo"
+                  : "Atualizar produto no Bling"}
             </h3>
             <p className="mt-1 text-sm text-matrix-muted">
-              {linkNeedsReview
-                ? "Confira os dois cadastros antes de continuar."
-                : "Revise o título e as fotos antes de enviar."}
+              {incidentNeedsReview
+                ? "Este produto teve uma atualização anterior com divergências. Revise antes de continuar."
+                : linkNeedsReview
+                  ? "Confira os dois cadastros antes de continuar."
+                  : incidentNameOnly
+                    ? "Revise somente o nome antes de enviar."
+                    : "Revise o título e as fotos antes de enviar."}
             </p>
           </div>
           <button
@@ -305,7 +329,45 @@ export function BlingProductUpdateModal({
             </div>
           ) : null}
 
-          {item?.local && linkNeedsReview ? (
+          {item?.local && incidentNeedsReview ? (
+            <div className="mx-auto grid max-w-2xl gap-4">
+              <div className="flex gap-3 rounded-md border border-amber-500/35 bg-amber-500/10 p-4 text-sm text-amber-100">
+                <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+                <p>Este produto teve uma atualização anterior com divergências. Revise antes de continuar.</p>
+              </div>
+              {showIncidentReview && item.incidentReview ? (
+                <>
+                  <div className="grid gap-3 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm">
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-matrix-muted">Nome atual no W Ecommerce</p>
+                      <p className="mt-1 text-matrix-fg">{item.incidentReview.localName}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-matrix-muted">Nome atual no Bling</p>
+                      <p className="mt-1 text-matrix-fg">{item.incidentReview.remoteName}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-matrix-muted">ID Bling</p>
+                      <p className="mt-1 text-matrix-fg">{item.incidentReview.externalProductIdMasked ?? "Indisponível"}</p>
+                    </div>
+                    <p className="rounded-md border border-matrix-gold/30 bg-matrix-goldSoft/10 p-3 text-matrix-fg">
+                      Somente o nome poderá ser alterado. Fotos e dados comerciais permanecerão bloqueados.
+                    </p>
+                  </div>
+                  <label className="flex cursor-pointer items-start gap-3 rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/10 p-4 text-sm text-matrix-fg">
+                    <input
+                      checked={incidentReviewAcknowledged}
+                      className="mt-0.5 h-4 w-4 accent-matrix-gold"
+                      disabled={busy}
+                      onChange={(event) => setIncidentReviewAcknowledged(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span>Confirmo que revisei este produto e desejo liberar somente a atualização do nome.</span>
+                  </label>
+                </>
+              ) : null}
+            </div>
+          ) : item?.local && linkNeedsReview ? (
             <div className="grid gap-5 lg:grid-cols-[minmax(240px,0.75fr)_minmax(0,1.25fr)]">
               <div className="relative grid aspect-square max-h-[360px] place-items-center overflow-hidden rounded-lg border border-matrix-gold/30 bg-white">
                 {item.local.images[0] ? (
@@ -390,7 +452,9 @@ export function BlingProductUpdateModal({
                   <div>
                     <p className="text-sm font-semibold text-matrix-fg">Fotos atuais no Bling</p>
                     <p className="mt-1 text-xs text-matrix-muted">
-                      Elas serão preservadas enquanto você não escolher alterar as fotos.
+                      {incidentNameOnly
+                        ? "Somente para visualização."
+                        : "Elas serão preservadas enquanto você não escolher alterar as fotos."}
                     </p>
                   </div>
                   <span className="shrink-0 text-xs text-matrix-muted">{remoteImages.length} foto(s)</span>
@@ -412,7 +476,7 @@ export function BlingProductUpdateModal({
                       <p className="mt-2 text-sm">Nenhuma foto selecionada</p>
                     </div>
                   )}
-                  {selectedImage ? (
+                  {selectedImage && !incidentNameOnly ? (
                     <div className="absolute right-3 top-3 flex gap-2">
                       <button
                         aria-label="Definir como foto principal"
@@ -475,6 +539,7 @@ export function BlingProductUpdateModal({
                     <ChevronRight className="h-4 w-4" />
                   </button>
                 </div>
+                {!incidentNameOnly ? (
                 <div className="mt-5 rounded-md border border-matrix-border bg-matrix-panel2 p-3">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
@@ -536,11 +601,12 @@ export function BlingProductUpdateModal({
                     </label>
                   ) : null}
                 </div>
+                ) : null}
               </div>
 
               <div className="flex min-w-0 flex-col justify-center gap-4">
                 <label className="grid gap-2 text-sm font-semibold text-matrix-fg">
-                  Título
+                  {incidentNameOnly ? "Nome" : "Título"}
                   <textarea
                     className="min-h-28 resize-y rounded-md border border-matrix-gold/35 bg-matrix-panel2 px-3 py-2 text-base font-semibold text-matrix-fg outline-none focus:border-matrix-gold/70"
                     disabled={!namePatchEnabled || busy || completed}
@@ -565,7 +631,7 @@ export function BlingProductUpdateModal({
                       onClick={useLocalTitle}
                       type="button"
                     >
-                      Usar título do W Ecommerce
+                      {incidentNameOnly ? "Usar nome do W Ecommerce" : "Usar título do W Ecommerce"}
                     </button>
                   </div>
                 ) : null}
@@ -573,7 +639,7 @@ export function BlingProductUpdateModal({
             </div>
           ) : null}
 
-          {friendlyMessage && !linkNeedsReview ? (
+          {friendlyMessage && !incidentNeedsReview && !linkNeedsReview ? (
             <p
               className={`mt-4 rounded-md border px-3 py-2 text-sm ${
                 result?.status === "UPDATED" && !localRecordWarning
@@ -590,7 +656,9 @@ export function BlingProductUpdateModal({
           ) : null}
           {canReview && nameChanged && !busy && !completed ? (
             <p className="mt-4 rounded-md border border-matrix-gold/30 bg-matrix-goldSoft/10 px-3 py-2 text-sm text-matrix-fg">
-              {imagesDifferent && !imagesPatchEnabled
+              {incidentNameOnly
+                ? "Somente o nome será atualizado. Fotos e dados comerciais permanecerão inalterados."
+                : imagesDifferent && !imagesPatchEnabled
                 ? "Somente o nome será atualizado. As fotos não serão enviadas nesta atualização."
                 : "Somente o nome será atualizado."}
             </p>
@@ -617,13 +685,43 @@ export function BlingProductUpdateModal({
           <Button
             className="w-full sm:w-auto"
             disabled={busy}
-            onClick={onClose}
+            onClick={() => {
+              if (incidentNeedsReview && showIncidentReview) {
+                setShowIncidentReview(false);
+                setIncidentReviewAcknowledged(false);
+                return;
+              }
+              onClose();
+            }}
             type="button"
             variant="secondary"
           >
-            {linkNeedsReview ? "Fechar" : "Cancelar"}
+            {incidentNeedsReview && showIncidentReview
+              ? "Voltar"
+              : linkNeedsReview
+                ? "Fechar"
+                : "Cancelar"}
           </Button>
-          {linkNeedsReview ? (
+          {incidentNeedsReview ? (
+            <Button
+              className="w-full sm:w-auto"
+              disabled={busy || (showIncidentReview && !incidentReviewAcknowledged)}
+              onClick={() => {
+                if (!showIncidentReview) {
+                  setShowIncidentReview(true);
+                  return;
+                }
+                onConfirmIncidentReview();
+              }}
+              type="button"
+            >
+              {busy
+                ? "Liberando atualização..."
+                : showIncidentReview
+                  ? "Liberar atualização do nome"
+                  : "Revisar produto"}
+            </Button>
+          ) : linkNeedsReview ? (
             <Button
               className="w-full sm:w-auto"
               disabled={busy || (showLinkReview && !linkMismatchAcknowledged)}

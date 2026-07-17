@@ -21,6 +21,7 @@ import {
   compareBlingProductImages,
   compareBlingProductValues,
   compareBlingProductIntegrity,
+  createBlingProductIncidentReviewConfirmation,
   createBlingProductLinkMismatchConfirmation,
   createBlingProductRestorationDryRun,
   createBlingProductUpdateDryRun,
@@ -34,6 +35,7 @@ import {
   normalizeBlingProductReview,
   recordConfirmedBlingMappingSync,
   validateBlingProductImageAccessibility,
+  verifyBlingProductIncidentReviewConfirmation,
   verifyBlingProductLinkMismatchConfirmation,
   type BlingProductMappingSnapshot,
   type BlingProductRestorationTarget,
@@ -1097,6 +1099,95 @@ test("accepts link mismatch confirmation only in its explicit request stages", (
   }).success, false);
 });
 
+test("accepts incident review only as a separate NAME_ONLY confirmation stage", () => {
+  const base = { connectionId: "connection-1", productId: "product-1" };
+  const idempotencyKey = "incident_review_1234567890";
+  const incidentReviewConfirmation = `v1.${"a".repeat(64)}`;
+
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    confirmIncidentReview: true,
+    idempotencyKey
+  }).success, true);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    confirmIncidentReview: true
+  }).success, false);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    confirmIncidentReview: true,
+    idempotencyKey,
+    fields: { name: "Nao permitido nesta etapa" }
+  }).success, false);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    confirmed: true,
+    operation: "NAME_ONLY",
+    idempotencyKey,
+    incidentReviewConfirmation,
+    fields: { name: "Produto revisado" }
+  }).success, true);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    confirmed: true,
+    operation: "IMAGES_ONLY",
+    idempotencyKey,
+    incidentReviewConfirmation,
+    fields: { images: ["https://cdn.example.com/photo.jpg"] }
+  }).success, false);
+  assert.equal(blingProductUpdateRequestSchema.safeParse({
+    ...base,
+    incidentReviewConfirmation
+  }).success, false);
+});
+
+test("binds an incident review grant to NAME_ONLY, one user and a ten-minute window", () => {
+  const previousKey = process.env.APP_ENCRYPTION_KEY;
+  process.env.APP_ENCRYPTION_KEY = "ab".repeat(32);
+  try {
+    const now = new Date("2026-07-16T12:00:00.000Z");
+    const scope = {
+      userId: "user-1",
+      organizationId: "organization-1",
+      connectionId: "connection-1",
+      productId: "product-1",
+      externalProductId: "10310",
+      idempotencyKey: "incident_review_1234567890"
+    };
+    const confirmation = createBlingProductIncidentReviewConfirmation(scope, now);
+    assert.doesNotMatch(confirmation, /10310|user-1|organization-1/);
+    const verified = verifyBlingProductIncidentReviewConfirmation(
+      confirmation,
+      scope,
+      new Date(now.getTime() + 9 * 60_000)
+    );
+    assert.equal(verified.operation, "NAME_ONLY");
+    assert.equal(verified.externalProductId, "10310");
+
+    for (const changedScope of [
+      { ...scope, userId: "user-2" },
+      { ...scope, organizationId: "organization-2" },
+      { ...scope, connectionId: "connection-2" },
+      { ...scope, productId: "product-2" },
+      { ...scope, idempotencyKey: "incident_review_other_1234" }
+    ]) {
+      assert.throws(() => verifyBlingProductIncidentReviewConfirmation(
+        confirmation,
+        changedScope,
+        new Date(now.getTime() + 60_000)
+      ), /revisão pendente/i);
+    }
+    assert.throws(() => verifyBlingProductIncidentReviewConfirmation(
+      confirmation,
+      scope,
+      new Date(now.getTime() + 10 * 60_000)
+    ), /revisão pendente/i);
+  } finally {
+    if (previousKey === undefined) delete process.env.APP_ENCRYPTION_KEY;
+    else process.env.APP_ENCRYPTION_KEY = previousKey;
+  }
+});
+
 test("binds a link mismatch confirmation to one user and operation", () => {
   const previousKey = process.env.APP_ENCRYPTION_KEY;
   process.env.APP_ENCRYPTION_KEY = "ab".repeat(32);
@@ -1866,6 +1957,44 @@ test("blocks products with a prior integral PUT incident without affecting safe 
     status: "FAILED",
     metadata: {}
   }]), true);
+  assert.equal(hasBlockingBlingProductIncident([{
+    action: "BLING_PRODUCT_UPDATE_INTEGRITY_FAILED",
+    status: "FAILED",
+    metadata: {}
+  }, {
+    action: "BLING_PRODUCT_INCIDENT_REVIEW_CONFIRMED",
+    status: "SUCCESS",
+    metadata: { operation: "NAME_ONLY", result: "CONFIRMED" }
+  }]), true);
+});
+
+test("keeps incident review read-only and bypasses history only for a scoped NAME_ONLY grant", () => {
+  const serviceSource = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-product-update-service.ts"),
+    "utf8"
+  );
+  const routeSource = readFileSync(
+    path.join(process.cwd(), "app/api/products/bling/update/route.ts"),
+    "utf8"
+  );
+  const reviewStart = serviceSource.indexOf("  async confirmIncidentReview(input:");
+  const reviewEnd = serviceSource.indexOf("\n  async confirmLinkMismatch(input:", reviewStart);
+  const reviewSource = serviceSource.slice(reviewStart, reviewEnd);
+  const updateStart = serviceSource.indexOf("  async updateOne(input:");
+  const updateSource = serviceSource.slice(updateStart);
+  const incidentGuard = updateSource.indexOf("productHasBlockingBlingIncident");
+  const grantVerification = updateSource.indexOf("verifyBlingProductIncidentReviewConfirmation");
+  const jobCreation = updateSource.indexOf("createUpdateJob(input)");
+
+  assert.match(reviewSource, /readOnly: true/);
+  assert.doesNotMatch(reviewSource, /createUpdateJob|method: "PATCH"/);
+  assert.ok(incidentGuard >= 0 && grantVerification > incidentGuard && jobCreation > grantVerification);
+  assert.match(updateSource, /input\.operation !== "NAME_ONLY"/);
+  assert.match(updateSource, /input\.fields\.images !== undefined/);
+  assert.match(updateSource, /incidentReviewExternalProductId[\s\S]*inspection\.externalProductId/);
+  assert.match(routeSource, /BLING_PRODUCT_INCIDENT_REVIEW_CONFIRMED/);
+  assert.match(routeSource, /operation: "NAME_ONLY"/);
+  assert.doesNotMatch(routeSource, /incidentReviewConfirmation:\s*confirmation\.incidentReviewConfirmation/);
 });
 
 test("requires both write permissions, an administrator and explicit confirmation", () => {
@@ -1916,10 +2045,19 @@ test("renders only the simplified single-product modal contract", () => {
   assert.match(modalSource, /Revisar vínculo/);
   assert.match(modalSource, /Continuar com este vínculo/);
   assert.match(modalSource, /Confirmo que este é o mesmo produto/);
-  assert.match(modalSource, /linkNeedsReview \? "Fechar" : "Cancelar"/);
+  assert.match(modalSource, /Revisão necessária/);
+  assert.match(modalSource, /Este produto teve uma atualização anterior com divergências\. Revise antes de continuar\./);
+  assert.match(modalSource, /Confirmo que revisei este produto e desejo liberar somente a atualização do nome\./);
+  assert.match(modalSource, /Liberar atualização do nome/);
+  assert.match(modalSource, /Somente o nome será atualizado\. Fotos e dados comerciais permanecerão inalterados\./);
+  assert.match(modalSource, /!incidentNameOnly && imagesPatchEnabled/);
+  assert.match(modalSource, /!incidentNameOnly \? \(/);
+  assert.match(modalSource, /linkNeedsReview[\s\S]*"Fechar"[\s\S]*"Cancelar"/);
   assert.match(modalSource, /setShowLinkReview/);
   assert.match(pageSource, /confirmedLinkMismatch: true/);
   assert.match(pageSource, /linkMismatchConfirmation: activePreview\.linkMismatchConfirmation/);
+  assert.match(pageSource, /confirmIncidentReview: true/);
+  assert.match(pageSource, /incidentReviewConfirmation: activePreview\.incidentReviewConfirmation/);
   const previewFunction = pageSource.slice(
     pageSource.indexOf("async function openBlingUpdatePreview"),
     pageSource.indexOf("async function confirmBlingProductUpdate")
@@ -1935,7 +2073,7 @@ test("renders only the simplified single-product modal contract", () => {
   assert.match(modalSource, /Usar estas fotos no Bling/);
   assert.match(modalSource, /nameChanged/);
   assert.match(modalSource, /imagesChanged/);
-  assert.match(modalSource, /if \(imagesChanged && imagesPatchEnabled\) fields\.images = images/);
+  assert.match(modalSource, /if \(!incidentNameOnly && imagesChanged && imagesPatchEnabled\) fields\.images = images/);
   assert.match(modalSource, /preview\?\.capabilities\.namePatchEnabled/);
   assert.match(modalSource, /preview\?\.capabilities\.imagesPatchEnabled/);
   assert.match(modalSource, /galleryReductionRequiresConfirmation/);
