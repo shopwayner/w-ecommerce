@@ -38,6 +38,10 @@ import {
   normalizeIntelligentProductPreviewTitle
 } from "@/lib/intelligent-product-preview";
 import { parseMercadoLivreReferenceInput } from "@/lib/mercado-livre-manual-reference";
+import {
+  hasValidMercadoLivreImage,
+  mercadoLivreReferenceImageUrls
+} from "@/lib/mercado-livre-reference-images";
 
 const AMAZON_LOGO_SRC = "/marketplaces/amazon.png";
 const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre.png";
@@ -734,44 +738,8 @@ function ProductHeroImage({ src, alt }: { src: string | null | undefined; alt: s
   );
 }
 
-function imageUrlsFromUnknown(value: unknown): string[] {
-  if (!value) return [];
-  if (typeof value === "string") return value.trim() ? [value.trim()] : [];
-  if (!Array.isArray(value)) {
-    if (typeof value === "object") {
-      const fields = value as Record<string, unknown>;
-      return [
-        fields.secure_url,
-        fields.secureUrl,
-        fields.url,
-        fields.src,
-        fields.imageUrl,
-        fields.thumbnail,
-        fields.secure_thumbnail,
-        fields.secureThumbnail
-      ].flatMap(imageUrlsFromUnknown);
-    }
-    return [];
-  }
-  return value.flatMap(imageUrlsFromUnknown);
-}
-
-function mercadoLivreDetailImageUrls(item: MercadoLivreSearchItem) {
-  const urls = [
-    ...imageUrlsFromUnknown(item.pictures),
-    ...imageUrlsFromUnknown(item.images),
-    ...imageUrlsFromUnknown(item.pictureUrls),
-    ...imageUrlsFromUnknown(item.imageUrls),
-    ...imageUrlsFromUnknown(item.imageUrl),
-    ...imageUrlsFromUnknown(item.thumbnail),
-    ...imageUrlsFromUnknown(item.secure_thumbnail),
-    ...imageUrlsFromUnknown(item.secureThumbnail)
-  ];
-  return Array.from(new Set(urls.filter((url) => /^https?:\/\//i.test(url))));
-}
-
 function MercadoLivreImageGallery({ item, alt }: { item: MercadoLivreSearchItem; alt: string }) {
-  const images = useMemo(() => mercadoLivreDetailImageUrls(item), [item]);
+  const images = useMemo(() => mercadoLivreReferenceImageUrls(item), [item]);
   const imagesKey = images.join("|");
   const firstImage = images[0] ?? null;
   const [selectedImageUrl, setSelectedImageUrl] = useState<string | null>(images[0] ?? null);
@@ -1045,7 +1013,7 @@ function MercadoLivreReferenceDetails({
 }
 
 function mercadoLivreItemKey(item: MercadoLivreSearchItem, index: number) {
-  return `${item.externalItemId ?? item.permalink ?? item.title ?? "resultado"}-${index}`;
+  return item.externalItemId ?? item.catalogProductId ?? item.permalink ?? `${item.title ?? "resultado"}-${index}`;
 }
 
 function mercadoLivreDetailCacheKey(item: MercadoLivreSearchItem) {
@@ -1212,7 +1180,7 @@ function mercadoLivreCategoryLabel(item: MercadoLivreSearchItem) {
 
 function mercadoLivreDataCompleteness(item: MercadoLivreSearchItem) {
   const hasTitle = Boolean(item.title?.trim());
-  const hasImage = Boolean(item.imageUrl || item.thumbnail || item.imageUrls?.length);
+  const hasImage = hasValidMercadoLivreImage(item);
   const hasPrice = typeof item.price === "number";
   const hasExternalReference = Boolean(item.permalink || item.externalItemId);
   const hasCategory = Boolean(mercadoLivreCategoryLabel(item));
@@ -1353,28 +1321,43 @@ export function IntelligentProductRegistrationPage() {
   const mercadoLivrePaging = mercadoLivreSearch?.paging ?? null;
   const mercadoLivrePageStart = mercadoLivrePaging && mercadoLivreSearch?.items.length ? mercadoLivrePaging.offset + 1 : 0;
   const mercadoLivrePageEnd = mercadoLivrePaging && mercadoLivreSearch?.items.length ? mercadoLivrePaging.offset + mercadoLivreSearch.items.length : 0;
+  const uniqueMercadoLivreItems = useMemo(
+    () => mergeUniqueMercadoLivreSearchItems([], mercadoLivreSearch?.items ?? []),
+    [mercadoLivreSearch?.items]
+  );
   const rankedMercadoLivreItems = useMemo(() => {
-    if (!mercadoLivreSearch?.items.length) return [];
+    if (!uniqueMercadoLivreItems.length) return [];
 
-    return sortProductSuggestionResults(
-      mercadoLivreSearch.items.map((item, originalIndex) => {
+    const itemsWithImages = uniqueMercadoLivreItems
+      .map((item, originalIndex) => {
         const detailKey = mercadoLivreDetailCacheKey(item);
         const mergedItem = detailKey && enrichedMercadoLivreItemsById[detailKey]
           ? mergeMercadoLivreDetailForUi(item, enrichedMercadoLivreItemsById[detailKey])
           : item;
-        const compatibility = product
-          ? calculateProductSuggestionCompatibility(product, mercadoLivreItemToCompatibilitySuggestion(mergedItem))
-          : null;
+        const validImageUrls = mercadoLivreReferenceImageUrls(mergedItem);
 
         return {
-          item: mergedItem,
-          compatibility,
-          originalIndex,
-          useful: isUsefulMercadoLivreCard(mergedItem)
+          item: {
+            ...mergedItem,
+            imageUrl: validImageUrls[0] ?? null,
+            imageUrls: validImageUrls
+          },
+          originalIndex
         };
       })
+      .filter(({ item }) => hasValidMercadoLivreImage(item));
+
+    return sortProductSuggestionResults(
+      itemsWithImages.map(({ item, originalIndex }) => ({
+        item,
+        compatibility: product
+          ? calculateProductSuggestionCompatibility(product, mercadoLivreItemToCompatibilitySuggestion(item))
+          : null,
+        originalIndex,
+        useful: isUsefulMercadoLivreCard(item)
+      }))
     );
-  }, [enrichedMercadoLivreItemsById, mercadoLivreSearch?.items, product]);
+  }, [enrichedMercadoLivreItemsById, product, uniqueMercadoLivreItems]);
   const mercadoLivreResultItems = useMemo(
     () => rankedMercadoLivreItems.map((entry, rankedIndex) => ({ ...entry, rankedIndex })),
     [rankedMercadoLivreItems]
@@ -1393,6 +1376,10 @@ export function IntelligentProductRegistrationPage() {
   const mercadoLivreUsefulResultCount = rankedMercadoLivreItems.filter(({ item }) => isUsefulMercadoLivreCard(item)).length;
   const mercadoLivreHiddenIncompleteCount = rankedMercadoLivreItems.filter(({ item }) => !isUsefulMercadoLivreCard(item)).length;
   const mercadoLivreResultCount = mercadoLivreResultItems.length;
+  const mercadoLivreRawResultCount = mercadoLivreSearch?.items.length ?? 0;
+  const mercadoLivreDuplicateResultCount = Math.max(0, mercadoLivreRawResultCount - uniqueMercadoLivreItems.length);
+  const mercadoLivreWithoutImageCount = Math.max(0, uniqueMercadoLivreItems.length - mercadoLivreResultCount);
+  const mercadoLivreResultPageCount = Math.max(1, Math.ceil(mercadoLivreResultCount / mercadoLivrePageSize));
   const mercadoLivreHasStrongResult = rankedMercadoLivreItems.some(
     ({ compatibility }) => compatibility?.level === "HIGH" || compatibility?.level === "MEDIUM"
   );
@@ -1447,6 +1434,10 @@ export function IntelligentProductRegistrationPage() {
     mercadoLivreOfferPageItems.length > 0 &&
     mercadoLivreOfferPageItems.length < mercadoLivrePageSize &&
     !mercadoLivreOfferPageCanGoNext;
+  useEffect(() => {
+    if (mercadoLivreOfferCollectionInProgress || mercadoLivreOfferPage <= mercadoLivreResultPageCount) return;
+    setMercadoLivreOfferPage(mercadoLivreResultPageCount);
+  }, [mercadoLivreOfferCollectionInProgress, mercadoLivreOfferPage, mercadoLivreResultPageCount]);
   const selectedMercadoLivreResult =
     filteredMercadoLivreItems.find(({ item, rankedIndex }) => mercadoLivreItemKey(item, rankedIndex) === selectedMercadoLivreResultKey) ?? null;
   const selectedMercadoLivreResultKeyForRender = selectedMercadoLivreResult
@@ -2552,7 +2543,7 @@ export function IntelligentProductRegistrationPage() {
     openProductPreview({
       title: item.title,
       brand: item.brand,
-      images: mercadoLivreDetailImageUrls(item),
+      images: mercadoLivreReferenceImageUrls(item),
       notice: needsAttention ? "Confira as fotos e o título antes de salvar." : null
     });
   }
@@ -3438,16 +3429,16 @@ export function IntelligentProductRegistrationPage() {
                     </div>
                   ) : null}
                 </div>
-                {rankedMercadoLivreItems.length ? (
-                  <div className="grid items-start gap-3 p-4 lg:grid-cols-[minmax(0,44fr)_minmax(0,56fr)]">
-                    <div className="min-w-0 overflow-hidden rounded-lg border border-matrix-border bg-matrix-panel/72">
-                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-matrix-border px-4 py-3">
+                {mercadoLivreRawResultCount > 0 || mercadoLivreOfferCollectionInProgress ? (
+                  <div className="grid items-start gap-3 p-4 lg:h-[calc(100dvh-2rem)] lg:min-h-[36rem] lg:grid-cols-[minmax(0,44fr)_minmax(0,56fr)] lg:items-stretch">
+                    <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-matrix-border bg-matrix-panel/72 lg:h-full">
+                      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-matrix-border px-4 py-3">
                         <div>
                           <p className="flex items-center gap-2 font-semibold text-matrix-fg">
                             <MercadoLivreLogo size={18} />
                             Resultados do Mercado Livre
                           </p>
-                          <p className="text-xs text-matrix-muted">Todos os resultados permanecem disponíveis para sua escolha.</p>
+                          <p className="text-xs text-matrix-muted">Todos os resultados com foto permanecem disponíveis para sua escolha.</p>
                           {!mercadoLivreOfferCollectionInProgress && mercadoLivreResultCount > 0 && !mercadoLivreHasStrongResult ? (
                             <p className="mt-2 text-xs text-matrix-goldDark">
                               Nao encontramos uma correspondencia exata. Revise os resultados abaixo e escolha manualmente.
@@ -3456,8 +3447,15 @@ export function IntelligentProductRegistrationPage() {
                         </div>
                         <div className="flex flex-wrap items-center justify-end gap-2 text-xs text-matrix-muted">
                           <Badge tone="info">
-                            {mercadoLivreResultCount} resultado(s) encontrado(s)
+                            {mercadoLivreRawResultCount} resultados encontrados — {mercadoLivreResultCount} com foto
                           </Badge>
+                          <Badge tone="muted">{filteredMercadoLivreItems.length} exibido(s) nesta página</Badge>
+                          {mercadoLivreWithoutImageCount ? (
+                            <Badge tone="muted">{mercadoLivreWithoutImageCount} sem foto removido(s)</Badge>
+                          ) : null}
+                          {mercadoLivreDuplicateResultCount ? (
+                            <Badge tone="muted">{mercadoLivreDuplicateResultCount} duplicado(s) removido(s)</Badge>
+                          ) : null}
                           {mercadoLivreCurrentPageDetailsTotal ? (
                             <Badge tone={mercadoLivreOfferCollectionInProgress ? "warning" : "success"}>
                               {mercadoLivreOfferCollectionInProgress
@@ -3474,7 +3472,7 @@ export function IntelligentProductRegistrationPage() {
                             <Badge tone="muted">Ultima pagina com {mercadoLivreOfferPageItems.length} resultado(s).</Badge>
                           ) : null}
                           <span className="rounded-md border border-matrix-border bg-matrix-panel2/70 px-2 py-1">
-                            Pagina {mercadoLivreOfferPage}
+                            Pagina {mercadoLivreOfferPage} de {mercadoLivreResultPageCount}
                           </span>
                           <select
                             aria-label="Resultados Mercado Livre por pagina"
@@ -3580,14 +3578,14 @@ export function IntelligentProductRegistrationPage() {
                                     ? `Buscando resultados: ${mercadoLivreResultCount} encontrado(s), ${mercadoLivreCurrentPageDetailsLoaded} de ${mercadoLivreCurrentPageDetailsTotal} catalogo(s) analisado(s), ${mercadoLivreCurrentPageDetailsLoading} em andamento, ${mercadoLivreCurrentPageDetailsPending} aguardando e ${mercadoLivreCurrentPageDetailsFailed} sem detalhe util.`
                                     : mercadoLivreHideIncompleteActive
                                     ? `Mostrando ${Math.min(mercadoLivreUsefulResultCount, filteredMercadoLivreItems.length)} anuncio(s) com dados uteis. ${mercadoLivreHiddenIncompleteCount} resultado(s) incompleto(s) foram ocultados. ${mercadoLivreAnalyzedResultCount} resultado(s) analisado(s).`
-                                    : `Exibindo todos os ${mercadoLivreResultCount} resultado(s), ordenados por relevancia.`}
+                                    : `Exibindo ${filteredMercadoLivreItems.length} de ${mercadoLivreResultCount} resultado(s) com foto, ordenados por relevancia.`}
                                 </p>
                               </div>
                             ) : null}
                           </div>
                         </div>
                       </div>
-                      <div className="matrix-scroll grid gap-2 p-2 lg:max-h-[calc(100dvh-13rem)] lg:overflow-y-auto">
+                      <div className="matrix-scroll grid min-h-0 content-start gap-2 overflow-y-auto p-2 lg:flex-1">
                         {filteredMercadoLivreItems.length ? filteredMercadoLivreItems.map(({ item, compatibility: itemCompatibility, rankedIndex }) => {
                           const itemKey = mercadoLivreItemKey(item, rankedIndex);
                           const isSelected = itemKey === selectedMercadoLivreResultKeyForRender;
@@ -3623,7 +3621,7 @@ export function IntelligentProductRegistrationPage() {
                                 >
                                   {isSelected ? <Check className="h-3 w-3" /> : null}
                                 </span>
-                                <ProductImage alt={itemTitle} size="sm" src={item.imageUrl ?? item.thumbnail} />
+                                <ProductImage alt={itemTitle} size="sm" src={item.imageUrl} />
                                 <div className="min-w-0">
                                   <div className="flex min-w-0 flex-wrap items-start justify-between gap-1.5">
                                     <p className="line-clamp-2 min-w-0 flex-1 text-sm font-semibold leading-snug text-matrix-fg">{itemTitle}</p>
@@ -3657,7 +3655,9 @@ export function IntelligentProductRegistrationPage() {
                               ? "Buscando resultados."
                               : mercadoLivreOfferPageItems.length
                                 ? "Nenhum resultado nesta pagina corresponde aos filtros selecionados."
-                                : "Nenhum resultado foi encontrado."}
+                                : mercadoLivreRawResultCount
+                                  ? "Nenhum resultado desta busca possui foto valida."
+                                  : "Nenhum resultado foi encontrado."}
                           </div>
                         )}
                       </div>
@@ -3665,14 +3665,14 @@ export function IntelligentProductRegistrationPage() {
 
                     {selectedMercadoLivreDetailItem ? (
                       <div
-                        className="fixed inset-0 z-[60] grid place-items-center bg-black/80 p-3 lg:sticky lg:inset-auto lg:top-4 lg:z-auto lg:block lg:border-l lg:border-matrix-gold/30 lg:bg-transparent lg:pl-3 lg:pr-0"
+                        className="fixed inset-0 z-[60] grid place-items-center bg-black/80 p-3 lg:sticky lg:inset-auto lg:top-4 lg:z-auto lg:block lg:h-full lg:min-h-0 lg:self-stretch lg:border-l lg:border-matrix-gold/30 lg:bg-transparent lg:pl-3 lg:pr-0"
                         onMouseDown={(event) => {
                           if (event.currentTarget === event.target) closeMercadoLivreDetails();
                         }}
                       >
                         <aside
                           aria-labelledby="mercado-livre-reference-details-title"
-                          className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-matrix-gold/40 bg-matrix-panel shadow-glow lg:max-h-[calc(100dvh-8rem)] lg:max-w-none"
+                          className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-matrix-gold/40 bg-matrix-panel shadow-glow lg:h-full lg:max-h-none lg:max-w-none"
                         >
                           <MercadoLivreReferenceDetails
                             compatibility={selectedMercadoLivreResultCompatibility}
@@ -3690,7 +3690,7 @@ export function IntelligentProductRegistrationPage() {
                         </aside>
                       </div>
                     ) : (
-                      <aside className="hidden min-h-[28rem] items-center justify-center rounded-lg border border-dashed border-matrix-border bg-matrix-panel/45 p-6 text-center lg:flex">
+                      <aside className="hidden min-h-0 items-center justify-center rounded-lg border border-dashed border-matrix-border bg-matrix-panel/45 p-6 text-center lg:flex lg:h-full">
                         <div className="max-w-xs">
                           <PackageSearch className="mx-auto h-8 w-8 text-matrix-goldDark" />
                           <h3 className="mt-3 font-semibold text-matrix-fg">Detalhes do anúncio selecionado</h3>
