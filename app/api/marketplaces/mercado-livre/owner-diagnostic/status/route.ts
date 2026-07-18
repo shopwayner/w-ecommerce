@@ -19,6 +19,7 @@ export async function GET() {
   }
   return NextResponse.json({
     enabled: status.enabled,
+    searchEnabled: status.searchEnabled,
     available: status.available,
     appIdMatches: status.appIdMatches,
     configured: status.configured,

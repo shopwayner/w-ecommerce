@@ -4,6 +4,7 @@ import { z } from "zod";
 const authorizationUrl = "https://auth.mercadolivre.com.br/authorization";
 const tokenUrl = "https://api.mercadolibre.com/oauth/token";
 const apiBaseUrl = "https://api.mercadolibre.com";
+const ownerSearchUrl = `${apiBaseUrl}/sites/MLB/search?q=rolete%20pcx%20160&limit=10&offset=0`;
 const stateTtlSeconds = 10 * 60;
 const resultTtlSeconds = 5 * 60;
 const startRateLimitWindowMs = 10 * 60 * 1000;
@@ -75,10 +76,26 @@ export type MercadoLivreOwnerDiagnosticResult = {
     permissions: string[];
     error: SafeError | null;
   };
+  search: {
+    http: number | null;
+    requestId: string | null;
+    total: number | null;
+    returned: number;
+    results: Array<{
+      id: string;
+      title: string | null;
+      price: number | null;
+      currencyId: string | null;
+      permalink: string | null;
+      seller: { idMasked: string | null; nickname: string | null } | null;
+    }>;
+    error: SafeError | null;
+  };
   calls: {
     tokenExchange: number;
     usersMeGet: number;
     applicationGet: number;
+    searchGet: number;
     total: number;
   };
   persistence: {
@@ -91,6 +108,7 @@ export type MercadoLivreOwnerDiagnosticResult = {
 
 type DiagnosticEnvironment = {
   MERCADO_LIVRE_OWNER_DIAGNOSTIC_ENABLED?: string;
+  MERCADO_LIVRE_OWNER_SEARCH_DIAGNOSTIC_ENABLED?: string;
   MERCADO_LIVRE_CLIENT_ID?: string;
   MERCADO_LIVRE_CLIENT_SECRET?: string;
   MERCADO_LIVRE_REDIRECT_URI?: string;
@@ -130,6 +148,15 @@ const emptyApplicationResult = (): MercadoLivreOwnerDiagnosticResult["applicatio
   error: null
 });
 
+const emptySearchResult = (): MercadoLivreOwnerDiagnosticResult["search"] => ({
+  http: null,
+  requestId: null,
+  total: null,
+  returned: 0,
+  results: [],
+  error: null
+});
+
 export class MercadoLivreOwnerDiagnosticError extends Error {
   constructor(
     public readonly code: string,
@@ -146,6 +173,10 @@ function safeText(value: unknown, maxLength = 240) {
 
 function safeBoolean(value: unknown) {
   return typeof value === "boolean" ? value : null;
+}
+
+function safeNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function safeObject(value: unknown): Record<string, unknown> | null {
@@ -193,6 +224,48 @@ function sanitizeRedirectUri(value: unknown) {
   } catch {
     return null;
   }
+}
+
+function sanitizeMercadoLivrePermalink(value: unknown) {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") return null;
+    const hostname = url.hostname.toLowerCase();
+    if (hostname !== "mercadolivre.com.br" && !hostname.endsWith(".mercadolivre.com.br")) return null;
+    url.username = "";
+    url.password = "";
+    url.hash = "";
+    return url.toString().slice(0, 220);
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeSearchResults(value: unknown) {
+  const items = Array.isArray(value) ? value : [];
+  return items
+    .map((item) => {
+      const body = safeObject(item);
+      const id = safeText(body?.id, 32);
+      if (!id || !/^MLB\d+$/.test(id)) return null;
+      const seller = safeObject(body?.seller);
+      return {
+        id,
+        title: safeText(body?.title, 120),
+        price: safeNumber(body?.price),
+        currencyId: safeText(body?.currency_id, 12),
+        permalink: sanitizeMercadoLivrePermalink(body?.permalink),
+        seller: seller
+          ? {
+              idMasked: maskUserId(seller.id),
+              nickname: safeText(seller.nickname, 60)
+            }
+          : null
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+    .slice(0, 5);
 }
 
 function safeStringList(value: unknown, maxItems = 12) {
@@ -257,6 +330,7 @@ export class MercadoLivreOwnerDiagnosticService {
 
   getStatus() {
     const enabled = this.env.MERCADO_LIVRE_OWNER_DIAGNOSTIC_ENABLED === "true";
+    const searchEnabled = this.env.MERCADO_LIVRE_OWNER_SEARCH_DIAGNOSTIC_ENABLED === "true";
     const appIdMatches = this.env.MERCADO_LIVRE_CLIENT_ID?.trim() === MERCADO_LIVRE_OWNER_DIAGNOSTIC_EXPECTED_APP_ID;
     const configured = Boolean(
       this.env.MERCADO_LIVRE_CLIENT_SECRET?.trim() &&
@@ -265,9 +339,10 @@ export class MercadoLivreOwnerDiagnosticService {
     );
     return {
       enabled,
+      searchEnabled,
       appIdMatches,
       configured,
-      available: enabled && appIdMatches && configured,
+      available: enabled && searchEnabled && appIdMatches && configured,
       expectedAppId: MERCADO_LIVRE_OWNER_DIAGNOSTIC_EXPECTED_APP_ID
     };
   }
@@ -395,30 +470,59 @@ export class MercadoLivreOwnerDiagnosticService {
       result.calls.applicationGet = 1;
       result.calls.total += 1;
       const applicationBody = safeObject(await readJson(applicationResponse));
-      const applicationError = applicationResponse.ok
+      const applicationAuthorized = applicationResponse.status === 200;
+      const applicationError = applicationAuthorized
         ? null
         : sanitizeError(applicationBody, "Nao foi possivel consultar os dados administrativos do aplicativo.");
       result.application = {
         http: applicationResponse.status,
         requestId: requestIdFromHeaders(applicationResponse.headers),
-        id: applicationResponse.ok ? safeText(applicationBody?.id, 40) : null,
-        name: applicationResponse.ok ? safeText(applicationBody?.name, 160) : null,
-        active: applicationResponse.ok ? safeBoolean(applicationBody?.active) : null,
-        siteId: applicationResponse.ok ? safeText(applicationBody?.site_id ?? applicationBody?.site, 16) : null,
-        status: applicationResponse.ok ? safeText(applicationBody?.status, 80) : null,
-        certification: applicationResponse.ok
+        id: applicationAuthorized ? safeText(applicationBody?.id, 40) : null,
+        name: applicationAuthorized ? safeText(applicationBody?.name, 160) : null,
+        active: applicationAuthorized ? safeBoolean(applicationBody?.active) : null,
+        siteId: applicationAuthorized ? safeText(applicationBody?.site_id ?? applicationBody?.site, 16) : null,
+        status: applicationAuthorized ? safeText(applicationBody?.status, 80) : null,
+        certification: applicationAuthorized
           ? safeText(applicationBody?.certification_status, 80) ?? safeText(applicationBody?.certification, 80) ?? safeBoolean(applicationBody?.certified)
           : null,
-        redirectUris: applicationResponse.ok ? collectRedirectUris(applicationBody) : [],
-        permissions: applicationResponse.ok ? collectPermissions(applicationBody) : [],
+        redirectUris: applicationAuthorized ? collectRedirectUris(applicationBody) : [],
+        permissions: applicationAuthorized ? collectPermissions(applicationBody) : [],
         error: applicationError
       };
 
-      result.outcome = applicationResponse.ok
+      result.outcome = applicationAuthorized
         ? "OWNER_ACCESS_CONFIRMED"
         : applicationResponse.status === 403 && applicationError?.code === "caller_not_user"
           ? "CALLER_NOT_USER"
           : "DIAGNOSTIC_FAILED";
+
+      if (!applicationAuthorized) {
+        this.logResult(result);
+        return result;
+      }
+
+      try {
+        result.calls.searchGet = 1;
+        result.calls.total += 1;
+        const searchResponse = await this.fetchImpl(ownerSearchUrl, {
+          method: "GET",
+          headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+          signal: AbortSignal.timeout(requestTimeoutMs)
+        });
+        const searchBody = safeObject(await readJson(searchResponse));
+        const paging = safeObject(searchBody?.paging);
+        const rawResults = Array.isArray(searchBody?.results) ? searchBody.results : [];
+        result.search = {
+          http: searchResponse.status,
+          requestId: requestIdFromHeaders(searchResponse.headers),
+          total: searchResponse.ok ? safeNumber(paging?.total) : null,
+          returned: searchResponse.ok ? rawResults.length : 0,
+          results: searchResponse.ok ? sanitizeSearchResults(rawResults) : [],
+          error: searchResponse.ok ? null : sanitizeError(searchBody, "A busca global nao foi autorizada pelo Mercado Livre.")
+        };
+      } catch {
+        result.search.error = { code: "TEMPORARY_ERROR", message: "Nao foi possivel concluir a busca global agora." };
+      }
       this.logResult(result);
       return result;
     } catch {
@@ -479,7 +583,8 @@ export class MercadoLivreOwnerDiagnosticService {
       oauth: { http: null, tokenReceived: false, error: null },
       usersMe: emptyUsersMeResult(),
       application: emptyApplicationResult(),
-      calls: { tokenExchange: 0, usersMeGet: 0, applicationGet: 0, total: 0 },
+      search: emptySearchResult(),
+      calls: { tokenExchange: 0, usersMeGet: 0, applicationGet: 0, searchGet: 0, total: 0 },
       persistence: {
         tokenStored: false,
         refreshTokenStored: false,
@@ -493,6 +598,9 @@ export class MercadoLivreOwnerDiagnosticService {
     const status = this.getStatus();
     if (!status.enabled) {
       throw new MercadoLivreOwnerDiagnosticError("FEATURE_DISABLED", "Diagnostico temporario desabilitado.", 404);
+    }
+    if (!status.searchEnabled) {
+      throw new MercadoLivreOwnerDiagnosticError("SEARCH_FEATURE_DISABLED", "Diagnostico temporario de busca desabilitado.", 404);
     }
     if (!status.appIdMatches) {
       throw new MercadoLivreOwnerDiagnosticError("APP_ID_MISMATCH", "O App ID configurado nao corresponde ao aplicativo esperado.", 409);
@@ -577,6 +685,8 @@ export class MercadoLivreOwnerDiagnosticService {
       usersMeRequestId: result.usersMe.requestId,
       applicationHttp: result.application.http,
       applicationRequestId: result.application.requestId,
+      searchHttp: result.search.http,
+      searchRequestId: result.search.requestId,
       calls: result.calls,
       persistence: result.persistence
     });

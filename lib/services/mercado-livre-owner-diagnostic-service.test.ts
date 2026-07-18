@@ -12,6 +12,7 @@ const expectedRedirectUri = "https://187-77-62-188.sslip.io/api/marketplaces/mer
 function environment(overrides: Record<string, string | undefined> = {}) {
   return {
     MERCADO_LIVRE_OWNER_DIAGNOSTIC_ENABLED: "true",
+    MERCADO_LIVRE_OWNER_SEARCH_DIAGNOSTIC_ENABLED: "true",
     MERCADO_LIVRE_CLIENT_ID: MERCADO_LIVRE_OWNER_DIAGNOSTIC_EXPECTED_APP_ID,
     MERCADO_LIVRE_CLIENT_SECRET: "test-client-secret",
     MERCADO_LIVRE_REDIRECT_URI: expectedRedirectUri,
@@ -43,6 +44,25 @@ test("divergent App ID blocks the diagnostic", () => {
   });
   assert.equal(service.getStatus().appIdMatches, false);
   expectDiagnosticError(() => service.createAuthorization({ organizationId: "org-1", userId: "user-1" }), "APP_ID_MISMATCH");
+});
+
+test("search flag false fails closed before generating authorization", () => {
+  const service = new MercadoLivreOwnerDiagnosticService({
+    env: environment({ MERCADO_LIVRE_OWNER_SEARCH_DIAGNOSTIC_ENABLED: "false" })
+  });
+  assert.equal(service.getStatus().available, false);
+  expectDiagnosticError(
+    () => service.createAuthorization({ organizationId: "org-1", userId: "user-1" }),
+    "SEARCH_FEATURE_DISABLED"
+  );
+
+  const absentFlagService = new MercadoLivreOwnerDiagnosticService({
+    env: environment({ MERCADO_LIVRE_OWNER_SEARCH_DIAGNOSTIC_ENABLED: undefined })
+  });
+  expectDiagnosticError(
+    () => absentFlagService.createAuthorization({ organizationId: "org-1", userId: "user-1" }),
+    "SEARCH_FEATURE_DISABLED"
+  );
 });
 
 test("authorization uses the expected app, registered callback and a dedicated signed state", () => {
@@ -107,7 +127,7 @@ test("start rate limit blocks the fourth attempt in ten minutes", () => {
   expectDiagnosticError(() => service.createAuthorization({ organizationId: "org-1", userId: "user-1" }), "RATE_LIMITED");
 });
 
-test("successful diagnostic performs one token exchange and exactly two GETs", async () => {
+test("successful diagnostic performs one token exchange and exactly three GETs", async () => {
   const calls: Array<{ url: string; method: string; body: string; authorization: string | null }> = [];
   const logs: Array<{ message: string; metadata: Record<string, unknown> }> = [];
   const temporaryAccessToken = "temporary-access-token-must-never-leak";
@@ -138,17 +158,71 @@ test("successful diagnostic performs one token exchange and exactly two GETs", a
         access_token: "unexpected-secret-field"
       }), { status: 200, headers: { "Content-Type": "application/json", "x-request-id": "users-request-id" } });
     }
+    if (url.includes("/applications/")) {
+      return new Response(JSON.stringify({
+        id: MERCADO_LIVRE_OWNER_DIAGNOSTIC_EXPECTED_APP_ID,
+        name: "Matrix Commerce",
+        active: true,
+        site_id: "MLB",
+        status: "certified",
+        certification_status: "approved",
+        redirect_uris: [`${expectedRedirectUri}?private=value`, "javascript:alert(1)"],
+        permissions: ["read", "items"],
+        client_secret: "unexpected-client-secret"
+      }), { status: 200, headers: { "Content-Type": "application/json", "x-request-id": "application-request-id" } });
+    }
     return new Response(JSON.stringify({
-      id: MERCADO_LIVRE_OWNER_DIAGNOSTIC_EXPECTED_APP_ID,
-      name: "Matrix Commerce",
-      active: true,
-      site_id: "MLB",
-      status: "certified",
-      certification_status: "approved",
-      redirect_uris: [`${expectedRedirectUri}?private=value`, "javascript:alert(1)"],
-      permissions: ["read", "items"],
-      client_secret: "unexpected-client-secret"
-    }), { status: 200, headers: { "Content-Type": "application/json", "x-request-id": "application-request-id" } });
+      paging: { total: 123 },
+      results: [
+        {
+          id: "MLB1234567890",
+          title: "Rolete PCX 160",
+          price: 89.9,
+          currency_id: "BRL",
+          permalink: "https://produto.mercadolivre.com.br/MLB-1234567890-roleto-pcx",
+          seller: { id: "244123155", nickname: "LOJA_TESTE" },
+          access_token: "unexpected-search-token"
+        },
+        {
+          id: "MLB1234567891",
+          title: "Rolete Embreagem PCX 160",
+          price: 99.9,
+          currency_id: "BRL",
+          permalink: "https://produto.mercadolivre.com.br/MLB-1234567891-roleto-embreagem-pcx",
+          seller: { id: "244123156", nickname: "LOJA_TESTE_2" }
+        },
+        {
+          id: "MLB1234567892",
+          title: "Rolete Primario PCX 160",
+          price: 109.9,
+          currency_id: "BRL",
+          permalink: "https://produto.mercadolivre.com.br/MLB-1234567892-roleto-primario-pcx",
+          seller: { id: "244123157", nickname: "LOJA_TESTE_3" }
+        },
+        {
+          id: "MLB1234567893",
+          title: "Kit Rolete PCX 160",
+          price: 119.9,
+          currency_id: "BRL",
+          permalink: "https://produto.mercadolivre.com.br/MLB-1234567893-kit-roleto-pcx",
+          seller: { id: "244123158", nickname: "LOJA_TESTE_4" }
+        },
+        {
+          id: "MLB1234567894",
+          title: "Rolete PCX 160 2023",
+          price: 129.9,
+          currency_id: "BRL",
+          permalink: "https://produto.mercadolivre.com.br/MLB-1234567894-roleto-pcx-2023",
+          seller: { id: "244123159", nickname: "LOJA_TESTE_5" }
+        },
+        {
+          id: "INVALID",
+          title: "Resultado invalido",
+          permalink: "https://example.com/not-allowed"
+        }
+      ],
+      authorization: "unexpected-authorization"
+    }), { status: 200, headers: { "Content-Type": "application/json", "x-request-id": "search-request-id" } });
   }) as typeof fetch;
   const service = new MercadoLivreOwnerDiagnosticService({
     env: environment(),
@@ -166,19 +240,35 @@ test("successful diagnostic performs one token exchange and exactly two GETs", a
     userId: "user-1"
   });
 
-  assert.deepEqual(calls.map((call) => call.method), ["POST", "GET", "GET"]);
-  assert.equal(calls.filter((call) => call.method === "GET").length, 2);
+  assert.deepEqual(calls.map((call) => call.method), ["POST", "GET", "GET", "GET"]);
+  assert.equal(calls.filter((call) => call.method === "GET").length, 3);
   assert.equal(calls[1].url, "https://api.mercadolibre.com/users/me");
   assert.equal(calls[2].url, `https://api.mercadolibre.com/applications/${MERCADO_LIVRE_OWNER_DIAGNOSTIC_EXPECTED_APP_ID}`);
+  assert.equal(calls[3].url, "https://api.mercadolibre.com/sites/MLB/search?q=rolete%20pcx%20160&limit=10&offset=0");
+  assert.ok(calls.every((call) => !call.url.includes("/products/search")));
   assert.match(calls[0].body, /grant_type=authorization_code/);
   assert.doesNotMatch(calls[0].body, /grant_type=refresh_token/);
-  assert.equal(result.calls.total, 3);
+  assert.equal(result.calls.total, 4);
   assert.equal(result.calls.usersMeGet, 1);
   assert.equal(result.calls.applicationGet, 1);
+  assert.equal(result.calls.searchGet, 1);
   assert.equal(result.outcome, "OWNER_ACCESS_CONFIRMED");
   assert.equal(result.usersMe.userIdMasked, "244***155");
   assert.deepEqual(result.application.redirectUris, ["187-77-62-188.sslip.io/api/marketplaces/mercado-livre/callback"]);
   assert.deepEqual(result.application.permissions, ["read", "items"]);
+  assert.equal(result.search.http, 200);
+  assert.equal(result.search.total, 123);
+  assert.equal(result.search.returned, 6);
+  assert.equal(result.search.results.length, 5);
+  assert.deepEqual(result.search.results[0], {
+    id: "MLB1234567890",
+    title: "Rolete PCX 160",
+    price: 89.9,
+    currencyId: "BRL",
+    permalink: "https://produto.mercadolivre.com.br/MLB-1234567890-roleto-pcx",
+    seller: { idMasked: "244***155", nickname: "LOJA_TESTE" }
+  });
+  assert.equal(result.search.results[4]?.id, "MLB1234567894");
   assert.deepEqual(result.persistence, {
     tokenStored: false,
     refreshTokenStored: false,
@@ -194,6 +284,8 @@ test("successful diagnostic performs one token exchange and exactly two GETs", a
   assert.doesNotMatch(safeOutput, new RegExp(authorizationCode));
   assert.doesNotMatch(safeOutput, /unexpected-client-secret/);
   assert.doesNotMatch(safeOutput, /unexpected-secret-field/);
+  assert.doesNotMatch(safeOutput, /unexpected-search-token/);
+  assert.doesNotMatch(safeOutput, /unexpected-authorization/);
 });
 
 test("caller_not_user is classified without fallback requests", async () => {
@@ -221,7 +313,36 @@ test("caller_not_user is classified without fallback requests", async () => {
 
   assert.equal(result.outcome, "CALLER_NOT_USER");
   assert.equal(result.application.http, 403);
+  assert.equal(result.calls.searchGet, 0);
+  assert.equal(result.search.http, null);
   assert.equal(calls.length, 3);
+  assert.ok(calls.every((url) => !url.includes("/sites/MLB/search") && !url.includes("/products/search")));
+});
+
+test("application response other than HTTP 200 blocks the search", async () => {
+  const calls: string[] = [];
+  const fetchImpl = (async (input: URL | RequestInfo) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.endsWith("/oauth/token")) return new Response(JSON.stringify({ access_token: "temporary-token" }), { status: 200 });
+    if (url.endsWith("/users/me")) return new Response(JSON.stringify({ id: "123456789" }), { status: 200 });
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  const service = new MercadoLivreOwnerDiagnosticService({ env: environment(), fetchImpl, randomNonce: () => "h".repeat(43) });
+  const authorization = service.createAuthorization({ organizationId: "org-1", userId: "user-1" });
+  const result = await service.run({
+    code: "single-use-code",
+    state: new URL(authorization.authorizationUrl).searchParams.get("state")!,
+    nonceCookie: authorization.nonce,
+    organizationId: "org-1",
+    userId: "user-1"
+  });
+
+  assert.equal(result.application.http, 204);
+  assert.equal(result.outcome, "DIAGNOSTIC_FAILED");
+  assert.equal(result.calls.searchGet, 0);
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every((url) => !url.includes("/sites/MLB/search") && !url.includes("/products/search")));
 });
 
 test("signed result is sanitized, scoped to the session and single use", async () => {

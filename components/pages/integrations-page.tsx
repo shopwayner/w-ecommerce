@@ -32,6 +32,7 @@ type MercadoLivreConnection = {
 type MercadoLivreStatus = { configured: boolean; data: MercadoLivreConnection | null };
 type MercadoLivreOwnerDiagnosticStatus = {
   enabled: boolean;
+  searchEnabled: boolean;
   available: boolean;
   appIdMatches: boolean;
   configured: boolean;
@@ -58,6 +59,21 @@ type MercadoLivreOwnerDiagnosticResult = {
     certification: string | boolean | null;
     redirectUris: string[];
     permissions: string[];
+    error: { code: string | null; message: string } | null;
+  };
+  search: {
+    http: number | null;
+    requestId: string | null;
+    total: number | null;
+    returned: number;
+    results: Array<{
+      id: string;
+      title: string | null;
+      price: number | null;
+      currencyId: string | null;
+      permalink: string | null;
+      seller: { idMasked: string | null; nickname: string | null } | null;
+    }>;
     error: { code: string | null; message: string } | null;
   };
 };
@@ -308,11 +324,11 @@ export function IntegrationsPage() {
             {ownerDiagnosticStatus?.available ? (
               <div className="mt-4 border-t border-matrix-border pt-4">
                 <p className="text-xs text-slate-400">
-                  Autorize somente a conta proprietaria do aplicativo. O token temporario nao sera salvo e nenhuma conexao sera modificada.
+                  Autorize somente a conta proprietaria do aplicativo. O token temporario sera usado para uma unica busca de teste e nao sera salvo.
                 </p>
                 <Button className="mt-3" disabled={ownerDiagnosticLoading} onClick={startOwnerDiagnostic} variant="secondary">
                   <ShieldCheck className="h-4 w-4" />
-                  {ownerDiagnosticLoading ? "Iniciando diagnostico..." : "Diagnosticar conta proprietaria do aplicativo"}
+                  {ownerDiagnosticLoading ? "Iniciando diagnostico..." : "Diagnosticar busca com a conta proprietaria"}
                 </Button>
               </div>
             ) : null}
@@ -351,6 +367,26 @@ export function IntegrationsPage() {
                   {ownerDiagnosticResult.application.redirectUris.length ? <span>Redirecionamentos: {ownerDiagnosticResult.application.redirectUris.join(", ")}</span> : null}
                   {ownerDiagnosticResult.application.permissions.length ? <span>Permissoes: {ownerDiagnosticResult.application.permissions.join(", ")}</span> : null}
                   {ownerDiagnosticResult.application.error ? <span className="text-orange-200">{ownerDiagnosticResult.application.error.message}</span> : null}
+                </div>
+                <div className="grid gap-2 rounded-md border border-matrix-border bg-white/[0.02] p-3">
+                  <strong className="text-slate-200">Busca global de teste</strong>
+                  <span>HTTP: {ownerDiagnosticResult.search.http ?? "-"}</span>
+                  <span>Total: {ownerDiagnosticResult.search.total ?? "-"}</span>
+                  <span>Retornados: {ownerDiagnosticResult.search.returned}</span>
+                  <span>Request ID: {ownerDiagnosticResult.search.requestId ?? "-"}</span>
+                  {ownerDiagnosticResult.search.error ? <span className="text-orange-200">{ownerDiagnosticResult.search.error.message}</span> : null}
+                  {ownerDiagnosticResult.search.results.length ? (
+                    <div className="mt-1 space-y-2">
+                      {ownerDiagnosticResult.search.results.map((item) => (
+                        <div className="rounded border border-matrix-border px-2 py-2" key={item.id}>
+                          <div className="font-medium text-slate-200">{item.id} - {item.title ?? "Titulo indisponivel"}</div>
+                          <div>{item.price === null ? "Preco indisponivel" : `${item.currencyId ?? ""} ${item.price}`.trim()}</div>
+                          {item.seller ? <div>Vendedor: {item.seller.nickname ?? item.seller.idMasked ?? "-"}</div> : null}
+                          {item.permalink ? <div className="break-all">Link: {item.permalink}</div> : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               </div>
             ) : null}
