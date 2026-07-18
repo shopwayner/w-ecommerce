@@ -22,13 +22,23 @@ test("omits an empty brand instead of clearing the current product brand", () =>
   });
 });
 
-test("filters invalid image URLs, removes duplicates and preserves order", () => {
+test("rejects generic brand values instead of overwriting the current brand", () => {
+  for (const value of ["Sem marca", "N/A", "Não informado", "Não informada", "Genérico"]) {
+    assert.equal(normalizeIntelligentProductPreviewBrand(value), undefined);
+  }
+});
+
+test("accepts only public HTTPS images, rejects placeholders, removes duplicates and preserves order", () => {
   assert.deepEqual(
     normalizeIntelligentProductPreviewImages([
       "https://cdn.example.com/one.jpg",
       "not-a-url",
       "https://cdn.example.com/one.jpg",
       "ftp://cdn.example.com/two.jpg",
+      "http://cdn.example.com/two.jpg",
+      "https://localhost/private.jpg",
+      "https://cdn.example.com/images/sem-foto.svg",
+      "https://user:password@cdn.example.com/private.jpg",
       "https://cdn.example.com/two.jpg"
     ]),
     ["https://cdn.example.com/one.jpg", "https://cdn.example.com/two.jpg"]

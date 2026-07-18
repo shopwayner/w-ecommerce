@@ -17,6 +17,7 @@ const productInclude = {
   prices: { take: 1, orderBy: { createdAt: "desc" as const } },
   inventory: true,
   images: { take: 1, orderBy: { position: "asc" as const } },
+  _count: { select: { images: true } },
   mappings: {
     take: 1,
     orderBy: { updatedAt: "desc" as const },
@@ -146,6 +147,7 @@ function serializeProduct(product: ProductRecord) {
     description: product.description,
     ncm: product.ncm,
     imageUrl: product.images[0]?.url ?? null,
+    imageCount: product._count.images,
     weight: decimalText(product.weight),
     height: decimalText(product.height),
     width: decimalText(product.width),

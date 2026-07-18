@@ -12,6 +12,16 @@ type IntelligentProductPreviewProps = {
   images: string[];
   selectedIndex: number;
   notice?: string | null;
+  currentProduct?: {
+    title: string;
+    brand: string | null;
+    imageCount: number;
+  } | null;
+  referenceDetails?: {
+    gtin: string | null;
+    price: string | null;
+    attributes: Array<{ label: string; value: string }>;
+  } | null;
   saving: boolean;
   canSave: boolean;
   onTitleChange: (value: string) => void;
@@ -31,6 +41,8 @@ export function IntelligentProductPreview({
   images,
   selectedIndex,
   notice,
+  currentProduct,
+  referenceDetails,
   saving,
   canSave,
   onTitleChange,
@@ -180,6 +192,50 @@ export function IntelligentProductPreview({
             ))}
           </div>
         ) : null}
+
+        {referenceDetails?.gtin || referenceDetails?.price || referenceDetails?.attributes.length ? (
+          <div className="mt-4 border-t border-matrix-border pt-4">
+            <h5 className="text-sm font-semibold text-matrix-fg">Dados do anúncio escolhido</h5>
+            <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2 text-sm text-matrix-muted">
+              {referenceDetails.gtin ? <span>GTIN: {referenceDetails.gtin}</span> : null}
+              {referenceDetails.price ? <span>Preço de referência: {referenceDetails.price}</span> : null}
+            </div>
+            {referenceDetails.attributes.length ? (
+              <div className="mt-3 flex flex-wrap gap-2" aria-label="Atributos básicos do anúncio">
+                {referenceDetails.attributes.map((attribute) => (
+                  <span
+                    className="rounded border border-matrix-border bg-matrix-panel px-2 py-1 text-xs text-matrix-muted"
+                    key={`${attribute.label}-${attribute.value}`}
+                  >
+                    {attribute.label}: {attribute.value}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {currentProduct ? (
+          <div className="mt-4 border-t border-matrix-border pt-4">
+            <h5 className="text-sm font-semibold text-matrix-fg">Comparação</h5>
+            <div className="mt-3 grid gap-4 text-sm sm:grid-cols-2 sm:divide-x sm:divide-matrix-border">
+              <dl className="min-w-0 space-y-2">
+                <dt className="font-semibold text-matrix-fg">Produto atual</dt>
+                <dd className="break-words text-matrix-muted">Nome: {currentProduct.title}</dd>
+                <dd className="break-words text-matrix-muted">Marca: {currentProduct.brand || "Não informada"}</dd>
+                <dd className="text-matrix-muted">Fotos atuais: {currentProduct.imageCount}</dd>
+              </dl>
+              <dl className="min-w-0 space-y-2 sm:pl-4">
+                <dt className="font-semibold text-matrix-fg">Produto escolhido</dt>
+                <dd className="break-words text-matrix-muted">Novo nome: {title}</dd>
+                <dd className="break-words text-matrix-muted">
+                  Nova marca: {showBrand && brand ? brand : "Marca atual preservada"}
+                </dd>
+                <dd className="text-matrix-muted">Novas fotos: {images.length}</dd>
+              </dl>
+            </div>
+          </div>
+        ) : null}
         </section>
       </div>
 
@@ -191,7 +247,7 @@ export function IntelligentProductPreview({
           type="button"
         >
           <Save className="h-4 w-4" />
-          {saving ? "Salvando produto..." : "Salvar no W Ecommerce"}
+          {saving ? "Atualizando produto..." : "Atualizar produto no W Ecommerce"}
         </Button>
         <Button className="w-full justify-center" disabled={saving} onClick={onBack} type="button" variant="secondary">
           <ArrowLeft className="h-4 w-4" />

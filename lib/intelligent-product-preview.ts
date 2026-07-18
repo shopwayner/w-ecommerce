@@ -1,3 +1,5 @@
+import { normalizeMercadoLivreReferenceImageUrl } from "@/lib/mercado-livre-reference-images";
+
 export const INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES = 13;
 
 export type IntelligentProductPreviewFields = {
@@ -10,6 +12,23 @@ function collapseWhitespace(value: string) {
   return value.trim().replace(/\s+/g, " ");
 }
 
+const invalidBrandValues = new Set([
+  "sem marca",
+  "n/a",
+  "na",
+  "nao informado",
+  "nao informada",
+  "generico",
+  "generica"
+]);
+
+function normalizedBrandKey(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
 export function normalizeIntelligentProductPreviewTitle(value: unknown) {
   return typeof value === "string" ? collapseWhitespace(value) : "";
 }
@@ -17,22 +36,12 @@ export function normalizeIntelligentProductPreviewTitle(value: unknown) {
 export function normalizeIntelligentProductPreviewBrand(value: unknown) {
   if (typeof value !== "string") return undefined;
   const normalized = collapseWhitespace(value);
-  return normalized || undefined;
+  if (!normalized || invalidBrandValues.has(normalizedBrandKey(normalized))) return undefined;
+  return normalized;
 }
 
 function normalizeImageUrl(value: unknown) {
-  if (typeof value !== "string") return null;
-  const normalized = value.trim();
-  if (!normalized) return null;
-
-  try {
-    const url = new URL(normalized);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    if (url.username || url.password) return null;
-    return url.toString();
-  } catch {
-    return null;
-  }
+  return normalizeMercadoLivreReferenceImageUrl(value);
 }
 
 function normalizeImageList(values: unknown, maximum: number) {

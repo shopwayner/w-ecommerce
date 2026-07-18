@@ -308,6 +308,12 @@ type MercadoLivreManualReferenceResponse = {
   error?: string;
 };
 
+type IntelligentProductPreviewReferenceDetails = {
+  gtin: string | null;
+  price: string | null;
+  attributes: Array<{ label: string; value: string }>;
+};
+
 type SafeProduct = {
   productId: string;
   sku: string | null;
@@ -317,6 +323,7 @@ type SafeProduct = {
   description: string | null;
   ncm: string | null;
   imageUrl: string | null;
+  imageCount: number;
   weight: string | null;
   height: string | null;
   width: string | null;
@@ -637,6 +644,18 @@ function mercadoLivrePrimaryNotice(search: MercadoLivreSearchResponse | null) {
 
 function mercadoLivrePublicSearchUrl(value: string | null | undefined) {
   return buildMercadoLivreWebsiteSearchUrl(value);
+}
+
+function mercadoLivrePreviewReferenceDetails(item: MercadoLivreSearchItem): IntelligentProductPreviewReferenceDetails {
+  return {
+    gtin: item.gtin?.trim() || null,
+    price: typeof item.price === "number" ? formatCurrency(item.price) : null,
+    attributes: (item.attributes ?? []).flatMap((attribute) => {
+      const label = attribute.name?.trim();
+      const value = attribute.value?.trim();
+      return label && value ? [{ label, value }] : [];
+    }).slice(0, 8)
+  };
 }
 
 function mercadoLivreSourceLabel(source: string | null | undefined) {
@@ -1264,11 +1283,11 @@ export function IntelligentProductRegistrationPage() {
   const [mercadoLivreLocalFilters, setMercadoLivreLocalFilters] = useState<Set<MercadoLivreLocalFilter>>(defaultMercadoLivreLocalFilters);
   const [mercadoLivreFiltersOpen, setMercadoLivreFiltersOpen] = useState(false);
   const mercadoLivreFiltersRef = useRef<HTMLDivElement>(null);
-  const [mercadoLivrePublicQuery, setMercadoLivrePublicQuery] = useState("");
   const [manualReferenceInput, setManualReferenceInput] = useState("");
   const [manualReferenceLoading, setManualReferenceLoading] = useState(false);
   const [manualReferenceMessage, setManualReferenceMessage] = useState<string | null>(null);
   const [manualReferenceError, setManualReferenceError] = useState(false);
+  const [mercadoLivreTitleSearchOpened, setMercadoLivreTitleSearchOpened] = useState(false);
   const [selectedMercadoLivreResultKey, setSelectedMercadoLivreResultKey] = useState<string | null>(null);
   const [mercadoLivreDetailLoadingKey, setMercadoLivreDetailLoadingKey] = useState<string | null>(null);
   const [mercadoLivreDetailError, setMercadoLivreDetailError] = useState<{ key: string; message: string } | null>(null);
@@ -1288,6 +1307,7 @@ export function IntelligentProductRegistrationPage() {
   const [previewImages, setPreviewImages] = useState<string[]>([]);
   const [previewSelectedIndex, setPreviewSelectedIndex] = useState(0);
   const [previewNotice, setPreviewNotice] = useState<string | null>(null);
+  const [previewReferenceDetails, setPreviewReferenceDetails] = useState<IntelligentProductPreviewReferenceDetails | null>(null);
   const saveInFlightRef = useRef(false);
   const manualReferenceRequestRef = useRef(0);
   const mercadoLivreDetailRequestsRef = useRef<Set<string>>(new Set());
@@ -1305,7 +1325,7 @@ export function IntelligentProductRegistrationPage() {
   const mercadoLivreGtinCatalogEmpty = isMercadoLivreGtinCatalogEmpty(mercadoLivreSearch);
   const mercadoLivreEffectiveSearchType = effectiveMercadoLivreSearchType(mercadoLivreSearch);
   const mercadoLivreEffectiveSearchValue = effectiveMercadoLivreSearchValue(mercadoLivreSearch);
-  const mercadoLivreOfficialSearchUrl = mercadoLivrePublicSearchUrl(mercadoLivrePublicQuery);
+  const mercadoLivreTitleSearchUrl = mercadoLivrePublicSearchUrl(selectedProductName);
   const mercadoLivreManualSearchUrl = mercadoLivrePublicSearchUrl(mercadoLivreEffectiveSearchValue);
   const mercadoLivreCopyGtinValue = mercadoLivreSearch?.localProduct?.gtin || (mercadoLivreEffectiveSearchType === "GTIN" ? mercadoLivreEffectiveSearchValue : null);
   const mercadoLivreGtinManualSearchUrl = mercadoLivrePublicSearchUrl(mercadoLivreCopyGtinValue);
@@ -1789,7 +1809,6 @@ export function IntelligentProductRegistrationPage() {
     setSelectedProduct(nextProduct);
     setSelectedProductSku(nextProduct?.sku ?? null);
     setSelectedProductName(nextProduct?.name ?? null);
-    setMercadoLivrePublicQuery(nextProduct?.name ?? "");
     setSelectedProductGtin(nextGtin || null);
     setSelectedProductBrand(nextProduct?.brand ?? null);
     setAmazonGtinInput(nextGtin);
@@ -1797,6 +1816,12 @@ export function IntelligentProductRegistrationPage() {
     setAmazonCatalogItems([]);
     setAmazonCatalogMessage(null);
     resetAmazonReferenceState(nextProduct);
+    manualReferenceRequestRef.current += 1;
+    setManualReferenceInput("");
+    setManualReferenceLoading(false);
+    setManualReferenceMessage(null);
+    setManualReferenceError(false);
+    setMercadoLivreTitleSearchOpened(false);
   }
 
   async function consultInternalGtinCatalog() {
@@ -2471,7 +2496,7 @@ export function IntelligentProductRegistrationPage() {
         categoryPath: payload.item.category.path,
         brand: payload.item.brand,
         attributes: payload.item.attributes,
-        source: "MERCADO_LIVRE_PUBLIC_SEARCH"
+        source: "MERCADO_LIVRE_READ_ONLY"
       };
       const compatibility = calculateProductSuggestionCompatibility(
         product,
@@ -2498,13 +2523,11 @@ export function IntelligentProductRegistrationPage() {
     brand?: string | null;
     images?: Array<string | null | undefined>;
     notice?: string | null;
+    referenceDetails?: IntelligentProductPreviewReferenceDetails | null;
   }) {
     const title = normalizeIntelligentProductPreviewTitle(input.title) || product?.name || "";
     const brand = normalizeIntelligentProductPreviewBrand(input.brand) ?? normalizeIntelligentProductPreviewBrand(product?.brand);
-    const suggestionImages = normalizeIntelligentProductPreviewImages(input.images);
-    const images = suggestionImages.length
-      ? suggestionImages
-      : normalizeIntelligentProductPreviewImages(product?.imageUrl ? [product.imageUrl] : []);
+    const images = normalizeIntelligentProductPreviewImages(input.images);
 
     setPreviewTitle(title);
     setPreviewBrand(brand ?? "");
@@ -2512,6 +2535,7 @@ export function IntelligentProductRegistrationPage() {
     setPreviewImages(images);
     setPreviewSelectedIndex(0);
     setPreviewNotice(input.notice ?? null);
+    setPreviewReferenceDetails(input.referenceDetails ?? null);
     setActivePanel("extracted");
   }
 
@@ -2548,7 +2572,8 @@ export function IntelligentProductRegistrationPage() {
       title: item.title,
       brand: item.brand,
       images: mercadoLivreReferenceImageUrls(item),
-      notice: options?.notice ?? (needsAttention ? "Confira as fotos e o título antes de salvar." : null)
+      notice: options?.notice ?? (needsAttention ? "Confira as fotos e o título antes de salvar." : null),
+      referenceDetails: mercadoLivrePreviewReferenceDetails(item)
     });
   }
 
@@ -2560,6 +2585,7 @@ export function IntelligentProductRegistrationPage() {
     setPreviewImages([]);
     setPreviewSelectedIndex(0);
     setPreviewNotice(null);
+    setPreviewReferenceDetails(null);
   }
 
   function navigatePreviewImage(direction: -1 | 1) {
@@ -2626,7 +2652,7 @@ export function IntelligentProductRegistrationPage() {
       setSelectedMercadoLivreFields(new Set());
       resetAmazonReferenceState(product);
       await search();
-      setMessage("Produto atualizado com sucesso.");
+      setMessage("Produto atualizado no W Ecommerce. A atualização no Bling deve ser realizada separadamente.");
     } catch {
       setMessage("Não foi possível salvar o produto agora.");
     } finally {
@@ -2743,6 +2769,15 @@ export function IntelligentProductRegistrationPage() {
     <IntelligentProductPreview
       brand={previewBrand}
       canSave={Boolean(product)}
+      currentProduct={
+        product
+          ? {
+              title: product.name,
+              brand: product.brand,
+              imageCount: product.imageCount
+            }
+          : null
+      }
       images={previewImages}
       onBack={closeProductPreview}
       onBrandChange={setPreviewBrand}
@@ -2753,6 +2788,7 @@ export function IntelligentProductRegistrationPage() {
       onSelectImage={setPreviewSelectedIndex}
       onTitleChange={setPreviewTitle}
       notice={previewNotice}
+      referenceDetails={previewReferenceDetails}
       saving={saving}
       selectedIndex={previewSelectedIndex}
       showBrand={previewBrandVisible}
@@ -2902,7 +2938,7 @@ export function IntelligentProductRegistrationPage() {
       </Card>
 
       <div className="mt-4 grid gap-4 2xl:grid-cols-[300px_minmax(0,1fr)]">
-        <aside className="w-full max-w-md space-y-4 rounded-lg border border-matrix-border bg-matrix-panel/88 p-4 shadow-glow 2xl:max-w-none">
+        <aside className="w-full space-y-4 rounded-lg border border-matrix-border bg-matrix-panel/88 p-4 shadow-glow">
           <form onSubmit={search}>
             <div className="flex items-center gap-2 text-matrix-goldDark">
               <Search className="h-5 w-5" />
@@ -3089,77 +3125,73 @@ export function IntelligentProductRegistrationPage() {
               </Button>
             ) : null}
             <div className="mt-3 space-y-3 border-t border-matrix-border pt-3">
-              <div className="rounded-md border border-matrix-gold/30 bg-matrix-panel/70 p-3">
-                <label className="block text-xs font-semibold text-matrix-muted" htmlFor="mercado-livre-public-query">
-                  Pesquisa
-                </label>
-                <input
-                  autoComplete="off"
-                  className="mt-2 w-full min-w-0 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm text-matrix-fg outline-none focus:border-matrix-gold/60"
-                  id="mercado-livre-public-query"
-                  onChange={(event) => setMercadoLivrePublicQuery(event.target.value)}
-                  placeholder="Digite a frase para pesquisar"
-                  value={mercadoLivrePublicQuery}
-                />
-                {mercadoLivreOfficialSearchUrl ? (
+              <div>
+                {mercadoLivreTitleSearchUrl ? (
                   <a
-                    className="mt-3 inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md border border-matrix-gold/45 bg-matrix-goldSoft/30 px-3 py-2 text-sm font-semibold text-matrix-fg transition hover:border-matrix-gold hover:bg-matrix-goldSoft/50"
-                    href={mercadoLivreOfficialSearchUrl}
+                    aria-label="Mercado Livre Título"
+                    className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md border border-matrix-gold/45 bg-matrix-goldSoft/30 px-3 py-2 text-sm font-semibold text-matrix-fg transition hover:border-matrix-gold hover:bg-matrix-goldSoft/50"
+                    href={mercadoLivreTitleSearchUrl}
+                    onClick={() => setMercadoLivreTitleSearchOpened(true)}
                     rel="noreferrer"
                     target="_blank"
+                    title="Pesquisar pelo título exato no Mercado Livre"
                   >
-                    <ExternalLink className="h-4 w-4" />
-                    Abrir esta busca no Mercado Livre
+                    <MercadoLivreLogo size={18} />
+                    Título
                   </a>
                 ) : (
-                  <Button className="mt-3 w-full justify-center" disabled type="button" variant="secondary">
-                    <ExternalLink className="h-4 w-4" />
-                    Abrir esta busca no Mercado Livre
+                  <Button aria-label="Mercado Livre Título" className="w-full justify-center" disabled type="button" variant="secondary">
+                    <MercadoLivreLogo size={18} />
+                    Título
                   </Button>
                 )}
-
-                <p className="mt-3 text-xs leading-5 text-matrix-muted">
-                  A pesquisa pública não está disponível pela integração. Escolha o anúncio no site oficial e cole o link ou ID abaixo.
-                </p>
-
-                <label className="mt-4 block text-xs font-semibold text-matrix-muted" htmlFor="mercado-livre-manual-reference">
-                  Cole o link ou ID do anúncio escolhido
-                </label>
-                <input
-                  autoComplete="off"
-                  className="mt-2 w-full min-w-0 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm text-matrix-fg outline-none focus:border-matrix-gold/60"
-                  id="mercado-livre-manual-reference"
-                  onChange={(event) => {
-                    manualReferenceRequestRef.current += 1;
-                    setManualReferenceLoading(false);
-                    setManualReferenceInput(event.target.value);
-                    setManualReferenceMessage(null);
-                    setManualReferenceError(false);
-                  }}
-                  placeholder="MLB1234567890, MLB-1234567890 ou link oficial"
-                  value={manualReferenceInput}
-                />
-                <Button
-                  className="mt-3 w-full justify-center"
-                  disabled={manualReferenceLoading || !mercadoLivreConnected || !product || !manualReferenceInput.trim()}
-                  onClick={loadManualMercadoLivreReference}
-                  type="button"
-                >
-                  <MercadoLivreLogo size={18} />
-                  {manualReferenceLoading ? "Carregando anúncio..." : "Carregar anúncio"}
-                </Button>
-                {manualReferenceMessage ? (
-                  <p
-                    className={`mt-3 rounded-md border p-2 text-xs ${
-                      manualReferenceError
-                        ? "border-red-500/30 bg-red-500/10 text-red-200"
-                        : "border-matrix-gold/25 bg-matrix-goldSoft/20 text-matrix-muted"
-                    }`}
-                  >
-                    {manualReferenceMessage}
-                  </p>
-                ) : null}
               </div>
+
+              {mercadoLivreTitleSearchOpened ? (
+                <div className="rounded-md border border-matrix-gold/30 bg-matrix-panel/70 p-3">
+                  <p className="text-xs leading-5 text-matrix-muted">
+                    Escolha o produto correto no Mercado Livre, copie o link do anúncio e cole abaixo.
+                  </p>
+
+                  <label className="mt-3 block text-xs font-semibold text-matrix-fg" htmlFor="mercado-livre-manual-reference">
+                    Link ou ID do anúncio Mercado Livre
+                  </label>
+                  <input
+                    autoComplete="off"
+                    className="mt-2 w-full min-w-0 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm text-matrix-fg outline-none focus:border-matrix-gold/60"
+                    id="mercado-livre-manual-reference"
+                    onChange={(event) => {
+                      manualReferenceRequestRef.current += 1;
+                      setManualReferenceLoading(false);
+                      setManualReferenceInput(event.target.value);
+                      setManualReferenceMessage(null);
+                      setManualReferenceError(false);
+                    }}
+                    placeholder="MLB1234567890, MLB-1234567890 ou link oficial"
+                    value={manualReferenceInput}
+                  />
+                  <Button
+                    className="mt-3 w-full justify-center"
+                    disabled={manualReferenceLoading || !mercadoLivreConnected || !product || !manualReferenceInput.trim()}
+                    onClick={loadManualMercadoLivreReference}
+                    type="button"
+                  >
+                    <MercadoLivreLogo size={18} />
+                    {manualReferenceLoading ? "Carregando produto..." : "Carregar produto escolhido"}
+                  </Button>
+                  {manualReferenceMessage ? (
+                    <p
+                      className={`mt-3 rounded-md border p-2 text-xs ${
+                        manualReferenceError
+                          ? "border-red-500/30 bg-red-500/10 text-red-200"
+                          : "border-matrix-gold/25 bg-matrix-goldSoft/20 text-matrix-muted"
+                      }`}
+                    >
+                      {manualReferenceMessage}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -3168,7 +3200,7 @@ export function IntelligentProductRegistrationPage() {
           </p>
         </aside>
 
-        <main className="min-w-0 rounded-lg border border-matrix-border bg-matrix-panel/88 shadow-glow">
+        <main className="min-w-0 self-start rounded-lg border border-matrix-border bg-matrix-panel/88 shadow-glow">
           <div className="border-b border-matrix-border px-4 py-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
