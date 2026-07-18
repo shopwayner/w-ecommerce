@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Cable, Clock, KeyRound, PlugZap, TestTube2, Trash2, X } from "lucide-react";
+import { Cable, Clock, KeyRound, PlugZap, ShieldCheck, TestTube2, Trash2, X } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { Badge, Button, Card, DataTable, PageHeader } from "@/components/ui";
 
@@ -30,23 +30,73 @@ type MercadoLivreConnection = {
   lastError: string | null;
 };
 type MercadoLivreStatus = { configured: boolean; data: MercadoLivreConnection | null };
+type MercadoLivreOwnerDiagnosticStatus = {
+  enabled: boolean;
+  available: boolean;
+  appIdMatches: boolean;
+  configured: boolean;
+  expectedAppId: string;
+};
+type MercadoLivreOwnerDiagnosticResult = {
+  outcome: "OWNER_ACCESS_CONFIRMED" | "CALLER_NOT_USER" | "OAUTH_FAILED" | "DIAGNOSTIC_FAILED";
+  usersMe: {
+    http: number | null;
+    userIdMasked: string | null;
+    siteId: string | null;
+    status: "active" | "inactive" | null;
+    requestId: string | null;
+    error: { code: string | null; message: string } | null;
+  };
+  application: {
+    http: number | null;
+    requestId: string | null;
+    id: string | null;
+    name: string | null;
+    active: boolean | null;
+    siteId: string | null;
+    status: string | null;
+    certification: string | boolean | null;
+    redirectUris: string[];
+    permissions: string[];
+    error: { code: string | null; message: string } | null;
+  };
+};
 
 const roleLabels = { MATRIX: "Matriz", BRANCH: "Filial", OTHER: "Outra" };
 const statusLabels = { ACTIVE: "Ativa", EXPIRED: "Expirada", ERROR: "Erro", DISCONNECTED: "Desconectada", PENDING: "Pendente" };
+
+function isOfficialMercadoLivreOwnerAuthorizationUrl(value: unknown, expectedAppId: string) {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:"
+      && url.origin === "https://auth.mercadolivre.com.br"
+      && url.pathname === "/authorization"
+      && url.searchParams.get("response_type") === "code"
+      && url.searchParams.get("client_id") === expectedAppId
+      && Boolean(url.searchParams.get("state"));
+  } catch {
+    return false;
+  }
+}
 
 export function IntegrationsPage() {
   const [connections, setConnections] = useState<Connection[]>([]);
   const [limit, setLimit] = useState<Limit>({ allowed: false, current: 0, limit: 0, unlimited: false });
   const [mercadoLivre, setMercadoLivre] = useState<MercadoLivreStatus>({ configured: false, data: null });
+  const [ownerDiagnosticStatus, setOwnerDiagnosticStatus] = useState<MercadoLivreOwnerDiagnosticStatus | null>(null);
+  const [ownerDiagnosticResult, setOwnerDiagnosticResult] = useState<MercadoLivreOwnerDiagnosticResult | null>(null);
+  const [ownerDiagnosticLoading, setOwnerDiagnosticLoading] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [name, setName] = useState("Bling");
   const [role, setRole] = useState<Connection["role"]>("MATRIX");
   const [message, setMessage] = useState("");
 
   async function load() {
-    const [response, mercadoLivreResponse] = await Promise.all([
+    const [response, mercadoLivreResponse, ownerDiagnosticResponse] = await Promise.all([
       fetch("/api/integrations"),
-      fetch("/api/integrations/mercadolivre")
+      fetch("/api/integrations/mercadolivre"),
+      fetch("/api/marketplaces/mercado-livre/owner-diagnostic/status", { cache: "no-store" })
     ]);
     if (response.ok) {
       const payload = await response.json();
@@ -57,11 +107,47 @@ export function IntegrationsPage() {
       const payload = (await mercadoLivreResponse.json()) as MercadoLivreStatus;
       setMercadoLivre(payload);
     }
+    if (ownerDiagnosticResponse.ok) {
+      setOwnerDiagnosticStatus((await ownerDiagnosticResponse.json()) as MercadoLivreOwnerDiagnosticStatus);
+    }
   }
 
   useEffect(() => {
-    load();
+    void load();
+    const url = new URL(window.location.href);
+    const diagnosticStatus = url.searchParams.get("mlOwnerDiagnostic");
+    if (diagnosticStatus === "complete") {
+      void loadOwnerDiagnosticResult();
+    } else if (diagnosticStatus === "error" || diagnosticStatus === "auth-error") {
+      setMessage("Nao foi possivel concluir o diagnostico da conta proprietaria.");
+    }
+    if (diagnosticStatus) {
+      url.searchParams.delete("mlOwnerDiagnostic");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    }
   }, []);
+
+  async function loadOwnerDiagnosticResult() {
+    setOwnerDiagnosticLoading(true);
+    try {
+      const response = await fetch("/api/marketplaces/mercado-livre/owner-diagnostic/result", { cache: "no-store" });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !payload?.result) {
+        setMessage(payload?.error ?? "Resultado do diagnostico indisponivel.");
+        return;
+      }
+      setOwnerDiagnosticResult(payload.result as MercadoLivreOwnerDiagnosticResult);
+      setMessage(
+        payload.result.outcome === "OWNER_ACCESS_CONFIRMED"
+          ? "A conta autorizada possui acesso administrativo ao aplicativo."
+          : payload.result.outcome === "CALLER_NOT_USER"
+            ? "A conta autorizada nao foi reconhecida como proprietaria ou administradora do aplicativo."
+            : "O diagnostico foi concluido com uma resposta que exige revisao."
+      );
+    } finally {
+      setOwnerDiagnosticLoading(false);
+    }
+  }
 
   async function startOAuth(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -110,6 +196,24 @@ export function IntegrationsPage() {
     const response = await fetch("/api/integrations/mercadolivre", { method: "DELETE" });
     setMessage(response.ok ? "Mercado Livre desconectado localmente." : "Nao foi possivel desconectar Mercado Livre.");
     await load();
+  }
+
+  async function startOwnerDiagnostic() {
+    if (!ownerDiagnosticStatus?.available) return;
+    setMessage("");
+    setOwnerDiagnosticResult(null);
+    setOwnerDiagnosticLoading(true);
+    try {
+      const response = await fetch("/api/marketplaces/mercado-livre/owner-diagnostic/connect", { method: "POST" });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !isOfficialMercadoLivreOwnerAuthorizationUrl(payload?.authorizationUrl, ownerDiagnosticStatus.expectedAppId)) {
+        setMessage(payload?.error ?? "Nao foi possivel iniciar o diagnostico seguro.");
+        return;
+      }
+      window.location.assign(payload.authorizationUrl);
+    } finally {
+      setOwnerDiagnosticLoading(false);
+    }
   }
 
   return (
@@ -201,6 +305,55 @@ export function IntegrationsPage() {
                 </Button>
               ) : null}
             </div>
+            {ownerDiagnosticStatus?.available ? (
+              <div className="mt-4 border-t border-matrix-border pt-4">
+                <p className="text-xs text-slate-400">
+                  Autorize somente a conta proprietaria do aplicativo. O token temporario nao sera salvo e nenhuma conexao sera modificada.
+                </p>
+                <Button className="mt-3" disabled={ownerDiagnosticLoading} onClick={startOwnerDiagnostic} variant="secondary">
+                  <ShieldCheck className="h-4 w-4" />
+                  {ownerDiagnosticLoading ? "Iniciando diagnostico..." : "Diagnosticar conta proprietaria do aplicativo"}
+                </Button>
+              </div>
+            ) : null}
+            {ownerDiagnosticStatus?.enabled && !ownerDiagnosticStatus.available ? (
+              <p className="mt-4 rounded-md border border-orange-500/20 bg-orange-500/10 px-3 py-2 text-xs text-orange-200">
+                O diagnostico temporario esta habilitado, mas a configuracao segura ou o App ID nao corresponde ao esperado.
+              </p>
+            ) : null}
+            {ownerDiagnosticResult ? (
+              <div className="mt-4 space-y-3 border-t border-matrix-border pt-4 text-xs text-slate-400">
+                <div className="flex items-center justify-between gap-3">
+                  <strong className="text-slate-200">Resultado do diagnostico</strong>
+                  <Badge tone={ownerDiagnosticResult.outcome === "OWNER_ACCESS_CONFIRMED" ? "success" : "warning"}>
+                    {ownerDiagnosticResult.outcome === "OWNER_ACCESS_CONFIRMED" ? "Acesso confirmado" : "Revisao necessaria"}
+                  </Badge>
+                </div>
+                <div className="grid gap-1 rounded-md border border-matrix-border bg-white/[0.02] p-3">
+                  <strong className="text-slate-200">Conta autorizada</strong>
+                  <span>HTTP: {ownerDiagnosticResult.usersMe.http ?? "-"}</span>
+                  <span>Usuario: {ownerDiagnosticResult.usersMe.userIdMasked ?? "-"}</span>
+                  <span>Site: {ownerDiagnosticResult.usersMe.siteId ?? "-"}</span>
+                  <span>Status: {ownerDiagnosticResult.usersMe.status ?? "-"}</span>
+                  <span>Request ID: {ownerDiagnosticResult.usersMe.requestId ?? "-"}</span>
+                  {ownerDiagnosticResult.usersMe.error ? <span className="text-orange-200">{ownerDiagnosticResult.usersMe.error.message}</span> : null}
+                </div>
+                <div className="grid gap-1 rounded-md border border-matrix-border bg-white/[0.02] p-3">
+                  <strong className="text-slate-200">Aplicativo</strong>
+                  <span>HTTP: {ownerDiagnosticResult.application.http ?? "-"}</span>
+                  <span>ID: {ownerDiagnosticResult.application.id ?? "-"}</span>
+                  <span>Nome: {ownerDiagnosticResult.application.name ?? "-"}</span>
+                  <span>Ativo: {ownerDiagnosticResult.application.active === null ? "-" : ownerDiagnosticResult.application.active ? "Sim" : "Nao"}</span>
+                  <span>Site: {ownerDiagnosticResult.application.siteId ?? "-"}</span>
+                  <span>Status: {ownerDiagnosticResult.application.status ?? "-"}</span>
+                  <span>Certificacao: {ownerDiagnosticResult.application.certification === null ? "-" : String(ownerDiagnosticResult.application.certification)}</span>
+                  <span>Request ID: {ownerDiagnosticResult.application.requestId ?? "-"}</span>
+                  {ownerDiagnosticResult.application.redirectUris.length ? <span>Redirecionamentos: {ownerDiagnosticResult.application.redirectUris.join(", ")}</span> : null}
+                  {ownerDiagnosticResult.application.permissions.length ? <span>Permissoes: {ownerDiagnosticResult.application.permissions.join(", ")}</span> : null}
+                  {ownerDiagnosticResult.application.error ? <span className="text-orange-200">{ownerDiagnosticResult.application.error.message}</span> : null}
+                </div>
+              </div>
+            ) : null}
           </Card>
           <Card>
             <h3 className="mb-4 flex items-center gap-2 font-semibold text-white"><KeyRound className="h-4 w-4 text-cyan-300" /> OAuth Bling</h3>
