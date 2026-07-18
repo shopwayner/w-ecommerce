@@ -52,6 +52,7 @@ export async function GET(request: NextRequest) {
       itemId,
       catalogProductId,
       connectionId,
+      refreshExpiredToken: false,
       basicItem: {
         title: optionalText(url.searchParams.get("title")),
         description: optionalText(url.searchParams.get("description")),
@@ -81,7 +82,7 @@ export async function GET(request: NextRequest) {
         listingTypeLabel: optionalText(url.searchParams.get("listingTypeLabel")),
         status: optionalText(url.searchParams.get("status")),
         attributes: basicAttributes,
-        source: optionalText(url.searchParams.get("source")) === "MERCADO_LIVRE_PUBLIC_SEARCH" ? "MERCADO_LIVRE_PUBLIC_SEARCH" : "MERCADO_LIVRE_PRODUCT_SEARCH"
+        source: "MERCADO_LIVRE_PUBLIC_SEARCH"
       }
     });
     return NextResponse.json(result);

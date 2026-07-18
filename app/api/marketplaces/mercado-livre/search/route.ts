@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
-import { mercadoLivreOAuthService } from "@/lib/services/mercado-livre-oauth-service";
+import {
+  MERCADO_LIVRE_PUBLIC_SEARCH_UNAVAILABLE_MESSAGE,
+  mercadoLivreOAuthService
+} from "@/lib/services/mercado-livre-oauth-service";
 
 export async function GET(request: NextRequest) {
   const auth = await requireApiAuth("integrations:read");
@@ -27,7 +30,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Nao foi possivel buscar no Mercado Livre.";
-    const status = message.includes("Conecte uma conta") ? 409 : 400;
+    const status = message === MERCADO_LIVRE_PUBLIC_SEARCH_UNAVAILABLE_MESSAGE
+      ? 503
+      : message.includes("Conecte uma conta")
+        ? 409
+        : 400;
     return NextResponse.json({ error: message, externalWrite: false }, { status });
   }
 }

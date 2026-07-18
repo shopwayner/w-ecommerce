@@ -58,6 +58,8 @@ test("returns only normalized fields needed by the preview and compatibility che
     title: "  Sensor Hibrido PCX 150  ",
     brand: " T-Mac ",
     gtin: "7891234567890",
+    price: 189.9,
+    currencyId: " BRL ",
     imageUrl: "http://http2.mlstatic.com/D_NQ_NP_test.jpg",
     imageUrls: [
       "https://http2.mlstatic.com/D_NQ_NP_test.jpg",
@@ -78,6 +80,8 @@ test("returns only normalized fields needed by the preview and compatibility che
     brand: "T-Mac",
     images: ["https://http2.mlstatic.com/D_NQ_NP_test.jpg"],
     gtin: "7891234567890",
+    price: 189.9,
+    currencyId: "BRL",
     category: {
       id: "MLB1234",
       name: "Sensores",

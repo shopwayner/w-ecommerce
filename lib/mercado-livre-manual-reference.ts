@@ -36,6 +36,8 @@ export type MercadoLivreManualReferenceSource = {
   title?: string | null;
   brand?: string | null;
   gtin?: string | null;
+  price?: number | null;
+  currencyId?: string | null;
   imageUrl?: string | null;
   imageUrls?: string[] | null;
   categoryId?: string | null;
@@ -50,6 +52,8 @@ export type MercadoLivreManualReference = {
   brand: string | null;
   images: string[];
   gtin: string | null;
+  price: number | null;
+  currencyId: string | null;
   category: {
     id: string | null;
     name: string | null;
@@ -66,6 +70,10 @@ function cleanText(value: unknown) {
   if (typeof value !== "string") return null;
   const normalized = value.trim().replace(/\s+/g, " ");
   return normalized || null;
+}
+
+function cleanPrice(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function isOfficialMercadoLivreHost(hostname: string) {
@@ -174,6 +182,8 @@ export function normalizeMercadoLivreManualReference(source: MercadoLivreManualR
     brand: cleanText(source.brand),
     images,
     gtin: cleanText(source.gtin),
+    price: cleanPrice(source.price),
+    currencyId: cleanText(source.currencyId),
     category: {
       id: cleanText(source.categoryId),
       name: cleanText(source.categoryName),
