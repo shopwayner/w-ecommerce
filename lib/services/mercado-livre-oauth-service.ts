@@ -6,21 +6,14 @@ import { decryptSecret, encryptSecret } from "@/lib/security/encryption";
 import { getUserAccountContext } from "@/lib/services/account-context-service";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { sanitizeLogPayload } from "@/lib/utils";
-import {
-  buildMercadoLivrePublicSearchApiUrl,
-  normalizeMercadoLivrePublicSearchQuery,
-  resolveMercadoLivrePublicSearchEnabled,
-  resolveMercadoLivrePublicSearchFallback
-} from "@/lib/mercado-livre-public-search";
+import { buildProductReferenceSearchQueries } from "@/lib/intelligent-product-compatibility";
 
 const tokenUrl = "https://api.mercadolibre.com/oauth/token";
 const apiBaseUrl = "https://api.mercadolibre.com";
 const stateTtlMs = 10 * 60 * 1000;
-export const MERCADO_LIVRE_PUBLIC_SEARCH_UNAVAILABLE_MESSAGE =
-  "A pesquisa pública do Mercado Livre não está disponível pela integração. Abra a busca no Mercado Livre e cole aqui o anúncio escolhido.";
-const mercadoLivreSearchBlockedWarning = MERCADO_LIVRE_PUBLIC_SEARCH_UNAVAILABLE_MESSAGE;
+const mercadoLivreSearchBlockedWarning = "O Catalogo Mercado Livre recusou a consulta read-only no momento. A busca local continua disponivel.";
 const mercadoLivreDetailTimeoutMs = 8000;
-const mercadoLivreTitleSearchMaxQueries = 2;
+const mercadoLivreTitleSearchMaxQueries = 3;
 const mercadoLivreTitleSearchPauseMs = 150;
 
 type MercadoLivreTokenResponse = {
@@ -40,7 +33,6 @@ type MercadoLivreUserResponse = {
 type MercadoLivreSearchItem = {
   id?: string;
   item_id?: string;
-  catalog_product_id?: string | null;
   title?: string;
   price?: number;
   currency_id?: string;
@@ -49,10 +41,6 @@ type MercadoLivreSearchItem = {
   secure_thumbnail?: string;
   category_id?: string;
   seller_id?: number | string;
-  seller?: {
-    id?: number | string;
-    nickname?: string | null;
-  } | null;
   listing_type_id?: string | null;
   condition?: string | null;
   sold_quantity?: number | null;
@@ -66,15 +54,6 @@ type MercadoLivreSearchItem = {
     state?: { name?: string | null } | null;
   } | null;
   attributes?: Array<{ id?: string; name?: string; value_name?: string; values?: Array<{ name?: string }> }>;
-};
-
-type MercadoLivrePublicSearchResponse = {
-  results?: MercadoLivreSearchItem[];
-  paging?: {
-    total?: number;
-    limit?: number;
-    offset?: number;
-  };
 };
 
 type MercadoLivreProductSearchItem = {
@@ -99,6 +78,15 @@ type MercadoLivreProductSearchItem = {
     condition?: string | null;
     sold_quantity?: number | null;
   } | null;
+};
+
+type MercadoLivreProductSearchResponse = {
+  results?: MercadoLivreProductSearchItem[];
+  paging?: {
+    total?: number;
+    limit?: number;
+    offset?: number;
+  };
 };
 
 type MercadoLivreCatalogOfferItem = MercadoLivreSearchItem & {
@@ -146,8 +134,8 @@ type NormalizedMercadoLivreSearchItem = {
   listingTypeLabel: string | null;
   status: string | null;
   attributes: Array<{ id: string | null; name: string | null; value: string | null }>;
-  source: "MERCADO_LIVRE_PUBLIC_SEARCH";
-  dataAvailability?: "complete" | "partial";
+  source: "MERCADO_LIVRE_PUBLIC_SEARCH" | "MERCADO_LIVRE_PRODUCT_SEARCH";
+  dataAvailability?: "complete" | "catalog_offer" | "catalog_without_public_offer" | "partial";
   dataAvailabilityMessage?: string | null;
 };
 
@@ -258,6 +246,25 @@ const localProductSearchSelect = {
 } satisfies Prisma.ProductSelect;
 
 type LocalProductSearchRecord = Prisma.ProductGetPayload<{ select: typeof localProductSearchSelect }>;
+
+function mercadoLivreSearchItemKey(item: NormalizedMercadoLivreSearchItem) {
+  return item.externalItemId ?? item.catalogProductId ?? `${item.title ?? ""}|${item.gtin ?? ""}|${item.imageUrl ?? ""}`;
+}
+
+function mergeUniqueMercadoLivreSearchItems(
+  current: NormalizedMercadoLivreSearchItem[],
+  incoming: NormalizedMercadoLivreSearchItem[]
+) {
+  const seen = new Set<string>();
+  const merged: NormalizedMercadoLivreSearchItem[] = [];
+  for (const item of [...current, ...incoming]) {
+    const key = mercadoLivreSearchItemKey(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(item);
+  }
+  return merged;
+}
 
 function pauseMercadoLivreTitleSearch() {
   return new Promise((resolve) => setTimeout(resolve, mercadoLivreTitleSearchPauseMs));
@@ -689,9 +696,43 @@ function isUsefulMercadoLivreSearchItem(item: NormalizedMercadoLivreSearchItem) 
   );
 }
 
-function classifyMercadoLivreDataAvailability(item: NormalizedMercadoLivreSearchItem) {
+function classifyMercadoLivreDataAvailability(
+  item: NormalizedMercadoLivreSearchItem,
+  endpointDiagnostics: MercadoLivreEndpointDiagnostic[] = []
+) {
   if (isUsefulMercadoLivreSearchItem(item)) {
     return { status: "complete" as const, message: null };
+  }
+
+  const catalogOfferDiagnostic = endpointDiagnostics.find(
+    (diagnostic) =>
+      diagnostic.endpoint.includes("/products/") &&
+      diagnostic.endpoint.includes("/items?") &&
+      diagnostic.endpoint.includes(item.catalogProductId ?? "__missing_catalog__")
+  );
+  const catalogWithoutOffer =
+    item.source === "MERCADO_LIVRE_PRODUCT_SEARCH" &&
+    Boolean(item.catalogProductId) &&
+    !item.externalItemId &&
+    typeof item.price !== "number" &&
+    !item.sellerId &&
+    !item.sellerName &&
+    catalogOfferDiagnostic?.httpStatus === 404 &&
+    catalogOfferDiagnostic.error === "not_found";
+
+  if (catalogWithoutOffer) {
+    return {
+      status: "catalog_without_public_offer" as const,
+      message:
+        "Produto de catalogo localizado, mas a API oficial nao retornou oferta publica vencedora para completar preco e vendedor."
+    };
+  }
+
+  if (item.source === "MERCADO_LIVRE_PRODUCT_SEARCH" && item.catalogProductId && item.externalItemId) {
+    return {
+      status: "catalog_offer" as const,
+      message: null
+    };
   }
 
   return {
@@ -700,8 +741,11 @@ function classifyMercadoLivreDataAvailability(item: NormalizedMercadoLivreSearch
   };
 }
 
-function withMercadoLivreDataAvailability(item: NormalizedMercadoLivreSearchItem): NormalizedMercadoLivreSearchItem {
-  const availability = classifyMercadoLivreDataAvailability(item);
+function withMercadoLivreDataAvailability(
+  item: NormalizedMercadoLivreSearchItem,
+  endpointDiagnostics: MercadoLivreEndpointDiagnostic[] = []
+): NormalizedMercadoLivreSearchItem {
+  const availability = classifyMercadoLivreDataAvailability(item, endpointDiagnostics);
   return {
     ...item,
     dataAvailability: availability.status,
@@ -711,9 +755,10 @@ function withMercadoLivreDataAvailability(item: NormalizedMercadoLivreSearchItem
 
 function prioritizeMercadoLivreSearchItems(items: NormalizedMercadoLivreSearchItem[]) {
   const useful = items.filter(isUsefulMercadoLivreSearchItem);
+  const incomplete = items.filter((item) => !isUsefulMercadoLivreSearchItem(item));
 
   return {
-    items: [...items],
+    items: [...useful, ...incomplete],
     analyzedResultsCount: items.length,
     usefulResultsCount: useful.length,
     displayedResultsCount: items.length,
@@ -721,43 +766,46 @@ function prioritizeMercadoLivreSearchItems(items: NormalizedMercadoLivreSearchIt
   };
 }
 
-function normalizePublicSearchItem(item: MercadoLivreSearchItem): NormalizedMercadoLivreSearchItem {
-  const imageUrl = firstText(item.secure_thumbnail, item.thumbnail);
-  const sellerId = firstText(item.seller?.id, item.seller_id);
-  const location = sellerAddressParts(item);
-  const listingTypeId = firstText(item.listing_type_id);
+function normalizeProductSearchItem(item: MercadoLivreProductSearchItem): NormalizedMercadoLivreSearchItem {
+  const pictureUrls = (item.pictures ?? [])
+    .map((picture) => picture.secure_url ?? picture.url ?? null)
+    .filter((url): url is string => Boolean(url));
+  const imageUrl = pictureUrls[0] ?? item.buy_box_winner?.thumbnail ?? null;
+  const sellerId = firstText(item.buy_box_winner?.seller_id);
+  const soldQuantity = firstNumber(item.buy_box_winner?.sold_quantity);
+  const listingTypeId = firstText(item.buy_box_winner?.listing_type_id);
   return {
-    externalItemId: mercadoLivreItemId(item),
-    catalogProductId: firstText(item.catalog_product_id),
-    title: firstText(item.title),
+    externalItemId: item.buy_box_winner?.item_id ?? null,
+    catalogProductId: item.catalog_product_id ?? item.id ?? null,
+    title: item.name ?? item.buy_box_winner?.title ?? null,
     description: null,
-    price: firstNumber(item.price),
-    currencyId: firstText(item.currency_id),
-    permalink: firstText(item.permalink),
+    price: typeof item.buy_box_winner?.price === "number" ? item.buy_box_winner.price : null,
+    currencyId: item.buy_box_winner?.currency_id ?? null,
+    permalink: item.buy_box_winner?.permalink ?? null,
     imageUrl,
-    imageUrls: imageUrl ? [imageUrl] : [],
-    categoryId: firstText(item.category_id),
-    categoryName: null,
+    imageUrls: Array.from(new Set(imageUrl ? [imageUrl, ...pictureUrls] : pictureUrls)).slice(0, 12),
+    categoryId: item.buy_box_winner?.category_id ?? item.category_id ?? null,
+    categoryName: item.domain_id ?? null,
     categoryPath: null,
     gtin: pickAttribute(item.attributes, ["GTIN", "EAN", "UPC"]),
     brand: pickAttribute(item.attributes, ["BRAND", "MARCA"]),
     partNumber: pickAttribute(item.attributes, ["PART_NUMBER", "MPN", "OEM"]),
     sellerId,
-    sellerName: firstText(item.seller?.nickname),
+    sellerName: null,
     sellerReputation: null,
     sellerReputationLevel: null,
     sellerTransactionsTotal: null,
     sellerTransactionsCompleted: null,
-    soldQuantity: firstNumber(item.sold_quantity),
-    condition: firstText(item.condition),
-    location: location.location,
-    stateName: location.stateName,
-    cityName: location.cityName,
+    soldQuantity,
+    condition: item.buy_box_winner?.condition ?? null,
+    location: null,
+    stateName: null,
+    cityName: null,
     listingTypeId,
     listingTypeLabel: listingTypeLabel(listingTypeId),
-    status: firstText(item.status),
+    status: item.status ?? null,
     attributes: normalizeAttributes(item.attributes),
-    source: "MERCADO_LIVRE_PUBLIC_SEARCH"
+    source: "MERCADO_LIVRE_PRODUCT_SEARCH"
   };
 }
 
@@ -938,27 +986,27 @@ async function fetchMercadoLivreReadOnly<T>(input: {
   return payload;
 }
 
-async function searchMercadoLivrePublicListingsReadOnly(input: {
+async function searchMercadoLivreProductsReadOnly(input: {
   accessToken: string;
   siteId: string;
   searchValue: string;
   paging: { page: number; pageSize: number; offset: number };
   endpointDiagnostics: MercadoLivreEndpointDiagnostic[];
+  searchType: MercadoLivreSearchType;
 }) {
-  const publicSearchUrl = buildMercadoLivrePublicSearchApiUrl({
-    apiBaseUrl,
-    siteId: input.siteId,
-    query: input.searchValue,
-    limit: input.paging.pageSize,
-    offset: input.paging.offset
-  });
-  const endpoint = `/sites/${input.siteId.trim().toUpperCase()}/search`;
-  const response = await fetch(publicSearchUrl, {
+  const apiMode: MercadoLivreSearchApiMode = input.searchType === "GTIN" ? "product_identifier" : "q";
+  const productSearchUrl = new URL(`${apiBaseUrl}/products/search`);
+  productSearchUrl.searchParams.set("site_id", input.siteId);
+  productSearchUrl.searchParams.set(apiMode, input.searchValue);
+  productSearchUrl.searchParams.set("limit", String(input.paging.pageSize));
+  productSearchUrl.searchParams.set("offset", String(input.paging.offset));
+
+  const response = await fetch(productSearchUrl, {
     headers: { Authorization: `Bearer ${input.accessToken}`, Accept: "application/json" }
   });
 
   if (response.ok) {
-    const payload = (await response.json()) as MercadoLivrePublicSearchResponse;
+    const payload = (await response.json()) as MercadoLivreProductSearchResponse;
     const results = payload.results ?? [];
     const paging = buildMercadoLivrePaging({
       page: input.paging.page,
@@ -968,8 +1016,8 @@ async function searchMercadoLivrePublicListingsReadOnly(input: {
       apiPaging: payload.paging
     });
     input.endpointDiagnostics.push({
-      endpoint,
-      apiMode: "q",
+      endpoint: "/products/search",
+      apiMode,
       httpStatus: response.status,
       status: "ok",
       error: null,
@@ -981,7 +1029,7 @@ async function searchMercadoLivrePublicListingsReadOnly(input: {
     });
 
     return {
-      items: results.map((item) => withMercadoLivreDataAvailability(normalizePublicSearchItem(item))),
+      items: results.map((item) => withMercadoLivreDataAvailability(normalizeProductSearchItem(item))),
       paging,
       total: typeof payload.paging?.total === "number" ? payload.paging.total : results.length,
       error: null as MercadoLivreSearchError | null
@@ -990,11 +1038,11 @@ async function searchMercadoLivrePublicListingsReadOnly(input: {
 
   const errorBody = sanitizeMercadoLivreErrorBody(await response.text());
   const safeHeaders = safeMercadoLivreHeaders(response);
-  input.endpointDiagnostics.push({
-    endpoint,
-    apiMode: "q",
+  const diagnostic = {
+    endpoint: "/products/search",
+    apiMode,
     httpStatus: response.status,
-    status: response.status === 403 ? "blocked" : "error",
+    status: response.status === 403 ? "blocked" as const : "error" as const,
     error: errorBody.error,
     code: errorBody.code,
     message: errorBody.message,
@@ -1002,7 +1050,8 @@ async function searchMercadoLivrePublicListingsReadOnly(input: {
     requestId: safeHeaders.requestId,
     correlationId: safeHeaders.correlationId,
     results: 0
-  });
+  };
+  input.endpointDiagnostics.push(diagnostic);
 
   return {
     items: [],
@@ -1025,7 +1074,7 @@ async function searchMercadoLivrePublicListingsReadOnly(input: {
   };
 }
 
-type MercadoLivreSearchPageResult = Awaited<ReturnType<typeof searchMercadoLivrePublicListingsReadOnly>>;
+type MercadoLivreSearchPageResult = Awaited<ReturnType<typeof searchMercadoLivreProductsReadOnly>>;
 
 async function enrichMercadoLivreSearchItem(input: {
   item: NormalizedMercadoLivreSearchItem;
@@ -1104,7 +1153,8 @@ async function enrichMercadoLivreSearchItem(input: {
   }
 
   return withMercadoLivreDataAvailability(
-    mergeMercadoLivreSearchItem(input.item, detail, seller, category, productDetail, description)
+    mergeMercadoLivreSearchItem(input.item, detail, seller, category, productDetail, description),
+    input.endpointDiagnostics
   );
 }
 
@@ -1123,10 +1173,6 @@ export function toSafeMercadoLivreAccount(connection: MercadoLivreConnection) {
 }
 
 export class MercadoLivreOAuthService {
-  publicSearchEnabled() {
-    return resolveMercadoLivrePublicSearchEnabled(process.env.MERCADO_LIVRE_PUBLIC_SEARCH_ENABLED);
-  }
-
   validateEnvironment() {
     const missing = missingEnvCredentialNames();
     return {
@@ -1516,10 +1562,6 @@ export class MercadoLivreOAuthService {
     page?: string | number | null;
     pageSize?: string | number | null;
   }) {
-    if (!this.publicSearchEnabled()) {
-      throw new Error(MERCADO_LIVRE_PUBLIC_SEARCH_UNAVAILABLE_MESSAGE);
-    }
-
     const searchStartedAt = Date.now();
     const rawQuery = input.gtin?.trim() || input.q?.trim();
     if (!rawQuery) throw new Error("Informe q ou gtin para buscar no Mercado Livre.");
@@ -1564,7 +1606,7 @@ export class MercadoLivreOAuthService {
 
     const warnings = [...resolvedSearch.warnings];
     const endpointDiagnostics: MercadoLivreEndpointDiagnostic[] = [];
-    const publicSearchEnabled = true;
+    const publicSearchEnabled = false;
     let searchPaging = buildMercadoLivrePaging({
       page: pagingInput.page,
       pageSize: pagingInput.pageSize,
@@ -1573,22 +1615,21 @@ export class MercadoLivreOAuthService {
     });
     let mercadoLivreError: MercadoLivreSearchError | null = null;
     const firstSearchType = resolvedSearch.searchType;
-    const firstSearchValue =
-      resolvedSearch.searchType === "TITLE"
-        ? normalizeMercadoLivrePublicSearchQuery(resolvedSearch.searchValue)
-        : resolvedSearch.searchValue;
+    const firstSearchValue = resolvedSearch.searchValue;
     let firstSearchTotal: number | null = null;
     let fallbackSearchType: MercadoLivreSearchType | null = null;
     let fallbackSearchValue: string | null = null;
     let fallbackSearchTotal: number | null = null;
     let effectiveSearchType: MercadoLivreSearchType = resolvedSearch.searchType;
-    let effectiveSearchValue: string | null = firstSearchValue;
-    let apiMode: MercadoLivreSearchApiMode = "q";
+    let effectiveSearchValue: string | null = resolvedSearch.searchValue;
+    let apiMode: MercadoLivreSearchApiMode = resolvedSearch.searchType === "GTIN" ? "product_identifier" : "q";
     const firstApiMode: MercadoLivreSearchApiMode = apiMode;
     let fallbackApiMode: MercadoLivreSearchApiMode | null = null;
     let fallbackUsed = false;
     let publicSearchStatus: "disabled" | "ok" | "blocked" | "error" | "empty" = "disabled";
     let publicSearchTotal: number | null = null;
+    const catalogFallbackUsed = false;
+    const catalogFallbackTotal: number | null = null;
     const items: NormalizedMercadoLivreSearchItem[] = [];
     let initialSearchMs = 0;
 
@@ -1623,42 +1664,35 @@ export class MercadoLivreOAuthService {
       };
     };
 
-    const runSearchStep = async (searchValue: string) => {
-      const publicSearch = await collectSearchPages((paging) =>
-        searchMercadoLivrePublicListingsReadOnly({
+    const runSearchStep = async (searchValue: string, searchType: MercadoLivreSearchType) => {
+      const catalogSearch = await collectSearchPages((paging) =>
+        searchMercadoLivreProductsReadOnly({
           accessToken: token.accessToken,
           siteId: token.connection.siteId || "MLB",
           searchValue,
           paging,
-          endpointDiagnostics
+          endpointDiagnostics,
+          searchType
         })
       );
-      publicSearchTotal = publicSearch.total;
-      publicSearchStatus = publicSearch.error
-        ? publicSearch.error.httpStatus === 403
-          ? "blocked"
-          : "error"
-        : publicSearch.items.length
-          ? "ok"
-          : "empty";
-      if (publicSearch.error) mercadoLivreError = mercadoLivreError ?? publicSearch.error;
-      return publicSearch;
+      publicSearchTotal = null;
+      publicSearchStatus = "disabled";
+      if (catalogSearch.error) mercadoLivreError = mercadoLivreError ?? catalogSearch.error;
+      return catalogSearch;
     };
 
     let titleSearchQueriesAttempted = resolvedSearch.searchType === "TITLE" ? 1 : 0;
-    const firstSearch = await runSearchStep(firstSearchValue);
+    const firstSearch = await runSearchStep(resolvedSearch.searchValue, resolvedSearch.searchType);
     items.push(...firstSearch.items);
     searchPaging = firstSearch.paging;
     mercadoLivreError = mercadoLivreError ?? firstSearch.error;
     firstSearchTotal = firstSearch.total;
 
     if (requestedSearchMode === "auto" && resolvedSearch.searchType === "GTIN" && firstSearch.total === 0 && !items.length) {
-      const titleFallbackValue = localLookup.product?.name?.trim()
-        ? normalizeMercadoLivrePublicSearchQuery(localLookup.product.name)
-        : null;
+      const titleFallbackValue = localLookup.product?.name?.trim() || null;
       if (titleFallbackValue) {
         warnings.push("Nenhum resultado encontrado pelo identificador do produto. A busca foi refeita automaticamente por titulo.");
-        const fallbackSearch = await runSearchStep(titleFallbackValue);
+        const fallbackSearch = await runSearchStep(titleFallbackValue, "TITLE");
         titleSearchQueriesAttempted = 1;
         items.splice(0, items.length, ...fallbackSearch.items);
         searchPaging = fallbackSearch.paging;
@@ -1676,36 +1710,43 @@ export class MercadoLivreOAuthService {
         }
       }
     } else if (requestedSearchMode === "gtin" && resolvedSearch.searchType === "GTIN" && firstSearch.total === 0 && !items.length && !firstSearch.error) {
-      warnings.push("Nenhum anuncio encontrado na pesquisa do Mercado Livre para este GTIN/EAN. Tente buscar por titulo.");
+      warnings.push("Nenhum produto encontrado no Catalogo Mercado Livre para este GTIN/EAN. Tente buscar por titulo.");
     }
 
-    if (
-      effectiveSearchType === "TITLE" &&
-      pagingInput.page === 1 &&
-      !items.length &&
-      !mercadoLivreError
-    ) {
-      const controlledFallbackValue = resolveMercadoLivrePublicSearchFallback({
-        exactQuery: effectiveSearchValue ?? firstSearchValue,
-        exactResultCount: items.length,
-        exactSearchFailed: Boolean(mercadoLivreError)
-      });
-      if (controlledFallbackValue && titleSearchQueriesAttempted < mercadoLivreTitleSearchMaxQueries) {
+    if (effectiveSearchType === "TITLE" && pagingInput.page === 1) {
+      const titleSearchQueries = buildProductReferenceSearchQueries({
+        title: localLookup.product?.name?.trim() || effectiveSearchValue || resolvedSearch.searchValue,
+        brand: localLookup.product?.brand
+      }).slice(0, mercadoLivreTitleSearchMaxQueries);
+      const attemptedQueries = new Set(
+        [firstSearchType === "TITLE" ? firstSearchValue : null, fallbackSearchValue]
+          .filter((value): value is string => Boolean(value))
+          .map((value) => value.trim().toLocaleLowerCase("pt-BR").replace(/\s+/g, " "))
+      );
+
+      for (const searchValue of titleSearchQueries) {
+        if (titleSearchQueriesAttempted >= mercadoLivreTitleSearchMaxQueries) break;
+        const normalizedSearchValue = searchValue.trim().toLocaleLowerCase("pt-BR").replace(/\s+/g, " ");
+        if (attemptedQueries.has(normalizedSearchValue)) continue;
+        attemptedQueries.add(normalizedSearchValue);
         await pauseMercadoLivreTitleSearch();
-        const fallbackSearch = await runSearchStep(controlledFallbackValue);
+        const stagedSearch = await runSearchStep(searchValue, "TITLE");
         titleSearchQueriesAttempted += 1;
-        items.push(...fallbackSearch.items);
-        searchPaging = fallbackSearch.paging;
-        mercadoLivreError = mercadoLivreError ?? fallbackSearch.error;
+        items.splice(0, items.length, ...mergeUniqueMercadoLivreSearchItems(items, stagedSearch.items));
+        searchPaging = stagedSearch.paging;
+        mercadoLivreError = mercadoLivreError ?? stagedSearch.error;
         fallbackSearchType = "TITLE";
-        fallbackSearchValue = controlledFallbackValue;
-        fallbackSearchTotal = fallbackSearch.total;
+        fallbackSearchValue = searchValue;
+        fallbackSearchTotal = stagedSearch.total;
         fallbackApiMode = "q";
         effectiveSearchType = "TITLE";
-        effectiveSearchValue = controlledFallbackValue;
+        effectiveSearchValue = searchValue;
         apiMode = "q";
         fallbackUsed = true;
-        warnings.push("A frase exata nao retornou anuncios. Foi aplicada uma unica busca alternativa preservando peca, aplicacao, cilindrada, anos e marca.");
+      }
+
+      if (titleSearchQueriesAttempted > 1) {
+        warnings.push("A busca por titulo foi refinada mantendo tipo da peca, modelo, aplicacao e marca quando disponiveis.");
       }
     }
 
@@ -1738,6 +1779,8 @@ export class MercadoLivreOAuthService {
       publicSearchEnabled,
       publicSearchStatus,
       publicSearchTotal,
+      catalogFallbackUsed,
+      catalogFallbackTotal,
       searchStrategy: {
         titleQueriesAttempted: titleSearchQueriesAttempted,
         maxTitleQueries: mercadoLivreTitleSearchMaxQueries,
@@ -1781,9 +1824,9 @@ export class MercadoLivreOAuthService {
     const catalogProductId = input.catalogProductId?.trim() || null;
     if (!normalizedItemId && !catalogProductId) throw new Error("Informe itemId ou catalogProductId para carregar detalhes.");
 
-    const token = input.refreshExpiredToken === true
-      ? await this.getAccessTokenForConnection(input.authContext.organizationId, input.connectionId)
-      : await this.getUnexpiredAccessTokenForConnectionReadOnly(input.authContext.organizationId, input.connectionId);
+    const token = input.refreshExpiredToken === false
+      ? await this.getUnexpiredAccessTokenForConnectionReadOnly(input.authContext.organizationId, input.connectionId)
+      : await this.getAccessTokenForConnection(input.authContext.organizationId, input.connectionId);
     if (!token) throw new Error("Conecte uma conta Mercado Livre antes de carregar detalhes.");
 
     const startedAt = Date.now();
@@ -1819,7 +1862,7 @@ export class MercadoLivreOAuthService {
       listingTypeLabel: input.basicItem?.listingTypeLabel ?? null,
       status: input.basicItem?.status ?? null,
       attributes: input.basicItem?.attributes ?? [],
-      source: input.basicItem?.source ?? "MERCADO_LIVRE_PUBLIC_SEARCH"
+      source: input.basicItem?.source ?? "MERCADO_LIVRE_PRODUCT_SEARCH"
     };
 
     const item = await enrichMercadoLivreSearchItem({

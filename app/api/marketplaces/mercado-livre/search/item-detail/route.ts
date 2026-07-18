@@ -82,7 +82,9 @@ export async function GET(request: NextRequest) {
         listingTypeLabel: optionalText(url.searchParams.get("listingTypeLabel")),
         status: optionalText(url.searchParams.get("status")),
         attributes: basicAttributes,
-        source: "MERCADO_LIVRE_PUBLIC_SEARCH"
+        source: optionalText(url.searchParams.get("source")) === "MERCADO_LIVRE_PUBLIC_SEARCH"
+          ? "MERCADO_LIVRE_PUBLIC_SEARCH"
+          : "MERCADO_LIVRE_PRODUCT_SEARCH"
       }
     });
     return NextResponse.json(result);

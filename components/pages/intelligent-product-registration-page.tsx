@@ -42,11 +42,6 @@ import {
   hasValidMercadoLivreImage,
   mercadoLivreReferenceImageUrls
 } from "@/lib/mercado-livre-reference-images";
-import {
-  buildMercadoLivreWebsiteSearchUrl,
-  orderMercadoLivrePublicResults,
-  type MercadoLivrePublicResultOrder
-} from "@/lib/mercado-livre-public-search";
 
 const AMAZON_LOGO_SRC = "/marketplaces/amazon.png";
 const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre.png";
@@ -173,7 +168,7 @@ type MercadoLivreSearchItem = {
   lastSyncedAt?: string | null;
   attributes?: Array<{ id: string | null; name: string | null; value: string | null }>;
   detailsStatus?: "basic" | "complete";
-  dataAvailability?: "complete" | "partial";
+  dataAvailability?: "complete" | "catalog_offer" | "catalog_without_public_offer" | "partial";
   dataAvailabilityMessage?: string | null;
   source: string;
 };
@@ -206,6 +201,8 @@ type MercadoLivreSearchResponse = {
   publicSearchEnabled?: boolean;
   publicSearchStatus?: "disabled" | "ok" | "blocked" | "error" | "empty";
   publicSearchTotal?: number | null;
+  catalogFallbackUsed?: boolean;
+  catalogFallbackTotal?: number | null;
   analyzedResultsCount?: number;
   usefulResultsCount?: number;
   displayedResultsCount?: number;
@@ -630,20 +627,23 @@ function mercadoLivrePrimaryNotice(search: MercadoLivreSearchResponse | null) {
 
   const effectiveType = effectiveMercadoLivreSearchType(search);
   if (effectiveType === "GTIN" && !search.items.length) {
-    return "Nenhum anúncio encontrado na pesquisa do Mercado Livre para este GTIN/EAN. Você pode tentar buscar pelo título do produto.";
+    return "Nenhum produto encontrado no Catálogo Mercado Livre para este GTIN/EAN. Você pode tentar buscar pelo título do produto.";
+  }
+
+  if (search.catalogFallbackUsed) {
+    return "Exibindo resultados de catalogo em modo read-only.";
   }
 
   if (isMercadoLivreSearchUnavailable(search)) {
-    return search.publicSearchEnabled
-      ? "Não foi possível consultar a pesquisa pública do Mercado Livre agora."
-      : "Não foi possível consultar o Mercado Livre agora.";
+    return "O Catalogo Mercado Livre recusou a consulta read-only no momento. A busca local continua disponivel.";
   }
 
   return null;
 }
 
 function mercadoLivrePublicSearchUrl(value: string | null | undefined) {
-  return buildMercadoLivreWebsiteSearchUrl(value);
+  if (!value) return null;
+  return `https://lista.mercadolivre.com.br/${encodeURIComponent(value)}`;
 }
 
 function mercadoLivrePreviewReferenceDetails(item: MercadoLivreSearchItem): IntelligentProductPreviewReferenceDetails {
@@ -659,6 +659,7 @@ function mercadoLivrePreviewReferenceDetails(item: MercadoLivreSearchItem): Inte
 }
 
 function mercadoLivreSourceLabel(source: string | null | undefined) {
+  if (source === "MERCADO_LIVRE_PRODUCT_SEARCH") return "Catalogo Mercado Livre";
   if (source === "MERCADO_LIVRE_PUBLIC_SEARCH") return "Busca publica Mercado Livre";
   return "Mercado Livre read-only";
 }
@@ -670,13 +671,16 @@ function mercadoLivreSearchResultLabel(search: MercadoLivreSearchResponse, searc
     return `Busca realizada por GTIN/EAN: ${searchValue}`;
   }
 
-  const sourceLabel = search.publicSearchEnabled
-    ? "Resultados da pesquisa no Mercado Livre"
-    : "Resultados encontrados";
+  const sourceLabel =
+    search.apiMode === "product_identifier"
+      ? "Resultados encontrados no Catalogo Mercado Livre"
+      : search.apiMode === "q"
+        ? "Resultados encontrados no Catalogo Mercado Livre"
+        : search.catalogFallbackUsed
+          ? "Resultados encontrados no catalogo Mercado Livre"
+          : "Resultados encontrados";
 
-  return search.publicSearchEnabled
-    ? `${sourceLabel}. Pesquisa: ${searchValue}`
-    : `${sourceLabel} por ${searchTypeLabel(searchType)}: ${searchValue}`;
+  return `${sourceLabel} por ${searchTypeLabel(searchType)}: ${searchValue}`;
 }
 
 function localLookupMessage(payload: LookupResponse) {
@@ -1034,6 +1038,7 @@ function mercadoLivreItemKey(item: MercadoLivreSearchItem, index: number) {
 }
 
 function mercadoLivreDetailCacheKey(item: MercadoLivreSearchItem) {
+  if (item.source === "MERCADO_LIVRE_PRODUCT_SEARCH" && item.catalogProductId) return item.catalogProductId;
   return item.externalItemId ?? item.catalogProductId ?? item.permalink ?? null;
 }
 
@@ -1206,6 +1211,10 @@ function mercadoLivreDataCompleteness(item: MercadoLivreSearchItem) {
     return { label: "Dados completos", tone: "success" as const };
   }
 
+  if (item.dataAvailability === "catalog_without_public_offer") {
+    return { label: "Catalogo sem oferta publica", tone: "warning" as const };
+  }
+
   if (hasTitle && hasImage && (hasCategory || item.attributes?.length)) {
     return { label: "Dados parciais", tone: "muted" as const };
   }
@@ -1262,7 +1271,7 @@ export function IntelligentProductRegistrationPage() {
   const [mercadoLivreSearchLoading, setMercadoLivreSearchLoading] = useState(false);
   const [mercadoLivreSearch, setMercadoLivreSearch] = useState<MercadoLivreSearchResponse | null>(null);
   const [mercadoLivreSearchState, setMercadoLivreSearchState] = useState<MercadoLivreSearchState>("idle");
-  const [, setMercadoLivreStatusMessage] = useState<string | null>(null);
+  const [mercadoLivreStatusMessage, setMercadoLivreStatusMessage] = useState<string | null>(null);
   const [mercadoLivreLastQuery, setMercadoLivreLastQuery] = useState<string | null>(null);
   const [mercadoLivreLastSearchMode, setMercadoLivreLastSearchMode] = useState<MercadoLivreSearchMode | null>(null);
   const [mercadoLivreHttpStatus, setMercadoLivreHttpStatus] = useState<number | null>(null);
@@ -1277,7 +1286,6 @@ export function IntelligentProductRegistrationPage() {
   const [internalGtinDiagnostic, setInternalGtinDiagnostic] = useState<InternalGtinDiagnostic | null>(null);
   const [mercadoLivrePageSize, setMercadoLivrePageSize] = useState(10);
   const [mercadoLivreOfferPage, setMercadoLivreOfferPage] = useState(1);
-  const [mercadoLivreResultOrder, setMercadoLivreResultOrder] = useState<MercadoLivrePublicResultOrder>("marketplace");
   const [mercadoLivreOfferCollecting, setMercadoLivreOfferCollecting] = useState(false);
   const [mercadoLivreOfferCollectionError, setMercadoLivreOfferCollectionError] = useState<string | null>(null);
   const [mercadoLivreLocalFilters, setMercadoLivreLocalFilters] = useState<Set<MercadoLivreLocalFilter>>(defaultMercadoLivreLocalFilters);
@@ -1287,7 +1295,6 @@ export function IntelligentProductRegistrationPage() {
   const [manualReferenceLoading, setManualReferenceLoading] = useState(false);
   const [manualReferenceMessage, setManualReferenceMessage] = useState<string | null>(null);
   const [manualReferenceError, setManualReferenceError] = useState(false);
-  const [mercadoLivreTitleSearchOpened, setMercadoLivreTitleSearchOpened] = useState(false);
   const [selectedMercadoLivreResultKey, setSelectedMercadoLivreResultKey] = useState<string | null>(null);
   const [mercadoLivreDetailLoadingKey, setMercadoLivreDetailLoadingKey] = useState<string | null>(null);
   const [mercadoLivreDetailError, setMercadoLivreDetailError] = useState<{ key: string; message: string } | null>(null);
@@ -1363,17 +1370,17 @@ export function IntelligentProductRegistrationPage() {
       })
       .filter(({ item }) => hasValidMercadoLivreImage(item));
 
-    const analyzedItems = itemsWithImages.map(({ item, originalIndex }) => ({
-      item,
-      compatibility: product
-        ? calculateProductSuggestionCompatibility(product, mercadoLivreItemToCompatibilitySuggestion(item))
-        : null,
-      originalIndex,
-      useful: isUsefulMercadoLivreCard(item)
-    }));
-
-    return orderMercadoLivrePublicResults(analyzedItems, mercadoLivreResultOrder, sortProductSuggestionResults);
-  }, [enrichedMercadoLivreItemsById, mercadoLivreResultOrder, product, uniqueMercadoLivreItems]);
+    return sortProductSuggestionResults(
+      itemsWithImages.map(({ item, originalIndex }) => ({
+        item,
+        compatibility: product
+          ? calculateProductSuggestionCompatibility(product, mercadoLivreItemToCompatibilitySuggestion(item))
+          : null,
+        originalIndex,
+        useful: isUsefulMercadoLivreCard(item)
+      }))
+    );
+  }, [enrichedMercadoLivreItemsById, product, uniqueMercadoLivreItems]);
   const mercadoLivreResultItems = useMemo(
     () => rankedMercadoLivreItems.map((entry, rankedIndex) => ({ ...entry, rankedIndex })),
     [rankedMercadoLivreItems]
@@ -1821,7 +1828,6 @@ export function IntelligentProductRegistrationPage() {
     setManualReferenceLoading(false);
     setManualReferenceMessage(null);
     setManualReferenceError(false);
-    setMercadoLivreTitleSearchOpened(false);
   }
 
   async function consultInternalGtinCatalog() {
@@ -1946,7 +1952,6 @@ export function IntelligentProductRegistrationPage() {
     setMercadoLivreGtinStatus("idle");
     setMercadoLivreTitleStatus("idle");
     setMercadoLivreOfferPage(1);
-    setMercadoLivreResultOrder("marketplace");
     setMercadoLivreOfferCollecting(false);
     setMercadoLivreOfferCollectionError(null);
     mercadoLivreLoadedRawPagesRef.current = new Set();
@@ -2042,16 +2047,15 @@ export function IntelligentProductRegistrationPage() {
     setMercadoLivreItemsCount(null);
     setMercadoLivreStatusMessage(
       searchMode === "gtin"
-        ? `Buscando anúncios públicos no Mercado Livre por GTIN/EAN: ${searchValue}. Nenhuma escrita externa sera executada.`
+        ? `Buscando no Catalogo Mercado Livre por GTIN/EAN: ${searchValue}. Nenhuma escrita externa sera executada.`
         : searchMode === "title"
-          ? `Buscando anuncios publicos no Mercado Livre por titulo: ${searchValue}. Nenhuma escrita externa sera executada.`
-          : `Buscando no Mercado Livre em modo automatico: ${searchValue}. Nenhuma escrita externa sera executada.`
+          ? `Buscando no Catalogo Mercado Livre por titulo: ${searchValue}. Nenhuma escrita externa sera executada.`
+          : `Buscando no Catalogo Mercado Livre em modo automatico: ${searchValue}. Nenhuma escrita externa sera executada.`
     );
     if (!preserveCurrentResults) {
       setMercadoLivreSearch(null);
       setMercadoLivreLocalFilters(defaultMercadoLivreLocalFilters());
       setMercadoLivreOfferPage(1);
-      setMercadoLivreResultOrder("marketplace");
       setMercadoLivreOfferCollecting(false);
       setMercadoLivreOfferCollectionError(null);
       mercadoLivreLoadedRawPagesRef.current = new Set();
@@ -2117,15 +2121,15 @@ export function IntelligentProductRegistrationPage() {
       const resultText = `${itemCount}${totalText} resultado(s)`;
       setMercadoLivreStatusMessage(
         payload.items?.length
-          ? `${payload.publicSearchEnabled ? "Pesquisa do Mercado Livre" : "Mercado Livre"} retornou ${resultText}${timingText} por ${modeLabel}: ${effectiveValue}. Pagina ${payload.paging?.page ?? page}. A lista basica ja esta visivel; detalhes dos anuncios carregam progressivamente.`
+          ? `Catalogo Mercado Livre retornou ${resultText}${timingText} por ${modeLabel}: ${effectiveValue}. Pagina ${payload.paging?.page ?? page}. A lista basica ja esta visivel; detalhes dos anuncios carregam progressivamente.`
           : unavailable
             ? effectiveType === "GTIN"
-              ? "Não foi possível consultar a pesquisa pública do Mercado Livre agora."
-              : "Não foi possível consultar a pesquisa pública do Mercado Livre agora."
+              ? "O Catalogo Mercado Livre recusou a consulta read-only por GTIN/EAN no momento. Tente buscar por titulo."
+              : "O Catalogo Mercado Livre recusou a consulta read-only no momento. A busca local continua disponivel."
             : effectiveType === "GTIN"
-              ? "Nenhum anúncio encontrado na pesquisa do Mercado Livre para este GTIN/EAN. Você pode tentar buscar pelo título do produto."
+              ? "Nenhum produto encontrado no Catálogo Mercado Livre para este GTIN/EAN. Você pode tentar buscar pelo título do produto."
               : effectiveValue
-                ? `Busca publica do Mercado Livre consultada por ${modeLabel}: ${effectiveValue}. Resultados sao apenas sugestoes externas.${warningText ? ` ${warningText}` : ""}`
+                ? `Catalogo Mercado Livre consultado por ${modeLabel}: ${effectiveValue}. Resultados sao apenas sugestoes externas.${warningText ? ` ${warningText}` : ""}`
                 : `Mercado Livre nao foi consultado.${warningText ? ` ${warningText}` : ""}`
       );
     } catch {
@@ -2537,13 +2541,6 @@ export function IntelligentProductRegistrationPage() {
     setPreviewNotice(input.notice ?? null);
     setPreviewReferenceDetails(input.referenceDetails ?? null);
     setActivePanel("extracted");
-  }
-
-  function changeMercadoLivreResultOrder(value: string) {
-    const nextOrder: MercadoLivrePublicResultOrder = value === "compatibility" ? "compatibility" : "marketplace";
-    setMercadoLivreResultOrder(nextOrder);
-    setMercadoLivreOfferPage(1);
-    setSelectedMercadoLivreResultKey(null);
   }
 
   function selectMercadoLivreSuggestion(
@@ -3125,73 +3122,58 @@ export function IntelligentProductRegistrationPage() {
               </Button>
             ) : null}
             <div className="mt-3 space-y-3 border-t border-matrix-border pt-3">
-              <div>
-                {mercadoLivreTitleSearchUrl ? (
-                  <a
-                    aria-label="Mercado Livre Título"
-                    className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-md border border-matrix-gold/45 bg-matrix-goldSoft/30 px-3 py-2 text-sm font-semibold text-matrix-fg transition hover:border-matrix-gold hover:bg-matrix-goldSoft/50"
-                    href={mercadoLivreTitleSearchUrl}
-                    onClick={() => setMercadoLivreTitleSearchOpened(true)}
-                    rel="noreferrer"
-                    target="_blank"
-                    title="Pesquisar pelo título exato no Mercado Livre"
-                  >
-                    <MercadoLivreLogo size={18} />
-                    Título
-                  </a>
-                ) : (
-                  <Button aria-label="Mercado Livre Título" className="w-full justify-center" disabled type="button" variant="secondary">
-                    <MercadoLivreLogo size={18} />
-                    Título
-                  </Button>
-                )}
-              </div>
+              <Button
+                aria-label="Mercado Livre Título"
+                className="w-full justify-center"
+                disabled={mercadoLivreSearchLoading || !mercadoLivreConnected || (!selectedProductName?.trim() && !query.trim())}
+                onClick={() => searchMercadoLivreReadOnly("title")}
+                type="button"
+                variant="secondary"
+              >
+                <MercadoLivreLogo size={18} />
+                {mercadoLivreSearchLoading && mercadoLivreLastSearchMode === "title" ? "Buscando anúncios..." : "Mercado Livre · Título"}
+              </Button>
 
-              {mercadoLivreTitleSearchOpened ? (
-                <div className="rounded-md border border-matrix-gold/30 bg-matrix-panel/70 p-3">
-                  <p className="text-xs leading-5 text-matrix-muted">
-                    Escolha o produto correto no Mercado Livre, copie o link do anúncio e cole abaixo.
+              <div className="rounded-md border border-matrix-gold/30 bg-matrix-panel/70 p-3">
+                <p className="text-sm font-semibold text-matrix-fg">Não encontrou o anúncio?</p>
+                <label className="mt-3 block text-xs font-semibold text-matrix-muted" htmlFor="mercado-livre-manual-reference">
+                  Cole o link ou ID do anúncio Mercado Livre
+                </label>
+                <input
+                  autoComplete="off"
+                  className="mt-2 w-full min-w-0 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm text-matrix-fg outline-none focus:border-matrix-gold/60"
+                  id="mercado-livre-manual-reference"
+                  onChange={(event) => {
+                    manualReferenceRequestRef.current += 1;
+                    setManualReferenceLoading(false);
+                    setManualReferenceInput(event.target.value);
+                    setManualReferenceMessage(null);
+                    setManualReferenceError(false);
+                  }}
+                  placeholder="MLB1234567890, MLB-1234567890 ou link oficial"
+                  value={manualReferenceInput}
+                />
+                <Button
+                  className="mt-3 w-full justify-center"
+                  disabled={manualReferenceLoading || !mercadoLivreConnected || !product || !manualReferenceInput.trim()}
+                  onClick={loadManualMercadoLivreReference}
+                  type="button"
+                >
+                  <MercadoLivreLogo size={18} />
+                  {manualReferenceLoading ? "Carregando anúncio..." : "Carregar anúncio"}
+                </Button>
+                {manualReferenceMessage ? (
+                  <p
+                    className={`mt-3 rounded-md border p-2 text-xs ${
+                      manualReferenceError
+                        ? "border-red-500/30 bg-red-500/10 text-red-200"
+                        : "border-matrix-gold/25 bg-matrix-goldSoft/20 text-matrix-muted"
+                    }`}
+                  >
+                    {manualReferenceMessage}
                   </p>
-
-                  <label className="mt-3 block text-xs font-semibold text-matrix-fg" htmlFor="mercado-livre-manual-reference">
-                    Link ou ID do anúncio Mercado Livre
-                  </label>
-                  <input
-                    autoComplete="off"
-                    className="mt-2 w-full min-w-0 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm text-matrix-fg outline-none focus:border-matrix-gold/60"
-                    id="mercado-livre-manual-reference"
-                    onChange={(event) => {
-                      manualReferenceRequestRef.current += 1;
-                      setManualReferenceLoading(false);
-                      setManualReferenceInput(event.target.value);
-                      setManualReferenceMessage(null);
-                      setManualReferenceError(false);
-                    }}
-                    placeholder="MLB1234567890, MLB-1234567890 ou link oficial"
-                    value={manualReferenceInput}
-                  />
-                  <Button
-                    className="mt-3 w-full justify-center"
-                    disabled={manualReferenceLoading || !mercadoLivreConnected || !product || !manualReferenceInput.trim()}
-                    onClick={loadManualMercadoLivreReference}
-                    type="button"
-                  >
-                    <MercadoLivreLogo size={18} />
-                    {manualReferenceLoading ? "Carregando produto..." : "Carregar produto escolhido"}
-                  </Button>
-                  {manualReferenceMessage ? (
-                    <p
-                      className={`mt-3 rounded-md border p-2 text-xs ${
-                        manualReferenceError
-                          ? "border-red-500/30 bg-red-500/10 text-red-200"
-                          : "border-matrix-gold/25 bg-matrix-goldSoft/20 text-matrix-muted"
-                      }`}
-                    >
-                      {manualReferenceMessage}
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
+                ) : null}
+              </div>
             </div>
           </div>
 
@@ -3410,15 +3392,27 @@ export function IntelligentProductRegistrationPage() {
             ) : null}
 
             {!mercadoLivreSearch && amazonCatalogState === "idle" ? (
-              <section className="rounded-lg border border-matrix-border bg-matrix-panel2/45 p-4">
-                <div className="flex items-start gap-3">
-                  <ExternalLink className="mt-0.5 h-5 w-5 shrink-0 text-matrix-goldDark" />
-                  <div className="min-w-0">
-                    <p className="font-semibold text-matrix-fg">Escolha uma referência no Mercado Livre</p>
-                    <p className="mt-1 text-sm leading-6 text-matrix-muted">
-                      Abra a pesquisa oficial pela lateral e, depois de escolher um anúncio, cole o link ou ID para carregar a prévia.
-                    </p>
-                  </div>
+              <section className="grid min-h-[260px] place-items-center rounded-lg border border-matrix-border bg-matrix-panel2/45 p-8 text-center">
+                <div>
+                  <Search className="mx-auto h-10 w-10 text-matrix-goldDark" />
+                  <p className="mt-3 font-semibold text-matrix-fg">
+                    {mercadoLivreSearchLoading ? "Buscando anúncios no Mercado Livre" : "Mercado Livre pronto para consulta"}
+                  </p>
+                  <p className="mt-1 max-w-md text-sm text-matrix-muted">
+                    {mercadoLivreStatusMessage ??
+                      "Use o botão Título para pesquisar anúncios dentro do Matrix. Nenhuma escrita externa será executada."}
+                  </p>
+                  {(mercadoLivreSearchState === "blocked_403" || mercadoLivreSearchState === "error") && mercadoLivreTitleSearchUrl ? (
+                    <a
+                      className="mt-4 inline-flex min-h-9 items-center justify-center gap-2 rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 py-2 text-sm font-semibold text-matrix-fg transition hover:border-matrix-gold/50 hover:bg-matrix-goldSoft/40"
+                      href={mercadoLivreTitleSearchUrl}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      <ExternalLink className="h-4 w-4" />
+                      Abrir pesquisa no Mercado Livre
+                    </a>
+                  ) : null}
                 </div>
               </section>
             ) : null}
@@ -3543,15 +3537,6 @@ export function IntelligentProductRegistrationPage() {
                             <option value="10">10 por pagina</option>
                             <option value="20">20 por pagina</option>
                           </select>
-                          <select
-                            aria-label="Ordenacao dos resultados Mercado Livre"
-                            className="min-h-8 rounded-md border border-matrix-border bg-matrix-panel2 px-2 text-xs text-matrix-fg outline-none focus:border-matrix-gold"
-                            onChange={(event) => changeMercadoLivreResultOrder(event.target.value)}
-                            value={mercadoLivreResultOrder}
-                          >
-                            <option value="marketplace">Ordem Mercado Livre</option>
-                            <option value="compatibility">Mais relacionados ao produto</option>
-                          </select>
                           <Button
                             className="min-h-8 px-2 py-1 text-xs"
                             disabled={mercadoLivreSearchLoading || !mercadoLivreOfferPageHasPrevious}
@@ -3647,7 +3632,7 @@ export function IntelligentProductRegistrationPage() {
                                     ? `Buscando resultados: ${mercadoLivreResultCount} encontrado(s), ${mercadoLivreCurrentPageDetailsLoaded} de ${mercadoLivreCurrentPageDetailsTotal} anuncio(s) analisado(s), ${mercadoLivreCurrentPageDetailsLoading} em andamento, ${mercadoLivreCurrentPageDetailsPending} aguardando e ${mercadoLivreCurrentPageDetailsFailed} sem detalhe util.`
                                     : mercadoLivreHideIncompleteActive
                                     ? `Mostrando ${Math.min(mercadoLivreUsefulResultCount, filteredMercadoLivreItems.length)} anuncio(s) com dados uteis. ${mercadoLivreHiddenIncompleteCount} resultado(s) incompleto(s) foram ocultados. ${mercadoLivreAnalyzedResultCount} resultado(s) analisado(s).`
-                                    : `Exibindo ${filteredMercadoLivreItems.length} de ${mercadoLivreResultCount} resultado(s) com foto em ${mercadoLivreResultOrder === "marketplace" ? "Ordem Mercado Livre" : "Mais relacionados ao produto"}.`}
+                                    : `Exibindo ${filteredMercadoLivreItems.length} de ${mercadoLivreResultCount} resultado(s) com foto, ordenados por relevancia.`}
                                 </p>
                               </div>
                             ) : null}
