@@ -2959,7 +2959,15 @@ export function IntelligentProductRegistrationPage() {
               {loading ? "Buscando..." : "Buscar produto"}
             </Button>
           </form>
-          <p className="rounded-md border border-matrix-border bg-matrix-panel2/58 p-3 text-xs text-matrix-muted">{message}</p>
+          <p
+            className={
+              message.startsWith("Produto local encontrado por ")
+                ? "hidden"
+                : "rounded-md border border-matrix-border bg-matrix-panel2/58 p-3 text-xs text-matrix-muted"
+            }
+          >
+            {message}
+          </p>
 
           {product ? (
             <div className="rounded-lg border border-matrix-gold/35 bg-matrix-goldSoft/18 p-3">
@@ -2983,7 +2991,8 @@ export function IntelligentProductRegistrationPage() {
             </div>
           ) : null}
 
-          <div className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3">
+          {/* Oculto visualmente; fluxo interno preservado. */}
+          <div className="hidden rounded-lg border border-matrix-border bg-matrix-panel2/58 p-3">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="font-semibold text-matrix-fg">GTIN interno</p>
@@ -3134,7 +3143,8 @@ export function IntelligentProductRegistrationPage() {
                 {mercadoLivreSearchLoading && mercadoLivreLastSearchMode === "title" ? "Buscando anúncios..." : "Mercado Livre · Título"}
               </Button>
 
-              <div className="rounded-md border border-matrix-gold/30 bg-matrix-panel/70 p-3">
+              {/* Oculto visualmente; fluxo interno preservado. */}
+              <div className="hidden rounded-md border border-matrix-gold/30 bg-matrix-panel/70 p-3">
                 <p className="text-sm font-semibold text-matrix-fg">Não encontrou o anúncio?</p>
                 <label className="mt-3 block text-xs font-semibold text-matrix-muted" htmlFor="mercado-livre-manual-reference">
                   Cole o link ou ID do anúncio Mercado Livre
@@ -3177,7 +3187,8 @@ export function IntelligentProductRegistrationPage() {
             </div>
           </div>
 
-          <p className="rounded-md border border-matrix-border bg-matrix-panel2/58 p-3 text-xs text-matrix-muted">
+          {/* Oculto visualmente; protecoes de salvamento preservadas. */}
+          <p className="hidden rounded-md border border-matrix-border bg-matrix-panel2/58 p-3 text-xs text-matrix-muted">
             Nada e publicado automaticamente. Product, estoque e financeiro so mudam quando o usuario confirma um salvamento local permitido.
           </p>
         </aside>
