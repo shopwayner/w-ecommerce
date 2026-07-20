@@ -95,20 +95,33 @@ export function DataTable({
   columns,
   rows,
   emptyMessage = "Nenhum registro encontrado.",
-  footer
+  footer,
+  columnWidths
 }: {
   columns: ReactNode[];
   rows: ReactNode[][];
   emptyMessage?: string;
   footer?: ReactNode;
+  columnWidths?: Array<number | string>;
 }) {
   return (
     <div className="matrix-scroll overflow-x-auto rounded-md border border-matrix-border bg-matrix-panel">
       <table className="min-w-full divide-y divide-matrix-border text-left text-sm">
+        {columnWidths ? (
+          <colgroup>
+            {columnWidths.map((width, columnIndex) => (
+              <col key={columnIndex} style={{ width }} />
+            ))}
+          </colgroup>
+        ) : null}
         <thead className="bg-matrix-panel2 text-xs uppercase text-matrix-muted">
           <tr>
             {columns.map((column, columnIndex) => (
-              <th key={columnIndex} className="whitespace-nowrap px-3 py-2.5 font-semibold">
+              <th
+                key={columnIndex}
+                className="whitespace-nowrap px-3 py-2.5 font-semibold"
+                style={columnWidths ? { maxWidth: columnWidths[columnIndex], width: columnWidths[columnIndex] } : undefined}
+              >
                 {column}
               </th>
             ))}
@@ -119,7 +132,11 @@ export function DataTable({
             rows.map((row, rowIndex) => (
               <tr key={rowIndex} className="hover:bg-matrix-goldSoft/18">
                 {row.map((cell, cellIndex) => (
-                  <td key={cellIndex} className="whitespace-nowrap px-3 py-2.5 text-matrix-fg">
+                  <td
+                    key={cellIndex}
+                    className="whitespace-nowrap px-3 py-2.5 text-matrix-fg"
+                    style={columnWidths ? { maxWidth: columnWidths[cellIndex], width: columnWidths[cellIndex] } : undefined}
+                  >
                     {cell}
                   </td>
                 ))}

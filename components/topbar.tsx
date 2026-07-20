@@ -54,7 +54,14 @@ function contextKey(option: Pick<AccountContextOption, "mode" | "provider" | "co
   return option.mode === "ERP_ACCOUNT" ? `${option.provider}:${option.connectionId}` : "MATRIX";
 }
 
-function TopbarComponent({ onMenuClick, sidebarCollapsed }: { onMenuClick: () => void; sidebarCollapsed: boolean }) {
+type TopbarProps = {
+  onMenuClick: () => void;
+  sidebarCollapsed: boolean;
+  hideCollapsedSidebarRail?: boolean;
+  denseDesktopShell?: boolean;
+};
+
+function TopbarComponent({ onMenuClick, sidebarCollapsed, hideCollapsedSidebarRail = false, denseDesktopShell = false }: TopbarProps) {
   const [session, setSession] = useState<SessionView | null>(cachedSession);
   const [accountContext, setAccountContext] = useState<AccountContextView | null>(null);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
@@ -225,14 +232,19 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed }: { onMenuClick: () =>
     <header
       className={cn(
         "fixed left-0 right-0 top-0 z-30 border-b border-matrix-border bg-matrix-panel/88 shadow-glow backdrop-blur transition-[left] duration-200",
-        sidebarCollapsed ? "lg:left-20" : "lg:left-72"
+        hideCollapsedSidebarRail ? "lg:left-0" : sidebarCollapsed ? "lg:left-20" : "lg:left-72"
       )}
     >
-      <div className="flex h-16 items-center gap-2 px-3 py-2 sm:px-4 lg:px-5">
+      <div className={cn("flex h-16 items-center gap-2 px-3 py-2 sm:px-4 lg:px-5", denseDesktopShell && "lg:!h-[3.75rem] lg:!gap-[7px] lg:!px-1")}>
         <button onClick={onMenuClick} className="grid h-10 w-10 place-items-center rounded-md border border-matrix-border bg-matrix-panel2 text-matrix-muted lg:hidden">
           <Menu className="h-5 w-5" />
         </button>
-        <label className="flex min-w-0 flex-1 items-center rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 py-2 gold-ring sm:min-w-[11rem] sm:max-w-sm lg:max-w-md">
+        <label
+          className={cn(
+            "flex min-w-0 flex-1 items-center rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 py-2 gold-ring sm:min-w-[11rem] sm:max-w-sm lg:max-w-md",
+            denseDesktopShell && "lg:!w-[17.625rem] lg:!max-w-[17.625rem] lg:!flex-none"
+          )}
+        >
           <span className="sr-only">Marketplace</span>
           <select
             className="min-w-0 w-full bg-transparent text-sm font-semibold text-matrix-fg outline-none"
@@ -251,13 +263,16 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed }: { onMenuClick: () =>
         </label>
         <div className="relative hidden sm:block">
           <button
-            className="flex max-w-[260px] items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm font-semibold text-matrix-fg hover:border-matrix-gold/50"
+            className={cn(
+              "flex max-w-[260px] items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm font-semibold text-matrix-fg hover:border-matrix-gold/50",
+              denseDesktopShell && "lg:!w-[159px] lg:!gap-1.5 lg:!px-1.5 lg:!text-xs"
+            )}
             onClick={() => setAccountMenuOpen((current) => !current)}
             type="button"
           >
             <UserRound className="h-4 w-4 shrink-0 text-matrix-gold" />
             <span>Conta</span>
-            <span className="min-w-0 max-w-40 truncate text-xs font-medium text-matrix-muted">{currentLabel}</span>
+            <span className={cn("min-w-0 max-w-40 truncate text-xs font-medium text-matrix-muted", denseDesktopShell && "lg:!text-[10px]")}>{currentLabel}</span>
           </button>
           {accountMenuOpen ? (
             <div className="absolute right-0 top-12 z-50 w-80 rounded-lg border border-matrix-border bg-matrix-panel p-4 text-sm shadow-glow">
@@ -308,7 +323,12 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed }: { onMenuClick: () =>
             </div>
           ) : null}
         </div>
-        <button className="hidden items-center gap-2 rounded-md bg-matrix-gold px-3 py-2 text-sm font-semibold text-black shadow-gold hover:bg-matrix-goldDark hover:text-white sm:flex">
+        <button
+          className={cn(
+            "hidden items-center gap-2 rounded-md bg-matrix-gold px-3 py-2 text-sm font-semibold text-black shadow-gold hover:bg-matrix-goldDark hover:text-white sm:flex",
+            denseDesktopShell && "lg:!w-24 lg:!justify-center lg:!px-2 lg:!text-xs lg:!whitespace-nowrap"
+          )}
+        >
           <Plus className="h-4 w-4" />
           Acao rapida
         </button>
@@ -386,11 +406,16 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed }: { onMenuClick: () =>
             </div>
           ) : null}
         </div>
-        <div className="hidden min-w-0 items-center gap-3 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 md:flex">
+        <div
+          className={cn(
+            "hidden min-w-0 items-center gap-3 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 md:flex",
+            denseDesktopShell && "lg:!w-[9.625rem] lg:!gap-2 lg:!px-2"
+          )}
+        >
           <UserRound className="h-4 w-4 shrink-0 text-matrix-gold" />
           <div className="min-w-0">
-            <p className="truncate text-xs text-matrix-muted">{session?.organization.name ?? "Organizacao"}</p>
-            <p className="truncate text-sm font-semibold text-matrix-fg">{session?.user.name ?? session?.user.email ?? "Usuario"}</p>
+            <p className={cn("truncate text-xs text-matrix-muted", denseDesktopShell && "lg:!text-[10px]")}>{session?.organization.name ?? "Organizacao"}</p>
+            <p className={cn("truncate text-sm font-semibold text-matrix-fg", denseDesktopShell && "lg:!text-xs")}>{session?.user.name ?? session?.user.email ?? "Usuario"}</p>
           </div>
         </div>
         <button

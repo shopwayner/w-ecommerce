@@ -5,6 +5,11 @@ import { prisma } from "@/lib/prisma";
 import { getUserAccountContext } from "@/lib/services/account-context-service";
 import { readCanonicalBlingStatusFromAttributes } from "@/lib/services/bling-product-import-service";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
+import {
+  buildProductListFilterOptions,
+  matchesProductListFilters,
+  parseProductListFilters
+} from "@/lib/product-list-filters";
 import { productCreateSchema } from "@/lib/validation";
 
 type ProductListRecord = Prisma.ProductGetPayload<{
@@ -402,6 +407,7 @@ export async function GET(request: Request) {
   const mercadoLivreCategoryStatus = url.searchParams.get("mercadoLivreCategoryStatus");
   const source = url.searchParams.get("source");
   const sort = url.searchParams.get("sort");
+  const productListFilters = parseProductListFilters(url.searchParams);
   const accountContext = await getUserAccountContext(auth.context);
   const selectedBlingConnectionId =
     accountContext.mode === "ERP_ACCOUNT" && accountContext.provider === "BLING"
@@ -454,17 +460,23 @@ export async function GET(request: Request) {
     orderBy: { createdAt: "desc" }
   });
 
-  const serialized = await attachMarketplaceStores(auth.context.organizationId, products.map(serializeProduct));
+  const serialized = products.map(serializeProduct);
+  const filterOptions = buildProductListFilterOptions(serialized);
+  const summary = {
+    totalProducts: serialized.length,
+    importedFromBlingCount: serialized.filter((product) => product.blingAccount).length,
+    readyForTestCount: serialized.filter((product) => product.status === "READY_FOR_TEST").length,
+    unknownBlingStatusCount: serialized.filter((product) => product.blingStatus === "UNKNOWN").length
+  };
   const filtered = serialized.filter((product) => {
-    const searchable = `${product.name} ${product.sku ?? ""} ${product.ean ?? ""}`.toLowerCase();
     const score = getQualityScore(product);
     return (
-      (!query || searchable.includes(query)) &&
-      matchesStateFilter(stockStatus, product.stock > 0) &&
-      matchesStateFilter(imageStatus, hasText(product.imageUrl)) &&
+      matchesProductListFilters(product, productListFilters, query) &&
+      (!stockStatus || matchesStateFilter(stockStatus, product.stock > 0)) &&
+      (!imageStatus || matchesStateFilter(imageStatus, hasText(product.imageUrl))) &&
       matchesStateFilter(descriptionStatus, hasText(product.description)) &&
       matchesStateFilter(categoryStatus, hasText(product.category)) &&
-      matchesStateFilter(gtinStatus, hasText(product.ean)) &&
+      (!gtinStatus || matchesStateFilter(gtinStatus, hasText(product.ean))) &&
       matchesStateFilter(costStatus, toNumber(product.costPrice) > 0) &&
       (!qualityBand || getQualityBand(score, product) === qualityBand) &&
       matchesMercadoLivreFilter(mercadoLivreCategoryStatus, product) &&
@@ -477,11 +489,15 @@ export async function GET(request: Request) {
   const totalPages = limit ? Math.max(1, Math.ceil(total / limit)) : 1;
   const safePage = limit ? Math.min(page, totalPages) : 1;
   const start = limit ? (safePage - 1) * limit : 0;
-  const data = limit ? sorted.slice(start, start + limit) : sorted;
+  const pageProducts = limit ? sorted.slice(start, start + limit) : sorted;
+  const data = await attachMarketplaceStores(auth.context.organizationId, pageProducts);
 
   return NextResponse.json({
     data,
     accountContext,
+    filterOptions,
+    appliedFilters: productListFilters,
+    summary,
     pagination: {
       page: safePage,
       limit: limit ?? "all",

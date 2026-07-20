@@ -9,7 +9,8 @@ import {
   Box,
   CalendarDays,
   CheckCircle2,
-  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ClipboardList,
   DollarSign,
   Download,
@@ -22,6 +23,7 @@ import {
   Lock,
   Maximize2,
   Minimize2,
+  MoreHorizontal,
   Package,
   Plus,
   RefreshCw,
@@ -29,8 +31,10 @@ import {
   Scale,
   Search,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Tag,
+  Trash2,
   Wand2,
   X
 } from "lucide-react";
@@ -43,6 +47,12 @@ import {
 } from "@/components/bling-product-update-modal";
 import { ProductCopyButton } from "@/components/product-copy-button";
 import { Badge, Button, Card, DataTable, KpiCard, PageHeader } from "@/components/ui";
+import {
+  EMPTY_PRODUCT_LIST_FILTERS,
+  parseProductListFilters,
+  type ProductListFilterOptions,
+  type ProductListFilters
+} from "@/lib/product-list-filters";
 
 const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre-oval.png";
 
@@ -171,31 +181,53 @@ const statusLabel: Record<string, string> = {
   DRAFT: "Rascunho"
 };
 
-type ImageFilter = "all" | "yes" | "no";
-type StockFilter = "all" | "positive" | "negative" | "zero";
-type BlingStatusFilter = "all" | "active" | "inactive" | "excluded";
-type ProductFilterMenu = "images" | "stock" | "blingStatus" | null;
-
 const pageSizeOptions = [20, 50, 100];
 
-const imageFilterLabels: Record<ImageFilter, string> = {
-  all: "Todos",
-  yes: "Sim",
-  no: "Nao"
+function getPaginationItems(currentPage: number, totalPages: number): Array<number | "ellipsis"> {
+  if (totalPages <= 5) return Array.from({ length: totalPages }, (_, index) => index + 1);
+  if (currentPage <= 3) return [1, 2, 3, "ellipsis", totalPages];
+  if (currentPage >= totalPages - 2) return [1, "ellipsis", totalPages - 2, totalPages - 1, totalPages];
+  return [1, "ellipsis", currentPage, "ellipsis", totalPages];
+}
+
+const emptyFilterOptions: ProductListFilterOptions = {
+  origins: [],
+  categories: [],
+  brands: [],
+  categoriesTruncated: false,
+  brandsTruncated: false
 };
 
-const stockFilterLabels: Record<StockFilter, string> = {
-  all: "Todos",
-  positive: "Maior que zero",
-  negative: "Menor que zero",
-  zero: "Igual a zero"
+type ProductListSummary = {
+  totalProducts: number;
+  importedFromBlingCount: number;
+  readyForTestCount: number;
+  unknownBlingStatusCount: number;
 };
 
-const blingStatusFilterLabels: Record<BlingStatusFilter, string> = {
-  all: "Todos",
-  active: "Ativos no Bling",
-  inactive: "Inativos no Bling",
-  excluded: "Excluidos no Bling"
+type ProductListPagination = {
+  page: number;
+  limit: number | "all";
+  total: number;
+  totalPages: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+};
+
+const emptySummary: ProductListSummary = {
+  totalProducts: 0,
+  importedFromBlingCount: 0,
+  readyForTestCount: 0,
+  unknownBlingStatusCount: 0
+};
+
+const emptyPagination: ProductListPagination = {
+  page: 1,
+  limit: 20,
+  total: 0,
+  totalPages: 1,
+  hasNextPage: false,
+  hasPreviousPage: false
 };
 
 function getBlingCatalogStatusLabel(status: string | null | undefined) {
@@ -256,11 +288,11 @@ function ProductStoresCell({ product }: { product: ProductListItem }) {
     <div className="flex min-w-10 items-center justify-center">
       <Image
         alt="Mercado Livre"
-        className="h-auto w-7 object-contain"
-        height={17}
+        className="h-auto w-6 object-contain"
+        height={15}
         src={MERCADO_LIVRE_LOGO_SRC}
         title="Mercado Livre"
-        width={28}
+        width={24}
       />
     </div>
   );
@@ -445,6 +477,35 @@ function ProductCheckbox({
   );
 }
 
+function ProductFilterSelect({
+  label,
+  value,
+  onChange,
+  children,
+  hint
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  children: React.ReactNode;
+  hint?: string;
+}) {
+  return (
+    <label className="grid gap-1 text-sm text-matrix-fg">
+      <span className="font-semibold">{label}</span>
+      {hint ? <span className="text-xs text-matrix-muted">{hint}</span> : null}
+      <select
+        aria-label={label}
+        className="h-9 w-full rounded-md border border-matrix-border bg-matrix-panel2 px-3 text-sm text-matrix-fg outline-none transition focus:border-matrix-gold/60 focus-visible:ring-2 focus-visible:ring-matrix-gold/40"
+        onChange={(event) => onChange(event.target.value)}
+        value={value}
+      >
+        {children}
+      </select>
+    </label>
+  );
+}
+
 export function ProductsPage() {
   const [open, setOpen] = useState(false);
   const [viewingProduct, setViewingProduct] = useState<ProductListItem | null>(null);
@@ -467,30 +528,114 @@ export function ProductsPage() {
   const blingUpdateIdempotencyKey = useRef<string | null>(null);
   const blingUpdateRequestInFlight = useRef(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [imageFilter, setImageFilter] = useState<ImageFilter>("all");
-  const [stockFilter, setStockFilter] = useState<StockFilter>("all");
-  const [blingStatusFilter, setBlingStatusFilter] = useState<BlingStatusFilter>("all");
-  const [openFilterMenu, setOpenFilterMenu] = useState<ProductFilterMenu>(null);
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
+  const [pendingFilters, setPendingFilters] = useState<ProductListFilters>({ ...EMPTY_PRODUCT_LIST_FILTERS });
+  const [appliedFilters, setAppliedFilters] = useState<ProductListFilters>({ ...EMPTY_PRODUCT_LIST_FILTERS });
+  const [filterOptions, setFilterOptions] = useState<ProductListFilterOptions>(emptyFilterOptions);
+  const [summary, setSummary] = useState<ProductListSummary>(emptySummary);
+  const [pagination, setPagination] = useState<ProductListPagination>(emptyPagination);
+  const [urlStateReady, setUrlStateReady] = useState(false);
+  const [urlNavigationVersion, setUrlNavigationVersion] = useState(0);
+  const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const filterBarRef = useRef<HTMLDivElement>(null);
+  const appliedFiltersRef = useRef<ProductListFilters>({ ...EMPTY_PRODUCT_LIST_FILTERS });
+  const pageSizeRef = useRef(20);
+  const handledUrlNavigationVersionRef = useRef(0);
 
   const loadProducts = useCallback(async () => {
+    if (!urlStateReady) return;
     setLoadingProducts(true);
     try {
-      const response = await fetch("/api/products?limit=all");
+      const params = new URLSearchParams({ page: String(currentPage), limit: String(pageSize) });
+      if (debouncedSearchQuery.trim()) params.set("q", debouncedSearchQuery.trim());
+      for (const [key, value] of Object.entries(appliedFilters)) {
+        if (value !== "all") params.set(key, value);
+      }
+
+      const response = await fetch(`/api/products?${params.toString()}`);
       if (!response.ok) {
         setProducts([]);
         return;
       }
 
-      const payload = (await response.json()) as { data?: ProductListItem[]; accountContext?: ProductAccountContext };
+      const payload = (await response.json()) as {
+        data?: ProductListItem[];
+        accountContext?: ProductAccountContext;
+        filterOptions?: ProductListFilterOptions;
+        pagination?: ProductListPagination;
+        summary?: ProductListSummary;
+      };
       setProducts(payload.data ?? []);
       setAccountContext(payload.accountContext ?? null);
+      setFilterOptions(payload.filterOptions ?? emptyFilterOptions);
+      setPagination(payload.pagination ?? emptyPagination);
+      setSummary(payload.summary ?? emptySummary);
+      if (payload.pagination?.page && payload.pagination.page !== currentPage) {
+        setCurrentPage(payload.pagination.page);
+      }
     } finally {
       setLoadingProducts(false);
     }
+  }, [appliedFilters, currentPage, debouncedSearchQuery, pageSize, urlStateReady]);
+
+  const writeUrlState = useCallback((
+    nextFilters: ProductListFilters,
+    nextPage: number,
+    nextPageSize: number,
+    nextSearch: string,
+    mode: "push" | "replace" = "push"
+  ) => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams();
+    if (nextSearch.trim()) params.set("q", nextSearch.trim());
+    for (const [key, value] of Object.entries(nextFilters)) {
+      if (value !== "all") params.set(key, value);
+    }
+    if (nextPage > 1) params.set("page", String(nextPage));
+    if (nextPageSize !== 20) params.set("limit", String(nextPageSize));
+    const nextUrl = `${window.location.pathname}${params.size ? `?${params.toString()}` : ""}`;
+    window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", nextUrl);
   }, []);
+
+  useEffect(() => {
+    function readUrlState() {
+      const params = new URLSearchParams(window.location.search);
+      const nextFilters = parseProductListFilters(params);
+      const nextSearch = params.get("q") ?? "";
+      const requestedPage = Math.max(1, Number.parseInt(params.get("page") ?? "1", 10) || 1);
+      const requestedLimit = Number.parseInt(params.get("limit") ?? "20", 10) || 20;
+      const nextPageSize = pageSizeOptions.includes(requestedLimit) ? requestedLimit : 20;
+      setPendingFilters(nextFilters);
+      setAppliedFilters(nextFilters);
+      appliedFiltersRef.current = nextFilters;
+      setSearchQuery(nextSearch);
+      setDebouncedSearchQuery(nextSearch);
+      setCurrentPage(requestedPage);
+      setPageSize(nextPageSize);
+      pageSizeRef.current = nextPageSize;
+      setUrlStateReady(true);
+      setUrlNavigationVersion((current) => current + 1);
+    }
+
+    readUrlState();
+    window.addEventListener("popstate", readUrlState);
+    return () => window.removeEventListener("popstate", readUrlState);
+  }, []);
+
+  useEffect(() => {
+    if (!urlStateReady) return;
+    if (handledUrlNavigationVersionRef.current !== urlNavigationVersion) {
+      handledUrlNavigationVersionRef.current = urlNavigationVersion;
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery);
+      setCurrentPage(1);
+      writeUrlState(appliedFiltersRef.current, 1, pageSizeRef.current, searchQuery, "replace");
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [searchQuery, urlNavigationVersion, urlStateReady, writeUrlState]);
 
   useEffect(() => {
     void loadProducts();
@@ -515,76 +660,17 @@ export function ProductsPage() {
   }, [products]);
 
   useEffect(() => {
-    function handlePointerDown(event: MouseEvent) {
-      if (!filterBarRef.current?.contains(event.target as Node)) {
-        setOpenFilterMenu(null);
-      }
-    }
-
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setOpenFilterMenu(null);
-      }
+      if (event.key === "Escape" && window.innerWidth < 1024) setIsFilterPanelOpen(false);
     }
-
-    document.addEventListener("mousedown", handlePointerDown);
     document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
+    return () => document.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [blingStatusFilter, imageFilter, pageSize, searchQuery, stockFilter]);
-
-  const importedFromBlingCount = useMemo(() => products.filter((product) => product.blingAccount).length, [products]);
-  const unknownBlingStatusCount = useMemo(
-    () => products.filter((product) => product.blingStatus?.trim().toUpperCase() === "UNKNOWN").length,
-    [products]
-  );
-
-  const filteredProducts = useMemo(() => {
-    const normalizedSearch = searchQuery.trim().toLowerCase();
-    return products.filter((product) => {
-      const hasImage = Boolean(product.imageUrl?.trim());
-      const matchesImage =
-        imageFilter === "all" ||
-        (imageFilter === "yes" && hasImage) ||
-        (imageFilter === "no" && !hasImage);
-      const matchesStock =
-        stockFilter === "all" ||
-        (stockFilter === "positive" && product.stock > 0) ||
-        (stockFilter === "negative" && product.stock < 0) ||
-        (stockFilter === "zero" && product.stock === 0);
-      const matchesSearch =
-        !normalizedSearch ||
-        [product.name, product.sku, product.ean]
-          .filter(Boolean)
-          .join(" ")
-          .toLowerCase()
-          .includes(normalizedSearch);
-      const blingStatus = product.blingStatus?.trim().toUpperCase();
-      const matchesBlingStatus =
-        blingStatusFilter === "all" ||
-        (blingStatusFilter === "active" && blingStatus === "ACTIVE") ||
-        (blingStatusFilter === "inactive" && blingStatus === "INACTIVE") ||
-        (blingStatusFilter === "excluded" && blingStatus === "DELETED");
-      return matchesSearch && matchesImage && matchesStock && matchesBlingStatus;
-    });
-  }, [blingStatusFilter, imageFilter, products, searchQuery, stockFilter]);
-
-  const totalPages = Math.max(1, Math.ceil(filteredProducts.length / pageSize));
-
-  useEffect(() => {
-    setCurrentPage((page) => Math.min(Math.max(page, 1), totalPages));
-  }, [totalPages]);
-
-  const paginatedProducts = useMemo(() => {
-    const startIndex = (currentPage - 1) * pageSize;
-    return filteredProducts.slice(startIndex, startIndex + pageSize);
-  }, [currentPage, filteredProducts, pageSize]);
+  const importedFromBlingCount = summary.importedFromBlingCount;
+  const unknownBlingStatusCount = summary.unknownBlingStatusCount;
+  const totalPages = pagination.totalPages;
+  const paginatedProducts = products;
 
   const visibleProductIds = useMemo(() => paginatedProducts.map((product) => product.id), [paginatedProducts]);
   const selectedProducts = useMemo(() => products.filter((product) => selectedProductIds.has(product.id)), [products, selectedProductIds]);
@@ -609,10 +695,8 @@ export function ProductsPage() {
   const selectedVisibleCount = visibleProductIds.filter((id) => selectedProductIds.has(id)).length;
   const allVisibleSelected = visibleProductIds.length > 0 && selectedVisibleCount === visibleProductIds.length;
   const someVisibleSelected = selectedVisibleCount > 0 && selectedVisibleCount < visibleProductIds.length;
-  const visibleProductsLabel =
-    filteredProducts.length === 1 ? "1 produto visivel" : `${filteredProducts.length} produtos visiveis`;
-  const pageStart = filteredProducts.length ? (currentPage - 1) * pageSize + 1 : 0;
-  const pageEnd = Math.min(currentPage * pageSize, filteredProducts.length);
+  const pageStart = pagination.total ? (currentPage - 1) * pageSize + 1 : 0;
+  const pageEnd = Math.min(currentPage * pageSize, pagination.total);
   const blingUpdateSelectionMessage = !selectedBlingConnectionId
     ? "Selecione uma conta Bling no topo para atualizar produtos vinculados."
     : selectedProducts.length > 1
@@ -620,6 +704,40 @@ export function ProductsPage() {
       : selectedLinkedBlingProducts.length === 0
         ? "Este produto ainda nao esta vinculado a esta conta Bling."
         : "Este produto pode ser revisado antes da atualizacao no Bling.";
+
+  function updatePendingFilter<Key extends keyof ProductListFilters>(key: Key, value: ProductListFilters[Key]) {
+    setPendingFilters((current) => ({ ...current, [key]: value }));
+  }
+
+  function applyFilters() {
+    appliedFiltersRef.current = pendingFilters;
+    setAppliedFilters({ ...pendingFilters });
+    setCurrentPage(1);
+    writeUrlState(pendingFilters, 1, pageSize, searchQuery);
+    if (window.innerWidth < 1024) setIsFilterPanelOpen(false);
+  }
+
+  function clearFilters() {
+    const emptyFilters: ProductListFilters = { ...EMPTY_PRODUCT_LIST_FILTERS };
+    appliedFiltersRef.current = emptyFilters;
+    setPendingFilters(emptyFilters);
+    setAppliedFilters(emptyFilters);
+    setCurrentPage(1);
+    writeUrlState(emptyFilters, 1, pageSize, searchQuery);
+  }
+
+  function changePage(nextPage: number) {
+    const safePage = Math.min(Math.max(nextPage, 1), totalPages);
+    setCurrentPage(safePage);
+    writeUrlState(appliedFilters, safePage, pageSize, searchQuery);
+  }
+
+  function changePageSize(nextPageSize: number) {
+    pageSizeRef.current = nextPageSize;
+    setPageSize(nextPageSize);
+    setCurrentPage(1);
+    writeUrlState(appliedFilters, 1, nextPageSize, searchQuery);
+  }
 
   function toggleProductSelection(productId: string, checked: boolean) {
     setSelectedProductIds((current) => {
@@ -1009,175 +1127,67 @@ export function ProductsPage() {
   }
 
   return (
-    <AppShell>
-      <PageHeader
-        title="Produtos"
-        description="Catalogo central com SKU, EAN, fiscal, imagens, vinculos Bling e status de publicacao."
-        actions={
-          <>
+    <AppShell denseDesktopShell hideCollapsedSidebarRail>
+      <div className="flex min-w-0 items-stretch lg:gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="[&>div]:!mb-3 [&>div]:!py-2 [&_h2]:!text-2xl">
+          <PageHeader
+            title="Produtos"
+            description="Catalogo central com SKU, EAN, fiscal, imagens, vinculos Bling e status de publicacao."
+            actions={
+              <div className="flex flex-wrap justify-end gap-1.5 lg:translate-x-1 lg:flex-nowrap lg:gap-[5px]">
             <Link
-              className="inline-flex min-h-9 items-center justify-center gap-2 rounded-md bg-matrix-gold px-3 py-2 text-sm font-semibold text-black shadow-gold transition hover:bg-matrix-goldDark hover:text-white"
+              className="inline-flex min-h-8 items-center justify-center gap-1 whitespace-nowrap rounded-md bg-matrix-gold px-1.5 py-1 text-[11px] font-semibold text-black shadow-gold transition hover:bg-matrix-goldDark hover:text-white lg:w-[139px]"
               href="/products/cadastro-inteligente"
             >
-              <Sparkles className="h-4 w-4" /> Cadastro Inteligente
+              <Sparkles className="h-3 w-3" /> Cadastro Inteligente
             </Link>
-            <Button onClick={() => setOpen(true)}><Plus className="h-4 w-4" /> Novo produto</Button>
-            <Button onClick={() => void openBlingImportPreview()} variant="secondary"><FileUp className="h-4 w-4" /> Importar do Bling</Button>
-            <Button variant="secondary"><Download className="h-4 w-4" /> Exportar</Button>
-            <Button onClick={() => void openBlingImportPreview()} variant="secondary"><RefreshCw className="h-4 w-4" /> Sincronizar</Button>
-          </>
-        }
-      />
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-6">
-        <KpiCard label="Produtos cadastrados" value={String(products.length)} hint={products.length ? "Catalogo local carregado" : "Catalogo vazio"} />
-        <KpiCard label="Em revisao" value="0" hint="Nenhuma pendencia" tone="warning" />
-        <KpiCard label="Prontos para enviar" value={String(products.filter((product) => product.status === "READY_FOR_TEST").length)} hint="Produtos prontos para teste" tone="success" />
-        <KpiCard
-          label="Importados do Bling"
-          value={String(importedFromBlingCount)}
-          hint={importedFromBlingCount ? "Produtos vinculados a conta Bling" : "Nenhum vinculo Bling"}
-          tone="purple"
-        />
-      </div>
-      <Card className="mt-4">
-        <div ref={filterBarRef} className="mb-3 flex flex-col gap-2 xl:flex-row xl:items-center">
-          <div className="relative min-w-0 flex-1">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-matrix-muted" />
-            <input
-              aria-label="Buscar por titulo, SKU ou GTIN"
-              className="h-10 w-full rounded-md border border-matrix-border bg-white/[0.03] py-2 pl-9 pr-3 text-sm outline-none placeholder:text-slate-600 focus:border-matrix-gold/55"
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Buscar por titulo, SKU ou GTIN"
-              value={searchQuery}
+            <Button className="!min-h-8 gap-1 whitespace-nowrap !px-1.5 !py-1 text-[11px] lg:w-[106px]" onClick={() => setOpen(true)}><Plus className="h-3 w-3" /> Novo produto</Button>
+            <Button className="!min-h-8 gap-1 whitespace-nowrap !px-1.5 !py-1 text-[11px] lg:w-[116px]" onClick={() => void openBlingImportPreview()} variant="secondary"><FileUp className="h-3 w-3" /> Importar do Bling</Button>
+            <Button className="!min-h-8 gap-1 whitespace-nowrap !px-1.5 !py-1 text-[11px] lg:w-[68px]" variant="secondary"><Download className="h-3 w-3" /> Exportar</Button>
+            <Button className="!min-h-8 gap-1 whitespace-nowrap !px-1.5 !py-1 text-[11px] lg:w-[70px]" onClick={() => void openBlingImportPreview()} variant="secondary"><RefreshCw className="h-3 w-3" /> Sincronizar</Button>
+              </div>
+            }
+          />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:max-w-none lg:grid-cols-[231px_214px_221px_219px] lg:gap-2 [&_section]:!min-h-[5.75rem] [&_section]:!p-2.5 [&_section_p:nth-child(2)]:!text-xl [&_section_p:nth-child(2)]:!leading-6">
+            <KpiCard label="Produtos cadastrados" value={String(summary.totalProducts)} hint={summary.totalProducts ? "Catalogo local carregado" : "Catalogo vazio"} />
+            <KpiCard label="Em revisao" value="0" hint="Nenhuma pendencia" tone="warning" />
+            <KpiCard label="Prontos para enviar" value={String(summary.readyForTestCount)} hint="Produtos prontos para teste" tone="success" />
+            <KpiCard
+              label="Importados do Bling"
+              value={String(importedFromBlingCount)}
+              hint={importedFromBlingCount ? "Produtos vinculados a conta Bling" : "Nenhum vinculo Bling"}
+              tone="purple"
             />
           </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative">
-              <Button
-                aria-expanded={openFilterMenu === "images"}
-                className="min-w-28 justify-between"
-                onClick={() => setOpenFilterMenu((current) => (current === "images" ? null : "images"))}
-                type="button"
-                variant="secondary"
-              >
-                Imagens{imageFilter !== "all" ? `: ${imageFilterLabels[imageFilter]}` : ""}
-                <ChevronDown className="h-4 w-4" />
-              </Button>
-              {openFilterMenu === "images" ? (
-                <div className="absolute right-0 top-[calc(100%+0.35rem)] z-30 w-44 rounded-md border border-matrix-border bg-matrix-panel p-1 shadow-glow">
-                  {(["all", "yes", "no"] as ImageFilter[]).map((option) => (
-                    <button
-                      key={option}
-                      className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition hover:bg-matrix-goldSoft/30 ${
-                        imageFilter === option ? "text-matrix-goldDark" : "text-matrix-fg"
-                      }`}
-                      onClick={() => {
-                        setImageFilter(option);
-                        setOpenFilterMenu(null);
-                      }}
-                      type="button"
-                    >
-                      {imageFilterLabels[option]}
-                      {imageFilter === option ? <span className="text-xs">Ativo</span> : null}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
+          <Card className="mt-3 min-w-0 !px-2.5 !pb-4 !pt-3">
+          <div className="relative mb-2 min-w-0 pr-11">
+            <div className="relative min-w-0">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-matrix-muted" />
+              <input
+                aria-label="Buscar por titulo, SKU ou GTIN"
+                className="h-9 w-full rounded-md border border-matrix-border bg-white/[0.03] py-2 pl-9 pr-3 text-sm outline-none placeholder:text-slate-600 focus:border-matrix-gold/55"
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Buscar por titulo, SKU ou GTIN"
+                value={searchQuery}
+              />
             </div>
-
-            <div className="relative">
-              <Button
-                aria-expanded={openFilterMenu === "stock"}
-                className="min-w-36 justify-between"
-                onClick={() => setOpenFilterMenu((current) => (current === "stock" ? null : "stock"))}
-                type="button"
-                variant="secondary"
-              >
-                Estoque{stockFilter !== "all" ? `: ${stockFilterLabels[stockFilter]}` : ""}
-                <ChevronDown className="h-4 w-4" />
-              </Button>
-              {openFilterMenu === "stock" ? (
-                <div className="absolute right-0 top-[calc(100%+0.35rem)] z-30 w-56 rounded-md border border-matrix-border bg-matrix-panel p-1 shadow-glow">
-                  {(["all", "positive", "negative", "zero"] as StockFilter[]).map((option) => (
-                    <button
-                      key={option}
-                      className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition hover:bg-matrix-goldSoft/30 ${
-                        stockFilter === option ? "text-matrix-goldDark" : "text-matrix-fg"
-                      }`}
-                      onClick={() => {
-                        setStockFilter(option);
-                        setOpenFilterMenu(null);
-                      }}
-                      type="button"
-                    >
-                      {stockFilterLabels[option]}
-                      {stockFilter === option ? <span className="text-xs">Ativo</span> : null}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-
-            <div className="relative">
-              <Button
-                aria-expanded={openFilterMenu === "blingStatus"}
-                className="min-w-44 justify-between"
-                onClick={() => setOpenFilterMenu((current) => (current === "blingStatus" ? null : "blingStatus"))}
-                type="button"
-                variant="secondary"
-              >
-                {blingStatusFilterLabels[blingStatusFilter]}
-                <ChevronDown className="h-4 w-4" />
-              </Button>
-              {openFilterMenu === "blingStatus" ? (
-                <div className="absolute right-0 top-[calc(100%+0.35rem)] z-30 w-56 rounded-md border border-matrix-border bg-matrix-panel p-1 shadow-glow">
-                  {(["all", "active", "inactive", "excluded"] as BlingStatusFilter[]).map((option) => (
-                    <button
-                      key={option}
-                      className={`flex w-full items-center justify-between rounded-md px-3 py-2 text-left text-sm transition hover:bg-matrix-goldSoft/30 ${
-                        blingStatusFilter === option ? "text-matrix-goldDark" : "text-matrix-fg"
-                      }`}
-                      onClick={() => {
-                        setBlingStatusFilter(option);
-                        setOpenFilterMenu(null);
-                      }}
-                      type="button"
-                    >
-                      {blingStatusFilterLabels[option]}
-                      {blingStatusFilter === option ? <span className="text-xs">Ativo</span> : null}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-
-            <span className="inline-flex h-10 items-center rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 text-sm font-semibold text-matrix-fg">
-              Pagina {currentPage} de {totalPages}
-            </span>
-            <select
-              aria-label="Produtos por pagina"
-              className="h-10 rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 text-sm font-semibold text-matrix-fg outline-none"
-              onChange={(event) => setPageSize(Number(event.target.value))}
-              value={pageSize}
+            <button
+              aria-controls="product-filter-panel"
+              aria-expanded={isFilterPanelOpen}
+              aria-label={isFilterPanelOpen ? "Recolher filtros" : "Mostrar filtros"}
+              className="absolute -right-1.5 -top-1 grid h-11 w-11 shrink-0 place-items-center rounded-md border border-matrix-border bg-matrix-panel2/80 text-matrix-muted transition hover:border-matrix-gold/50 hover:text-matrix-goldDark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold/70"
+              onClick={() => setIsFilterPanelOpen((current) => !current)}
+              title={isFilterPanelOpen ? "Recolher filtros" : "Mostrar filtros"}
+              type="button"
             >
-              {pageSizeOptions.map((option) => (
-                <option key={option} value={option}>
-                  {option} produtos por pagina
-                </option>
-              ))}
-            </select>
-            <Button disabled={currentPage <= 1} onClick={() => setCurrentPage((page) => Math.max(1, page - 1))} type="button" variant="secondary">
-              Anterior
-            </Button>
-            <Button disabled={currentPage >= totalPages} onClick={() => setCurrentPage((page) => Math.min(totalPages, page + 1))} type="button" variant="secondary">
-              Proxima
-            </Button>
-            <span className="text-xs text-matrix-muted">{visibleProductsLabel}</span>
+              {isFilterPanelOpen ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+            </button>
           </div>
-        </div>
+
         {unknownBlingStatusCount > 0 ? (
-          <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+          <div className="mb-2 flex min-h-[30px] items-center gap-2 rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-1 text-xs text-amber-200">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>
               O status de {unknownBlingStatusCount} {unknownBlingStatusCount === 1 ? "produto ainda nao foi atualizado" : "produtos ainda nao foi atualizado"}.
@@ -1216,7 +1226,10 @@ export function ProductsPage() {
             </div>
           </div>
         ) : null}
-        <DataTable
+        <div className="overflow-hidden rounded-md border border-matrix-border bg-matrix-panel [&_table]:w-full [&_table]:table-fixed [&_table]:min-w-[1030px] [&_th]:overflow-hidden [&_th]:px-2 [&_th]:py-1 [&_td]:overflow-hidden [&_td]:px-2 [&_td]:py-[5.5px] [&_thead]:text-[11px] [&_tbody]:text-[11px]">
+          <div className="matrix-scroll h-[clamp(20rem,calc(100vh-29.3125rem),32.5rem)] overflow-auto [&>div]:rounded-none [&>div]:border-0 [&_thead]:sticky [&_thead]:top-0 [&_thead]:z-[1]">
+            <DataTable
+          columnWidths={[42, 370, 94, 110, 93, 100, 99, 111, 60, 86, 62]}
           columns={[
             <ProductCheckbox
               key="select-all"
@@ -1243,16 +1256,16 @@ export function ProductsPage() {
               label={`Selecionar ${product.name}`}
               onChange={(checked) => toggleProductSelection(product.id, checked)}
             />,
-            <div key={`${product.id}-name`} className="flex min-w-[280px] items-center gap-2">
-              <div className="grid h-11 w-11 shrink-0 place-items-center overflow-hidden rounded-md border border-matrix-border bg-matrix-panel2/80">
+              <div key={`${product.id}-name`} className="flex min-w-0 items-center gap-2">
+              <div className="grid h-[34px] w-[34px] shrink-0 place-items-center overflow-hidden rounded-md border border-matrix-border bg-matrix-panel2/80">
                 {product.imageUrl ? (
                   <Image
                     alt={product.name}
                     className="h-full w-full object-cover"
-                    height={44}
+                    height={34}
                     src={product.imageUrl}
                     unoptimized
-                    width={44}
+                    width={34}
                   />
                 ) : (
                   <ImageIcon className="h-4 w-4 text-matrix-muted" />
@@ -1261,10 +1274,10 @@ export function ProductsPage() {
               <div className="min-w-0">
                 <div className="flex min-w-0 items-center gap-1">
                   <span className="min-w-0 truncate">{product.name}</span>
-                  <ProductCopyButton label="Copiar titulo" text={product.name} />
+                  <ProductCopyButton className="!h-4 !w-4 [&_svg]:!h-2.5 [&_svg]:!w-2.5" label="Copiar titulo" text={product.name} />
                 </div>
                 {getBlingCatalogStatusMessage(product.blingStatus) ? (
-                  <p className="mt-1 max-w-[360px] truncate text-xs text-amber-500">
+                  <p className="sr-only">
                     {getBlingCatalogStatusMessage(product.blingStatus)}
                   </p>
                 ) : null}
@@ -1272,11 +1285,11 @@ export function ProductsPage() {
             </div>,
             <div key={`${product.id}-sku`} className="flex min-w-0 items-center gap-1">
               <span className="min-w-0 truncate">{product.sku || "-"}</span>
-              <ProductCopyButton label="Copiar SKU" text={product.sku} />
+              <ProductCopyButton className="!h-4 !w-4 [&_svg]:!h-2.5 [&_svg]:!w-2.5" label="Copiar SKU" text={product.sku} />
             </div>,
             <div key={`${product.id}-ean`} className="flex min-w-0 items-center gap-1">
               <span className="min-w-0 truncate">{product.ean ?? "-"}</span>
-              <ProductCopyButton label="Copiar EAN" text={product.ean} />
+              <ProductCopyButton className="!h-4 !w-4 [&_svg]:!h-2.5 [&_svg]:!w-2.5" label="Copiar EAN" text={product.ean} />
             </div>,
             product.unit ?? "-",
             product.category ?? "-",
@@ -1284,27 +1297,187 @@ export function ProductsPage() {
             formatCurrencyDisplay(product.salePriceDisplay) ?? "0,00",
             <ProductStoresCell key={`${product.id}-stores`} product={product} />,
             product.stock,
-            <Button key={`${product.id}-actions`} variant="ghost" onClick={() => setViewingProduct(product)}>Ver</Button>
+            <Button
+              key={`${product.id}-actions`}
+              aria-label={`Ver ${product.name}`}
+              className="h-8 min-h-8 w-8 px-0 py-0"
+              variant="secondary"
+              onClick={() => setViewingProduct(product)}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
           ])}
           emptyMessage={
             loadingProducts
               ? "Carregando produtos..."
-              : products.length
+              : summary.totalProducts
                 ? "Nenhum produto corresponde aos filtros atuais."
                 : "Nenhum produto cadastrado ainda."
           }
-          footer={
-            <div className="flex flex-col gap-1 border-t border-matrix-border px-3 py-2 text-xs text-matrix-muted sm:flex-row sm:items-center sm:justify-between">
-              <span>
-                Pagina {currentPage} de {totalPages}
-              </span>
-              <span>
-                {pageStart}-{pageEnd} de {filteredProducts.length} produtos filtrados
-              </span>
+          footer={<></>}
+          />
+          </div>
+          <div className="grid gap-3 border-t border-matrix-border px-3 pb-7 pt-4 text-xs text-matrix-muted lg:grid-cols-[1fr_auto_1fr] lg:items-center">
+            <span>Mostrando {pageStart} a {pageEnd} de {pagination.total} produtos</span>
+            <div className="flex items-center justify-center gap-1.5">
+              <Button className="h-9 min-h-9 px-3" disabled={currentPage <= 1} onClick={() => changePage(currentPage - 1)} type="button" variant="secondary">
+                Anterior
+              </Button>
+              {getPaginationItems(currentPage, totalPages).map((item, index) =>
+                item === "ellipsis" ? (
+                  <span key={`ellipsis-${index}`} className="grid h-9 w-9 place-items-center">...</span>
+                ) : (
+                  <Button
+                    key={item}
+                    aria-current={item === currentPage ? "page" : undefined}
+                    className="h-9 min-h-9 w-9 px-0"
+                    onClick={() => changePage(item)}
+                    type="button"
+                    variant={item === currentPage ? "primary" : "secondary"}
+                  >
+                    {item}
+                  </Button>
+                )
+              )}
+              <Button className="h-9 min-h-9 px-3" disabled={currentPage >= totalPages} onClick={() => changePage(currentPage + 1)} type="button" variant="secondary">
+                Proxima
+              </Button>
             </div>
-          }
-        />
-      </Card>
+            <label className="flex items-center gap-2 lg:justify-end">
+              <select
+                aria-label="Produtos por pagina"
+                className="h-9 rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 text-xs font-semibold text-matrix-fg outline-none"
+                onChange={(event) => changePageSize(Number(event.target.value))}
+                value={pageSize}
+              >
+                {pageSizeOptions.map((option) => (
+                  <option key={option} value={option}>{option} produtos por pagina</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+          </Card>
+        </div>
+
+        <div
+          aria-hidden={!isFilterPanelOpen}
+          className={`fixed inset-0 z-[70] min-w-0 transition-[visibility,opacity] duration-200 lg:sticky lg:top-[3.75rem] lg:z-auto lg:-mt-4 lg:h-[calc(100vh-6.4375rem)] lg:self-start lg:transition-[width,opacity] ${
+            isFilterPanelOpen
+              ? "visible opacity-100 lg:w-[17.25rem]"
+              : "pointer-events-none invisible overflow-hidden opacity-0 lg:hidden lg:w-0"
+          }`}
+        >
+          <button
+            aria-label="Fechar filtros"
+            className="absolute inset-0 bg-black/65 backdrop-blur-sm lg:hidden"
+            onClick={() => setIsFilterPanelOpen(false)}
+            tabIndex={-1}
+            type="button"
+          />
+          <aside
+            id="product-filter-panel"
+            className={`absolute inset-y-0 right-0 flex w-[min(20rem,calc(100vw-1rem))] flex-col overflow-hidden border-l border-matrix-border bg-matrix-panel shadow-glow transition-transform duration-200 lg:relative lg:inset-auto lg:h-full lg:w-[17.25rem] lg:translate-x-0 lg:rounded-r-md lg:border-y lg:border-r ${
+              isFilterPanelOpen ? "translate-x-0" : "translate-x-full"
+            }`}
+          >
+            <div className="border-b border-matrix-border px-4 pb-0 pt-4">
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  aria-expanded={isFilterPanelOpen}
+                  aria-label="Recolher filtros"
+                  className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-matrix-border bg-matrix-panel2 text-matrix-muted transition hover:border-matrix-gold/50 hover:text-matrix-goldDark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold/70 lg:h-9 lg:w-9"
+                  onClick={() => setIsFilterPanelOpen(false)}
+                  title="Recolher filtros"
+                  type="button"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+                <button
+                  className="ml-auto inline-flex min-h-9 items-center gap-2 rounded-md px-2 text-sm font-semibold text-red-400 transition hover:bg-red-500/10 hover:text-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/60 disabled:cursor-not-allowed disabled:opacity-40"
+                  onClick={clearFilters}
+                  title="Limpar filtros"
+                  type="button"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Limpar filtros
+                </button>
+              </div>
+              <h2 className="mt-3 text-base font-semibold text-matrix-fg lg:mt-2">Filtros</h2>
+            </div>
+            <div className="matrix-scroll flex-1 overflow-y-auto pb-3 pl-[17px] pr-[22px] pt-1">
+              <div className="grid gap-4">
+                <ProductFilterSelect
+                  hint="Marketplace"
+                  label="Origem"
+                  onChange={(value) => updatePendingFilter("origin", value as ProductListFilters["origin"])}
+                  value={pendingFilters.origin}
+                >
+                  <option value="all">Todos</option>
+                  {filterOptions.origins.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </ProductFilterSelect>
+
+                <ProductFilterSelect label="GTIN" onChange={(value) => updatePendingFilter("gtin", value as ProductListFilters["gtin"])} value={pendingFilters.gtin}>
+                  <option value="all">Todos</option>
+                  <option value="with">Com GTIN</option>
+                  <option value="without">Sem GTIN</option>
+                </ProductFilterSelect>
+
+                <ProductFilterSelect label="Imagens" onChange={(value) => updatePendingFilter("images", value as ProductListFilters["images"])} value={pendingFilters.images}>
+                  <option value="all">Todos</option>
+                  <option value="with">Com imagens</option>
+                  <option value="without">Sem imagens</option>
+                </ProductFilterSelect>
+
+                <ProductFilterSelect label="Estoque" onChange={(value) => updatePendingFilter("stock", value as ProductListFilters["stock"])} value={pendingFilters.stock}>
+                  <option value="all">Todos</option>
+                  <option value="with">Com estoque</option>
+                  <option value="without">Sem estoque</option>
+                  <option value="negative">Estoque negativo</option>
+                </ProductFilterSelect>
+
+                <ProductFilterSelect label="Status no Bling" onChange={(value) => updatePendingFilter("blingStatus", value as ProductListFilters["blingStatus"])} value={pendingFilters.blingStatus}>
+                  <option value="all">Todos</option>
+                  <option value="active">Ativos</option>
+                  <option value="inactive">Inativos</option>
+                  <option value="deleted">Excluidos</option>
+                  <option value="unknown">Pendentes</option>
+                </ProductFilterSelect>
+
+                <ProductFilterSelect label="Vinculo Bling" onChange={(value) => updatePendingFilter("blingLink", value as ProductListFilters["blingLink"])} value={pendingFilters.blingLink}>
+                  <option value="all">Todos</option>
+                  <option value="with">Vinculados</option>
+                  <option value="without">Sem vinculo</option>
+                </ProductFilterSelect>
+
+                <ProductFilterSelect label="Categoria" onChange={(value) => updatePendingFilter("category", value)} value={pendingFilters.category}>
+                  <option value="all">Todas</option>
+                  {filterOptions.categories.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </ProductFilterSelect>
+                {filterOptions.categoriesTruncated ? <p className="-mt-3 text-xs text-amber-300">Lista limitada às primeiras 500 categorias.</p> : null}
+
+                <ProductFilterSelect label="Marca" onChange={(value) => updatePendingFilter("brand", value)} value={pendingFilters.brand}>
+                  <option value="all">Todas</option>
+                  {filterOptions.brands.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </ProductFilterSelect>
+                {filterOptions.brandsTruncated ? <p className="-mt-3 text-xs text-amber-300">Lista limitada às primeiras 500 marcas.</p> : null}
+              </div>
+            </div>
+            <div className="border-t border-matrix-border bg-matrix-panel pb-[18px] pl-[17px] pr-[22px] pt-[7px]">
+              <Button className="w-full" onClick={applyFilters} type="button">
+                <SlidersHorizontal className="h-4 w-4" />
+                Aplicar filtros
+              </Button>
+            </div>
+          </aside>
+        </div>
+      </div>
       {viewingProduct ? (
         <ProductDetailsModal
           product={viewingProduct}
