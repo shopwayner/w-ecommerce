@@ -1211,7 +1211,7 @@ export function ProductsPage() {
           </div>
         ) : null}
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-matrix-border bg-matrix-panel [&_table]:w-full [&_table]:table-fixed [&_table]:min-w-[1030px] [&_th]:overflow-hidden [&_th]:px-2 [&_th]:py-1 [&_td]:overflow-hidden [&_td]:px-2 [&_td]:py-[5.5px] [&_thead]:text-[11px] [&_tbody]:text-[11px]" data-testid="products-table-shell">
-          <div className="matrix-scroll min-h-0 flex-1 overflow-auto [&>div]:rounded-none [&>div]:border-0 [&_thead]:sticky [&_thead]:top-0 [&_thead]:z-[1]">
+          <div className="matrix-scroll h-0 min-h-0 flex-1 overflow-auto overscroll-contain [&>div]:rounded-none [&>div]:border-0 [&_thead]:sticky [&_thead]:top-0 [&_thead]:z-[1]">
             <DataTable
           columnWidths={[42, 370, 94, 110, 93, 100, 99, 111, 60, 86, 62]}
           columns={[
