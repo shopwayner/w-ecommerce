@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { requireApiAuth } from "@/lib/auth/api";
+import { normalizeProductBrand } from "@/lib/product-brand";
 import { prisma } from "@/lib/prisma";
 import { getUserAccountContext } from "@/lib/services/account-context-service";
 import { readCanonicalBlingStatusFromAttributes } from "@/lib/services/bling-product-import-service";
@@ -277,6 +278,7 @@ function serializeProduct(product: ProductListRecord) {
   const attributes = getProductAttributes(product.attributes);
   const currentPrice = product.prices[0];
   const blingMapping = product.mappings[0];
+  const brand = normalizeProductBrand(product.brand);
   const blingAccountName =
     blingMapping?.connection.name ||
     blingMapping?.connection.externalCompanyName ||
@@ -291,7 +293,7 @@ function serializeProduct(product: ProductListRecord) {
     ean: product.ean,
     description: product.description,
     category: product.category,
-    brand: product.brand,
+    brand,
     ncm: product.ncm,
     origin: product.source ?? metadata.origin ?? product.brand,
     unit: metadata.unit ?? (typeof attributes.unit === "string" ? attributes.unit : null),

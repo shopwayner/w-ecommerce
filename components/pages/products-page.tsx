@@ -17,6 +17,7 @@ import {
   Edit3,
   FileText,
   FileUp,
+  Factory,
   Folder,
   Globe2,
   ImageIcon,
@@ -1717,6 +1718,7 @@ function ProductDetailsModal({
     "mt-3 min-h-40 w-full resize-y rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm leading-6 text-matrix-fg outline-none transition placeholder:text-matrix-muted focus:border-matrix-gold/70 focus:ring-2 focus:ring-matrix-gold/20";
   const readOnlyDetails = [
     { label: "Nome do produto", value: product.name, Icon: Package, className: "sm:col-span-2 xl:col-span-1" },
+    { label: "Marca", value: product.brand ?? "Sem marca", Icon: Factory },
     { label: "SKU", value: product.sku, Icon: Tag },
     { label: "EAN", value: product.ean, Icon: Barcode },
     { label: "Unidade", value: product.unit, Icon: ClipboardList },

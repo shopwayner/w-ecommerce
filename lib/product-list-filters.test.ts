@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  EMPTY_PRODUCT_LIST_FILTERS,
   buildProductListFilterOptions,
   getProductPaginationItems,
   getProductOrigin,
   matchesProductListFilters,
   parseProductListFilters,
+  PRODUCT_LIST_NONE_VALUE,
   type ProductListFilterable
 } from "./product-list-filters";
 
@@ -102,6 +104,25 @@ test("deduplicates category and brand options without changing stored labels", (
   assert.deepEqual(options.origins.map((option) => [option.value, option.count]), [["marketplace", 2], ["local", 1]]);
   assert.deepEqual(options.categories.map((option) => [option.label, option.count]), [["Sem categoria", 1], ["Sensores", 2]]);
   assert.deepEqual(options.brands.map((option) => [option.label, option.count]), [["Sem marca", 1], ["T-Mac", 2]]);
+});
+
+test("treats generic brand values as genuinely missing", () => {
+  const products = [
+    product({ name: "Sem marca declarada", brand: "Sem marca" }),
+    product({ name: "Marca vazia", brand: "  " }),
+    product({ name: "Marca valida", brand: "T-Mac" })
+  ];
+  const options = buildProductListFilterOptions(products);
+  const withoutBrand = {
+    ...EMPTY_PRODUCT_LIST_FILTERS,
+    brand: PRODUCT_LIST_NONE_VALUE
+  };
+
+  assert.deepEqual(options.brands.map((option) => [option.label, option.count]), [["Sem marca", 2], ["T-Mac", 1]]);
+  assert.deepEqual(
+    products.filter((item) => matchesProductListFilters(item, withoutBrand)).map((item) => item.name),
+    ["Sem marca declarada", "Marca vazia"]
+  );
 });
 
 test("slides the three-page window while keeping the last page available", () => {

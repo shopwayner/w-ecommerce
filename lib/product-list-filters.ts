@@ -1,3 +1,5 @@
+import { normalizeProductBrand } from "@/lib/product-brand";
+
 export const EMPTY_PRODUCT_LIST_FILTERS = {
   origin: "all",
   gtin: "all",
@@ -106,6 +108,13 @@ function matchesNamedValue(filter: string, value: string | null | undefined) {
   return normalized(filter) === normalized(value);
 }
 
+function matchesBrandValue(filter: string, value: string | null | undefined) {
+  const brand = normalizeProductBrand(value);
+  if (filter === "all") return true;
+  if (filter === NONE_VALUE) return brand === null;
+  return normalized(filter) === normalized(brand);
+}
+
 export function matchesProductListFilters(
   product: ProductListFilterable,
   filters: ProductListFilters,
@@ -129,7 +138,7 @@ export function matchesProductListFilters(
     (filters.blingStatus === "all" || normalizedBlingStatus === filters.blingStatus) &&
     matchesPresence(filters.blingLink, Boolean(product.blingAccount)) &&
     matchesNamedValue(filters.category, product.category) &&
-    matchesNamedValue(filters.brand, product.brand)
+    matchesBrandValue(filters.brand, product.brand)
   );
 }
 
@@ -155,7 +164,7 @@ export function buildProductListFilterOptions(products: ProductListFilterable[])
   for (const product of products) originCounts[getProductOrigin(product)] += 1;
 
   const allCategories = textOptions(products.map((product) => product.category), "Sem categoria");
-  const allBrands = textOptions(products.map((product) => product.brand), "Sem marca");
+  const allBrands = textOptions(products.map((product) => normalizeProductBrand(product.brand)), "Sem marca");
 
   return {
     origins: [

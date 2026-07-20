@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { requireApiAuth } from "@/lib/auth/api";
 import { parseDecimalPrice } from "@/lib/decimal-price";
+import { normalizeProductBrand } from "@/lib/product-brand";
 import { prisma } from "@/lib/prisma";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { productUpdateSchema } from "@/lib/validation";
@@ -51,6 +52,7 @@ function formatProductResponse(product: Awaited<ReturnType<typeof loadProductFor
   const stockOverride = typeof metadata.stockOverride === "number" ? metadata.stockOverride : null;
   const currentPrice = product.prices[0];
   const blingMapping = product.mappings[0];
+  const brand = normalizeProductBrand(product.brand);
   const blingAccountName =
     blingMapping?.connection.name ||
     blingMapping?.connection.externalCompanyName ||
@@ -64,7 +66,7 @@ function formatProductResponse(product: Awaited<ReturnType<typeof loadProductFor
     sku: product.sku,
     ean: product.ean,
     category: product.category,
-    brand: product.brand,
+    brand,
     ncm: product.ncm,
     origin: typeof metadata.origin === "string" ? metadata.origin : product.brand,
     unit: typeof metadata.unit === "string" ? metadata.unit : typeof attributes.unit === "string" ? attributes.unit : null,

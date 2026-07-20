@@ -12,6 +12,7 @@ type BlingRequestOptions = {
   path: string;
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
+  timeoutMs?: number;
 };
 
 export type BlingApiErrorCode =
@@ -269,7 +270,8 @@ export class BlingApiClient {
           "Content-Type": "application/json",
           "enable-jwt": process.env.BLING_ENABLE_JWT ?? "1"
         },
-        body: options.body === undefined ? undefined : JSON.stringify(options.body)
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+        signal: options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined
       });
     } catch {
       throw new BlingApiError("Falha temporaria ao consultar o Bling.", 503, "TEMPORARY_FAILURE", undefined, {

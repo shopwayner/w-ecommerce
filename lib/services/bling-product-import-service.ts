@@ -1,5 +1,10 @@
 import { ERPProvider, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import {
+  extractBlingProductBrand,
+  normalizeProductBrand,
+  resolveProductBrandFromBling
+} from "@/lib/product-brand";
 import { BlingApiError, blingApiClient } from "@/lib/services/bling-api-client";
 
 const pageSize = 100;
@@ -206,7 +211,7 @@ function normalizeOne(rawValue: unknown, parent?: NormalizedBlingProduct): Norma
     stock: integer(stock.saldoVirtualTotal ?? stock.saldoFisicoTotal ?? stock.saldo ?? raw.estoqueAtual),
     unit: firstText(raw.unidade, parent?.unit),
     imageUrl: firstText(media.imagemURL, media.imagemUrl, raw.imagemURL, raw.imagemUrl, parent?.imageUrl),
-    brand: firstText(raw.marca, parent?.brand),
+    brand: extractBlingProductBrand(raw) ?? parent?.brand ?? null,
     category: firstText(category.descricao, category.nome, raw.categoriaNome, parent?.category),
     ncm: firstText(record(raw.tributacao).ncm, raw.ncm, parent?.ncm),
     weight: firstNumber(raw.pesoLiquido, raw.pesoBruto, dimensions.peso, parent?.weight),
@@ -606,7 +611,7 @@ function draftData(product: NormalizedBlingProduct, organizationId: string, erpC
     stock: product.stock,
     unit: product.unit,
     imageUrl: product.imageUrl,
-    brand: product.brand,
+    brand: normalizeProductBrand(product.brand),
     category: product.category,
     ncm: product.ncm,
     weight: product.weight,
@@ -686,7 +691,7 @@ async function applyPage(input: {
               externalProductId: product.externalProductId
             }
           },
-          include: { product: { select: { id: true, sku: true, attributes: true } } }
+          include: { product: { select: { id: true, sku: true, brand: true, attributes: true } } }
       });
 
       if (mapping) {
@@ -706,7 +711,7 @@ async function applyPage(input: {
               name: product.name,
               description: product.description,
               category: product.category,
-              brand: product.brand,
+              brand: resolveProductBrandFromBling(mapping.product.brand, product.brand),
               ncm: product.ncm,
               weight: product.weight,
               height: product.height,
@@ -744,7 +749,7 @@ async function applyPage(input: {
             name: product.name,
             description: product.description,
             category: product.category,
-            brand: product.brand,
+            brand: normalizeProductBrand(product.brand),
             ncm: product.ncm,
             status: "DRAFT",
             enrichmentStatus: "IMPORTED",
