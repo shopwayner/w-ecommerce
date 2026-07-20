@@ -1128,9 +1128,9 @@ export function ProductsPage() {
 
   return (
     <AppShell denseDesktopShell hideCollapsedSidebarRail>
-      <div className="flex min-w-0 items-stretch lg:gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="[&>div]:!mb-3 [&>div]:!py-2 [&_h2]:!text-2xl">
+      <div className="relative flex min-w-0 items-stretch lg:h-[calc(100dvh-5.375rem)] lg:min-h-0 lg:gap-3" data-testid="products-layout">
+        <div className="min-w-0 flex-1 lg:flex lg:min-h-0 lg:flex-col" data-testid="products-list-area">
+          <div className="shrink-0 [&>div]:!mb-3 [&>div]:!py-2 [&_h2]:!text-2xl">
           <PageHeader
             title="Produtos"
             description="Catalogo central com SKU, EAN, fiscal, imagens, vinculos Bling e status de publicacao."
@@ -1150,7 +1150,7 @@ export function ProductsPage() {
             }
           />
           </div>
-          <div className="grid gap-3 sm:grid-cols-2 lg:max-w-none lg:grid-cols-[231px_214px_221px_219px] lg:gap-2 [&_section]:!min-h-[5.75rem] [&_section]:!p-2.5 [&_section_p:nth-child(2)]:!text-xl [&_section_p:nth-child(2)]:!leading-6">
+          <div className="grid shrink-0 gap-3 sm:grid-cols-2 lg:max-w-none lg:grid-cols-[231px_214px_221px_219px] lg:gap-2 [&_section]:!min-h-[5.75rem] [&_section]:!p-2.5 [&_section_p:nth-child(2)]:!text-xl [&_section_p:nth-child(2)]:!leading-6">
             <KpiCard label="Produtos cadastrados" value={String(summary.totalProducts)} hint={summary.totalProducts ? "Catalogo local carregado" : "Catalogo vazio"} />
             <KpiCard label="Em revisao" value="0" hint="Nenhuma pendencia" tone="warning" />
             <KpiCard label="Prontos para enviar" value={String(summary.readyForTestCount)} hint="Produtos prontos para teste" tone="success" />
@@ -1161,8 +1161,8 @@ export function ProductsPage() {
               tone="purple"
             />
           </div>
-          <Card className="mt-3 min-w-0 !px-2.5 !pb-4 !pt-3">
-          <div className="relative mb-2 min-w-0 pr-11">
+          <Card className="mt-3 flex min-h-0 min-w-0 flex-1 flex-col !px-2.5 !pb-4 !pt-3">
+          <div className="relative mb-2 min-w-0">
             <div className="relative min-w-0">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-matrix-muted" />
               <input
@@ -1173,17 +1173,6 @@ export function ProductsPage() {
                 value={searchQuery}
               />
             </div>
-            <button
-              aria-controls="product-filter-panel"
-              aria-expanded={isFilterPanelOpen}
-              aria-label={isFilterPanelOpen ? "Recolher filtros" : "Mostrar filtros"}
-              className="absolute -right-1.5 -top-1 grid h-11 w-11 shrink-0 place-items-center rounded-md border border-matrix-border bg-matrix-panel2/80 text-matrix-muted transition hover:border-matrix-gold/50 hover:text-matrix-goldDark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold/70"
-              onClick={() => setIsFilterPanelOpen((current) => !current)}
-              title={isFilterPanelOpen ? "Recolher filtros" : "Mostrar filtros"}
-              type="button"
-            >
-              {isFilterPanelOpen ? <ChevronLeft className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-            </button>
           </div>
 
         {unknownBlingStatusCount > 0 ? (
@@ -1226,8 +1215,8 @@ export function ProductsPage() {
             </div>
           </div>
         ) : null}
-        <div className="overflow-hidden rounded-md border border-matrix-border bg-matrix-panel [&_table]:w-full [&_table]:table-fixed [&_table]:min-w-[1030px] [&_th]:overflow-hidden [&_th]:px-2 [&_th]:py-1 [&_td]:overflow-hidden [&_td]:px-2 [&_td]:py-[5.5px] [&_thead]:text-[11px] [&_tbody]:text-[11px]">
-          <div className="matrix-scroll h-[clamp(20rem,calc(100vh-29.3125rem),32.5rem)] overflow-auto [&>div]:rounded-none [&>div]:border-0 [&_thead]:sticky [&_thead]:top-0 [&_thead]:z-[1]">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-matrix-border bg-matrix-panel [&_table]:w-full [&_table]:table-fixed [&_table]:min-w-[1030px] [&_th]:overflow-hidden [&_th]:px-2 [&_th]:py-1 [&_td]:overflow-hidden [&_td]:px-2 [&_td]:py-[5.5px] [&_thead]:text-[11px] [&_tbody]:text-[11px]" data-testid="products-table-shell">
+          <div className="matrix-scroll min-h-0 flex-1 overflow-auto [&>div]:rounded-none [&>div]:border-0 [&_thead]:sticky [&_thead]:top-0 [&_thead]:z-[1]">
             <DataTable
           columnWidths={[42, 370, 94, 110, 93, 100, 99, 111, 60, 86, 62]}
           columns={[
@@ -1317,7 +1306,7 @@ export function ProductsPage() {
           footer={<></>}
           />
           </div>
-          <div className="grid gap-3 border-t border-matrix-border px-3 pb-7 pt-4 text-xs text-matrix-muted lg:grid-cols-[1fr_auto_1fr] lg:items-center">
+          <div className="grid shrink-0 gap-3 border-t border-matrix-border px-3 pb-7 pt-4 text-xs text-matrix-muted lg:grid-cols-[1fr_auto_1fr] lg:items-center">
             <span>Mostrando {pageStart} a {pageEnd} de {pagination.total} produtos</span>
             <div className="flex items-center justify-center gap-1.5">
               <Button className="h-9 min-h-9 px-3" disabled={currentPage <= 1} onClick={() => changePage(currentPage - 1)} type="button" variant="secondary">
@@ -1360,13 +1349,31 @@ export function ProductsPage() {
           </Card>
         </div>
 
+        <button
+          aria-controls="product-filter-panel"
+          aria-expanded={isFilterPanelOpen}
+          aria-label={isFilterPanelOpen ? "Recolher filtros" : "Mostrar filtros"}
+          className={`z-[80] grid h-11 w-11 place-items-center rounded-md border border-matrix-border bg-matrix-panel2 text-matrix-muted shadow-glow transition-[right,border-color,color] hover:border-matrix-gold/50 hover:text-matrix-goldDark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold/70 lg:absolute lg:top-1/2 lg:z-20 lg:-translate-y-1/2 lg:translate-x-1/2 ${
+            isFilterPanelOpen
+              ? "fixed right-4 top-4 lg:right-[18rem]"
+              : "fixed bottom-4 right-4 lg:bottom-auto lg:right-[1.375rem]"
+          }`}
+          onClick={() => setIsFilterPanelOpen((current) => !current)}
+          data-testid="product-filter-toggle"
+          title={isFilterPanelOpen ? "Recolher filtros" : "Mostrar filtros"}
+          type="button"
+        >
+          {isFilterPanelOpen ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+        </button>
+
         <div
           aria-hidden={!isFilterPanelOpen}
-          className={`fixed inset-0 z-[70] min-w-0 transition-[visibility,opacity] duration-200 lg:sticky lg:top-[3.75rem] lg:z-auto lg:-mt-4 lg:h-[calc(100vh-6.4375rem)] lg:self-start lg:transition-[width,opacity] ${
+          className={`fixed inset-0 z-[70] min-w-0 transition-[visibility,opacity] duration-200 lg:relative lg:inset-auto lg:z-auto lg:h-full lg:self-stretch lg:transition-[width,opacity] ${
             isFilterPanelOpen
               ? "visible opacity-100 lg:w-[17.25rem]"
               : "pointer-events-none invisible overflow-hidden opacity-0 lg:hidden lg:w-0"
           }`}
+          data-testid="product-filter-panel-wrap"
         >
           <button
             aria-label="Fechar filtros"
@@ -1382,17 +1389,7 @@ export function ProductsPage() {
             }`}
           >
             <div className="border-b border-matrix-border px-4 pb-0 pt-4">
-              <div className="flex items-center justify-between gap-3">
-                <button
-                  aria-expanded={isFilterPanelOpen}
-                  aria-label="Recolher filtros"
-                  className="grid h-10 w-10 shrink-0 place-items-center rounded-md border border-matrix-border bg-matrix-panel2 text-matrix-muted transition hover:border-matrix-gold/50 hover:text-matrix-goldDark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold/70 lg:h-9 lg:w-9"
-                  onClick={() => setIsFilterPanelOpen(false)}
-                  title="Recolher filtros"
-                  type="button"
-                >
-                  <ChevronRight className="h-4 w-4" />
-                </button>
+              <div className="flex items-center justify-between gap-3 pr-12 lg:pr-0">
                 <button
                   className="ml-auto inline-flex min-h-9 items-center gap-2 rounded-md px-2 text-sm font-semibold text-red-400 transition hover:bg-red-500/10 hover:text-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400/60 disabled:cursor-not-allowed disabled:opacity-40"
                   onClick={clearFilters}
