@@ -10,11 +10,10 @@ const sidebarStorageKey = "matrix-sidebar-collapsed";
 
 type AppShellProps = {
   children: ReactNode;
-  hideCollapsedSidebarRail?: boolean;
   denseDesktopShell?: boolean;
 };
 
-export function AppShell({ children, hideCollapsedSidebarRail = false, denseDesktopShell = false }: AppShellProps) {
+export function AppShell({ children, denseDesktopShell = false }: AppShellProps) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [hydrated, setHydrated] = useState(false);
@@ -43,27 +42,22 @@ export function AppShell({ children, hideCollapsedSidebarRail = false, denseDesk
     });
   }, []);
 
-  const collapsedRailHidden = hydrated && sidebarCollapsed && hideCollapsedSidebarRail;
-
   return (
     <div className="min-h-screen bg-matrix-bg text-matrix-fg">
-      <div className={cn(collapsedRailHidden && "lg:hidden")}>
-        <Sidebar
-          collapsed={sidebarCollapsed}
-          mobileOpen={mobileSidebarOpen}
-          onCloseMobile={closeMobileSidebar}
-          onToggleCollapsed={toggleSidebarCollapsed}
-        />
-      </div>
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        mobileOpen={mobileSidebarOpen}
+        onCloseMobile={closeMobileSidebar}
+        onToggleCollapsed={toggleSidebarCollapsed}
+      />
       <div
         className={cn(
           "min-h-screen w-full transition-[padding] duration-150",
-          collapsedRailHidden ? "lg:pl-0" : hydrated && sidebarCollapsed ? "lg:pl-20" : "lg:pl-72"
+          hydrated && sidebarCollapsed ? "lg:pl-20" : "lg:pl-72"
         )}
       >
         <Topbar
           denseDesktopShell={denseDesktopShell}
-          hideCollapsedSidebarRail={collapsedRailHidden}
           onMenuClick={openMobileSidebar}
           sidebarCollapsed={hydrated && sidebarCollapsed}
         />

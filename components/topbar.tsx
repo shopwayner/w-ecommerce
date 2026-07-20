@@ -57,11 +57,10 @@ function contextKey(option: Pick<AccountContextOption, "mode" | "provider" | "co
 type TopbarProps = {
   onMenuClick: () => void;
   sidebarCollapsed: boolean;
-  hideCollapsedSidebarRail?: boolean;
   denseDesktopShell?: boolean;
 };
 
-function TopbarComponent({ onMenuClick, sidebarCollapsed, hideCollapsedSidebarRail = false, denseDesktopShell = false }: TopbarProps) {
+function TopbarComponent({ onMenuClick, sidebarCollapsed, denseDesktopShell = false }: TopbarProps) {
   const [session, setSession] = useState<SessionView | null>(cachedSession);
   const [accountContext, setAccountContext] = useState<AccountContextView | null>(null);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
@@ -232,7 +231,7 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed, hideCollapsedSidebarRa
     <header
       className={cn(
         "fixed left-0 right-0 top-0 z-30 border-b border-matrix-border bg-matrix-panel/88 shadow-glow backdrop-blur transition-[left] duration-200",
-        hideCollapsedSidebarRail ? "lg:left-0" : sidebarCollapsed ? "lg:left-20" : "lg:left-72"
+        sidebarCollapsed ? "lg:left-20" : "lg:left-72"
       )}
     >
       <div className={cn("flex h-16 items-center gap-2 px-3 py-2 sm:px-4 lg:px-5", denseDesktopShell && "lg:!h-[3.75rem] lg:!gap-[7px] lg:!px-1")}>
