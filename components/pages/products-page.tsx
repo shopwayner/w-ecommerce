@@ -49,6 +49,7 @@ import { ProductCopyButton } from "@/components/product-copy-button";
 import { Badge, Button, Card, DataTable, KpiCard, PageHeader } from "@/components/ui";
 import {
   EMPTY_PRODUCT_LIST_FILTERS,
+  getProductPaginationItems,
   parseProductListFilters,
   type ProductListFilterOptions,
   type ProductListFilters
@@ -182,13 +183,6 @@ const statusLabel: Record<string, string> = {
 };
 
 const pageSizeOptions = [20, 50, 100];
-
-function getPaginationItems(currentPage: number, totalPages: number): Array<number | "ellipsis"> {
-  if (totalPages <= 5) return Array.from({ length: totalPages }, (_, index) => index + 1);
-  if (currentPage <= 3) return [1, 2, 3, "ellipsis", totalPages];
-  if (currentPage >= totalPages - 2) return [1, "ellipsis", totalPages - 2, totalPages - 1, totalPages];
-  return [1, "ellipsis", currentPage, "ellipsis", totalPages];
-}
 
 const emptyFilterOptions: ProductListFilterOptions = {
   origins: [],
@@ -1130,22 +1124,22 @@ export function ProductsPage() {
     <AppShell denseDesktopShell>
       <div className="relative flex min-w-0 items-stretch lg:h-[calc(100dvh-5.375rem)] lg:min-h-0 lg:gap-3" data-testid="products-layout">
         <div className="min-w-0 flex-1 lg:flex lg:min-h-0 lg:flex-col" data-testid="products-list-area">
-          <div className="shrink-0 [&>div]:!mb-3 [&>div]:!py-2 [&_h2]:!text-2xl">
+          <div className="shrink-0 [&>div]:!mb-3 [&>div]:!flex-wrap [&>div]:!py-2 [&_h2]:!text-2xl">
           <PageHeader
             title="Produtos"
             description="Catalogo central com SKU, EAN, fiscal, imagens, vinculos Bling e status de publicacao."
             actions={
-              <div className="flex flex-wrap justify-end gap-1.5 lg:translate-x-1 lg:flex-nowrap lg:gap-[5px]">
+              <div className="flex w-full flex-wrap items-center justify-end gap-1.5 sm:w-auto lg:gap-[5px]">
             <Link
-              className="inline-flex min-h-8 items-center justify-center gap-1 whitespace-nowrap rounded-md bg-matrix-gold px-1.5 py-1 text-[11px] font-semibold text-black shadow-gold transition hover:bg-matrix-goldDark hover:text-white lg:w-[139px]"
+              className="inline-flex min-h-8 w-auto min-w-max shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-md bg-matrix-gold px-2.5 py-1 text-[11px] font-semibold text-black shadow-gold transition hover:bg-matrix-goldDark hover:text-white"
               href="/products/cadastro-inteligente"
             >
-              <Sparkles className="h-3 w-3" /> Cadastro Inteligente
+              <Sparkles className="h-3 w-3 shrink-0" /> Cadastro Inteligente
             </Link>
-            <Button className="!min-h-8 gap-1 whitespace-nowrap !px-1.5 !py-1 text-[11px] lg:w-[106px]" onClick={() => setOpen(true)}><Plus className="h-3 w-3" /> Novo produto</Button>
-            <Button className="!min-h-8 gap-1 whitespace-nowrap !px-1.5 !py-1 text-[11px] lg:w-[116px]" onClick={() => void openBlingImportPreview()} variant="secondary"><FileUp className="h-3 w-3" /> Importar do Bling</Button>
-            <Button className="!min-h-8 gap-1 whitespace-nowrap !px-1.5 !py-1 text-[11px] lg:w-[68px]" variant="secondary"><Download className="h-3 w-3" /> Exportar</Button>
-            <Button className="!min-h-8 gap-1 whitespace-nowrap !px-1.5 !py-1 text-[11px] lg:w-[70px]" onClick={() => void openBlingImportPreview()} variant="secondary"><RefreshCw className="h-3 w-3" /> Sincronizar</Button>
+            <Button className="!min-h-8 w-auto min-w-max shrink-0 gap-1 whitespace-nowrap !px-2.5 !py-1 text-[11px]" onClick={() => setOpen(true)}><Plus className="h-3 w-3 shrink-0" /> Novo produto</Button>
+            <Button className="!min-h-8 w-auto min-w-max shrink-0 gap-1 whitespace-nowrap !px-2.5 !py-1 text-[11px]" onClick={() => void openBlingImportPreview()} variant="secondary"><FileUp className="h-3 w-3 shrink-0" /> Importar do Bling</Button>
+            <Button className="!min-h-8 w-auto min-w-max shrink-0 gap-1 whitespace-nowrap !px-2.5 !py-1 text-[11px]" variant="secondary"><Download className="h-3 w-3 shrink-0" /> Exportar</Button>
+            <Button className="!min-h-8 w-auto min-w-max shrink-0 gap-1 whitespace-nowrap !px-2.5 !py-1 text-[11px]" onClick={() => void openBlingImportPreview()} variant="secondary"><RefreshCw className="h-3 w-3 shrink-0" /> Sincronizar</Button>
               </div>
             }
           />
@@ -1312,7 +1306,7 @@ export function ProductsPage() {
               <Button className="h-9 min-h-9 px-3" disabled={currentPage <= 1} onClick={() => changePage(currentPage - 1)} type="button" variant="secondary">
                 Anterior
               </Button>
-              {getPaginationItems(currentPage, totalPages).map((item, index) =>
+              {getProductPaginationItems(currentPage, totalPages).map((item, index) =>
                 item === "ellipsis" ? (
                   <span key={`ellipsis-${index}`} className="grid h-9 w-9 place-items-center">...</span>
                 ) : (

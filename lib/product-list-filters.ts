@@ -52,6 +52,8 @@ export type ProductListFilterable = {
   blingAccount: unknown | null;
 };
 
+export type ProductPaginationItem = number | "ellipsis";
+
 const CATEGORY_OR_BRAND_LIMIT = 500;
 const NONE_VALUE = "__none__";
 
@@ -171,6 +173,27 @@ export function buildProductListFilterOptions(products: ProductListFilterable[])
 
 export function areProductListFiltersEmpty(filters: ProductListFilters) {
   return Object.entries(filters).every(([key, value]) => value === EMPTY_PRODUCT_LIST_FILTERS[key as keyof ProductListFilters]);
+}
+
+export function getProductPaginationItems(currentPage: number, totalPages: number): ProductPaginationItem[] {
+  const safeTotalPages = Math.max(1, Math.floor(totalPages));
+  const safeCurrentPage = Math.min(Math.max(Math.floor(currentPage), 1), safeTotalPages);
+  const visibleCount = Math.min(3, safeTotalPages);
+  const start = Math.min(
+    Math.max(safeCurrentPage - 1, 1),
+    safeTotalPages - visibleCount + 1
+  );
+  const end = start + visibleCount - 1;
+  const items: ProductPaginationItem[] = Array.from(
+    { length: visibleCount },
+    (_, index) => start + index
+  );
+
+  if (end < safeTotalPages) {
+    items.push("ellipsis", safeTotalPages);
+  }
+
+  return items;
 }
 
 export const PRODUCT_LIST_NONE_VALUE = NONE_VALUE;

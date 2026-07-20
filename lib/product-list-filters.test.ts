@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildProductListFilterOptions,
+  getProductPaginationItems,
   getProductOrigin,
   matchesProductListFilters,
   parseProductListFilters,
@@ -101,4 +102,23 @@ test("deduplicates category and brand options without changing stored labels", (
   assert.deepEqual(options.origins.map((option) => [option.value, option.count]), [["marketplace", 2], ["local", 1]]);
   assert.deepEqual(options.categories.map((option) => [option.label, option.count]), [["Sem categoria", 1], ["Sensores", 2]]);
   assert.deepEqual(options.brands.map((option) => [option.label, option.count]), [["Sem marca", 1], ["T-Mac", 2]]);
+});
+
+test("slides the three-page window while keeping the last page available", () => {
+  const ellipsis = "ellipsis";
+
+  assert.deepEqual(getProductPaginationItems(1, 136), [1, 2, 3, ellipsis, 136]);
+  assert.deepEqual(getProductPaginationItems(2, 136), [1, 2, 3, ellipsis, 136]);
+  assert.deepEqual(getProductPaginationItems(3, 136), [2, 3, 4, ellipsis, 136]);
+  assert.deepEqual(getProductPaginationItems(4, 136), [3, 4, 5, ellipsis, 136]);
+  assert.deepEqual(getProductPaginationItems(50, 136), [49, 50, 51, ellipsis, 136]);
+  assert.deepEqual(getProductPaginationItems(134, 136), [133, 134, 135, ellipsis, 136]);
+  assert.deepEqual(getProductPaginationItems(135, 136), [134, 135, 136]);
+  assert.deepEqual(getProductPaginationItems(136, 136), [134, 135, 136]);
+});
+
+test("does not repeat pages when the result has three pages or fewer", () => {
+  assert.deepEqual(getProductPaginationItems(1, 1), [1]);
+  assert.deepEqual(getProductPaginationItems(2, 2), [1, 2]);
+  assert.deepEqual(getProductPaginationItems(3, 3), [1, 2, 3]);
 });
