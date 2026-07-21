@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
 import { planLimitService } from "@/lib/services/plan-limit-service";
+import { getCanonicalOrganizationDocument, normalizeBrazilianDocument } from "@/lib/settings-admin";
 import { settingsSchema } from "@/lib/validation";
 
 export async function GET() {
@@ -31,21 +32,49 @@ export async function GET() {
         id: organization.id,
         name: organization.name,
         slug: organization.slug,
-        document: organization.document,
-        status: organization.status
+        document: getCanonicalOrganizationDocument(organization),
+        documentField: "document",
+        status: organization.status,
+        updatedAt: organization.updatedAt
       },
-      subscription: organization.subscription,
+      currentUser: {
+        id: auth.context.user.id,
+        role: auth.context.role,
+        name: auth.context.user.name,
+        email: auth.context.user.email
+      },
+      subscription: organization.subscription
+        ? {
+            status: organization.subscription.status,
+            enterpriseLimit: organization.subscription.enterpriseLimit,
+            currentPeriodStart: organization.subscription.currentPeriodStart,
+            currentPeriodEnd: organization.subscription.currentPeriodEnd,
+            plan: {
+              code: organization.subscription.plan.code,
+              name: organization.subscription.plan.name,
+              maxBlingConnections: organization.subscription.plan.maxBlingConnections,
+              maxMonthlyOperations: organization.subscription.plan.maxMonthlyOperations,
+              maxUsers: organization.subscription.plan.maxUsers,
+              features: organization.subscription.plan.features
+            }
+          }
+        : null,
       usage: {
         blingConnections: usage.blingConnections,
         blingConnectionLimit: usage.blingConnectionLimit,
-        operations: usage.operations
+        operations: usage.operations,
+        periodStart: usage.periodStart,
+        periodEnd: usage.periodEnd,
+        users: users.length
       },
       users: users.map((membership) => ({
-        id: membership.user.id,
+        id: membership.id,
+        userId: membership.user.id,
         name: membership.user.name,
         email: membership.user.email,
         role: membership.role,
-        status: membership.user.status
+        status: membership.user.status,
+        joinedAt: membership.createdAt
       }))
     }
   });
@@ -55,20 +84,54 @@ export async function PATCH(request: Request) {
   const auth = await requireApiAuth("settings:write");
   if (!auth.ok) return auth.response;
 
-  const body = await request.json();
+  const body = await request.json().catch(() => null);
   const parsed = settingsSchema.safeParse(body);
 
   if (!parsed.success) {
-    return NextResponse.json({ error: "Dados invalidos", issues: parsed.error.flatten() }, { status: 400 });
+    return NextResponse.json(
+      { error: parsed.error.issues[0]?.message ?? "Dados inválidos.", issues: parsed.error.flatten() },
+      { status: 400 }
+    );
   }
 
-  const organization = await prisma.organization.update({
-    where: { id: auth.context.organizationId },
-    data: {
-      name: parsed.data.name,
-      document: parsed.data.document
-    }
+  const normalizedDocument = normalizeBrazilianDocument(parsed.data.document);
+  const organization = await prisma.$transaction(async (transaction) => {
+    const updated = await transaction.organization.update({
+      where: { id: auth.context.organizationId },
+      data: {
+        name: parsed.data.name,
+        document: normalizedDocument
+      }
+    });
+
+    await transaction.auditLog.create({
+      data: {
+        organizationId: auth.context.organizationId,
+        userId: auth.context.user.id,
+        action: "SETTINGS_ORGANIZATION_UPDATED",
+        entity: "Organization",
+        entityType: "Organization",
+        entityId: updated.id,
+        route: "/api/settings",
+        method: "PATCH",
+        status: "SUCCESS",
+        riskLevel: "MEDIUM",
+        summary: "Dados básicos da empresa atualizados.",
+        metadata: {
+          organizationId: auth.context.organizationId,
+          actorUserId: auth.context.user.id,
+          targetResource: "Organization",
+          result: "updated",
+          changedFields: ["name", "document"]
+        }
+      }
+    });
+
+    return updated;
   });
 
-  return NextResponse.json({ data: { id: organization.id, name: organization.name, document: organization.document }, status: "updated" });
+  return NextResponse.json({
+    data: { id: organization.id, name: organization.name, document: organization.document, status: organization.status },
+    status: "updated"
+  });
 }

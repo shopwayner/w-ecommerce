@@ -92,11 +92,12 @@ export class PlanLimitService {
   }
 
   async getUsageSummary(organizationId: string) {
+    const { periodStart, periodEnd } = currentMonthPeriod();
     const [subscription, blingConnections, blingConnectionLimit, usage] = await Promise.all([
       this.getCurrentPlan(organizationId),
-      prisma.blingConnection.count({ where: { organizationId } }),
+      prisma.blingConnection.count({ where: { organizationId, status: { not: "DISCONNECTED" } } }),
       this.checkBlingConnectionLimit(organizationId),
-      prisma.usageCounter.findMany({ where: { organizationId } })
+      prisma.usageCounter.findMany({ where: { organizationId, periodStart, periodEnd } })
     ]);
     const operations = usage.reduce((total, item) => total + item.value, 0);
 
@@ -104,7 +105,9 @@ export class PlanLimitService {
       subscription,
       blingConnections,
       blingConnectionLimit,
-      operations
+      operations,
+      periodStart,
+      periodEnd
     };
   }
 }

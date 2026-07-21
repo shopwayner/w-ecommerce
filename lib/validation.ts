@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isValidBrazilianDocument } from "@/lib/settings-admin";
 
 export const productCreateSchema = z.object({
   name: z.string().min(2),
@@ -62,9 +63,43 @@ export const orderCreateSchema = z.object({
 });
 
 export const settingsSchema = z.object({
-  name: z.string().min(2).optional(),
-  document: z.string().min(8).optional(),
-  plan: z.enum(["START", "MATRIX", "ENTERPRISE"]).optional()
+  name: z.string().trim().min(2).max(120),
+  document: z.string().trim().max(18).nullable()
+}).strict().superRefine((value, context) => {
+  if (!isValidBrazilianDocument(value.document)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["document"],
+      message: "Informe um CPF ou CNPJ válido."
+    });
+  }
+});
+
+export const settingsMembershipRoleSchema = z.object({
+  role: z.enum(["OWNER", "ADMIN", "OPERATOR", "VIEWER"])
+}).strict();
+
+export const settingsMembershipRemovalSchema = z.object({
+  confirmed: z.literal(true)
+}).strict();
+
+export const settingsPasswordSchema = z.object({
+  currentPassword: z.string().min(1).max(128),
+  newPassword: z.string()
+    .min(12, "A nova senha deve ter pelo menos 12 caracteres.")
+    .max(128)
+    .regex(/[a-z]/, "A nova senha deve conter uma letra minúscula.")
+    .regex(/[A-Z]/, "A nova senha deve conter uma letra maiúscula.")
+    .regex(/\d/, "A nova senha deve conter um número."),
+  confirmPassword: z.string().min(1).max(128)
+}).strict().superRefine((value, context) => {
+  if (value.newPassword !== value.confirmPassword) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["confirmPassword"],
+      message: "A confirmação da nova senha não confere."
+    });
+  }
 });
 
 export const loginSchema = z.object({

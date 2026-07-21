@@ -403,6 +403,7 @@ export function ERPsPage() {
 
   async function reconnectSelectedBlingConnection() {
     if (!canStartBlingReconnect(selectedConnectionId, blingAction)) return;
+    if (!window.confirm("Deseja iniciar a reconexão manual desta conta Bling?")) return;
     setBlingAction("reconnect");
     setMessage("Preparando a conexão com o Bling...");
 
@@ -410,7 +411,8 @@ export function ERPsPage() {
       const response = await fetch(`/api/integrations/${selectedConnectionId}/reconnect`, {
         method: "POST",
         credentials: "same-origin",
-        headers: { Accept: "application/json" }
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmed: true })
       });
       const payload = await response.json().catch(() => ({}));
 

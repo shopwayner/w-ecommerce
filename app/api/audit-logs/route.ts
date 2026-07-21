@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
+import { sanitizeAuditMetadata } from "@/lib/services/audit-log-service";
 
 export async function GET() {
   const auth = await requireApiAuth("reports:read");
@@ -17,10 +18,18 @@ export async function GET() {
     data: auditLogs.map((log) => ({
       id: log.id,
       action: log.action,
-      entity: log.entity,
+      entity: log.entityType ?? log.entity,
       entityId: log.entityId,
-      metadata: log.metadata,
+      status: log.status,
+      riskLevel: log.riskLevel,
+      summary: log.summary,
+      metadata: sanitizeAuditMetadata(
+        log.metadata && typeof log.metadata === "object" && !Array.isArray(log.metadata)
+          ? (log.metadata as Record<string, unknown>)
+          : null
+      ) ?? null,
       actor: log.user?.email ?? "system",
+      actorName: log.user?.name ?? null,
       createdAt: log.createdAt
     }))
   });

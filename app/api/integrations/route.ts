@@ -25,6 +25,9 @@ export async function GET() {
         role: true,
         status: true,
         environment: true,
+        externalCompanyName: true,
+        externalCompanyDocument: true,
+        externalCompanyId: true,
         externalAccountEmail: true,
         clientIdEncrypted: true,
         clientSecretEncrypted: true,
@@ -32,6 +35,7 @@ export async function GET() {
         lastSyncAt: true,
         lastTestAt: true,
         lastError: true,
+        isDefault: true,
         createdAt: true,
         updatedAt: true,
         tokens: {
@@ -48,12 +52,17 @@ export async function GET() {
     limit,
     data: blingConnections.map((connection) => {
       const credentialSummary = getBlingConnectionCredentialSummary(connection);
+      const tokenExpiresAt = connection.tokens[0]?.expiresAt ?? null;
+      const tokenValidInFuture = Boolean(tokenExpiresAt && tokenExpiresAt.getTime() > Date.now());
       return {
         id: connection.id,
         name: connection.name,
         role: connection.role,
         status: connection.status,
         environment: connection.environment,
+        externalCompany: connection.externalCompanyName ?? connection.externalCompanyDocument ?? null,
+        externalCompanyPresent: Boolean(connection.externalCompanyId),
+        isDefault: connection.isDefault,
         externalAccountEmail: connection.externalAccountEmail,
         clientIdMasked: credentialSummary.clientIdMasked,
         internalNotes: connection.internalNotes ?? "",
@@ -63,9 +72,15 @@ export async function GET() {
         createdAt: connection.createdAt,
         updatedAt: connection.updatedAt,
         connectedAt: connection.tokens[0]?.createdAt ?? null,
-        tokenExpiresAt: connection.tokens[0]?.expiresAt ?? null,
+        tokenExpiresAt,
+        tokenValidInFuture,
         hasToken: connection.tokens.length > 0,
-        credentialsConfigured: credentialSummary.credentialsConfigured
+        credentialsConfigured: credentialSummary.credentialsConfigured,
+        ready:
+          connection.status === "ACTIVE"
+          && credentialSummary.credentialsConfigured
+          && tokenValidInFuture
+          && Boolean(connection.externalCompanyId)
       };
     })
   });

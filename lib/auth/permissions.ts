@@ -59,7 +59,8 @@ const permissions: Record<Role, PermissionAction[]> = {
     "integrations:write",
     "reports:read",
     "settings:read",
-    "settings:write"
+    "settings:write",
+    "users:manage"
   ],
   OPERATOR: [
     "dashboard:read",
@@ -72,6 +73,7 @@ const permissions: Record<Role, PermissionAction[]> = {
     "pricing:read",
     "publications:read",
     "publications:write",
+    "integrations:read",
     "reports:read",
     "settings:read"
   ],
