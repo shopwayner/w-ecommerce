@@ -1123,8 +1123,8 @@ export function ProductsPage() {
 
   return (
     <AppShell denseDesktopShell>
-      <div className="relative flex min-w-0 items-stretch lg:h-[calc(100dvh-5.375rem)] lg:min-h-0 lg:gap-3" data-testid="products-layout">
-        <div className="min-w-0 flex-1 lg:flex lg:min-h-0 lg:flex-col" data-testid="products-list-area">
+      <div className="relative flex min-w-0 items-stretch lg:h-[calc(100dvh-5.375rem)] lg:min-h-0 lg:gap-3 lg:overflow-hidden" data-testid="products-layout">
+        <div className="min-w-0 flex-1 lg:flex lg:min-h-0 lg:flex-col lg:overflow-hidden" data-testid="products-list-area">
           <div className="shrink-0 [&>div]:!mb-3 [&>div]:!flex-wrap [&>div]:!py-2 [&_h2]:!text-2xl">
           <PageHeader
             title="Produtos"
@@ -1156,7 +1156,7 @@ export function ProductsPage() {
               tone="purple"
             />
           </div>
-          <Card className="mt-3 flex min-h-0 min-w-0 flex-1 flex-col !px-2.5 !pb-4 !pt-3">
+          <Card className="mt-3 flex min-h-0 min-w-0 flex-1 flex-col !px-2.5 !pb-4 !pt-3 lg:overflow-hidden">
           <div className="relative mb-2 min-w-0">
             <div className="relative min-w-0">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-matrix-muted" />
@@ -1210,9 +1210,9 @@ export function ProductsPage() {
             </div>
           </div>
         ) : null}
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-matrix-border bg-matrix-panel [&_table]:w-full [&_table]:table-fixed [&_table]:min-w-[1030px] [&_th]:overflow-hidden [&_th]:px-2 [&_th]:py-1 [&_td]:overflow-hidden [&_td]:px-2 [&_td]:py-[5.5px] [&_thead]:text-[11px] [&_tbody]:text-[11px]" data-testid="products-table-shell">
-          <div className="matrix-scroll h-0 min-h-0 flex-1 overflow-auto overscroll-contain [&>div]:rounded-none [&>div]:border-0 [&_thead]:sticky [&_thead]:top-0 [&_thead]:z-[1]">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-matrix-border bg-matrix-panel [&>div]:rounded-none [&>div]:border-0 [&_table]:w-full [&_table]:table-fixed [&_table]:min-w-[1030px] [&_th]:overflow-hidden [&_th]:px-2 [&_th]:py-1 [&_td]:overflow-hidden [&_td]:px-2 [&_td]:py-[5.5px] [&_thead]:text-[11px] [&_tbody]:text-[11px]" data-testid="products-table-shell">
             <DataTable
+          constrainedHeight
           columnWidths={[42, 370, 94, 110, 93, 100, 99, 111, 60, 86, 62]}
           columns={[
             <ProductCheckbox
@@ -1300,7 +1300,6 @@ export function ProductsPage() {
           }
           footer={<></>}
           />
-          </div>
           <div className="grid shrink-0 gap-3 border-t border-matrix-border px-3 pb-7 pt-4 text-xs text-matrix-muted lg:grid-cols-[1fr_auto_1fr] lg:items-center">
             <span>Mostrando {pageStart} a {pageEnd} de {pagination.total} produtos</span>
             <div className="flex items-center justify-center gap-1.5">

@@ -96,17 +96,18 @@ export function DataTable({
   rows,
   emptyMessage = "Nenhum registro encontrado.",
   footer,
-  columnWidths
+  columnWidths,
+  constrainedHeight = false
 }: {
   columns: ReactNode[];
   rows: ReactNode[][];
   emptyMessage?: string;
   footer?: ReactNode;
   columnWidths?: Array<number | string>;
+  constrainedHeight?: boolean;
 }) {
-  return (
-    <div className="matrix-scroll overflow-x-auto rounded-md border border-matrix-border bg-matrix-panel">
-      <table className="min-w-full divide-y divide-matrix-border text-left text-sm">
+  const table = (
+      <table className={cn("min-w-full divide-y divide-matrix-border text-left text-sm", constrainedHeight && "h-auto")}>
         {columnWidths ? (
           <colgroup>
             {columnWidths.map((width, columnIndex) => (
@@ -151,12 +152,29 @@ export function DataTable({
           )}
         </tbody>
       </table>
-      {footer ?? (
+  );
+  const tableFooter = footer ?? (
         <div className="flex items-center justify-between border-t border-matrix-border px-3 py-2 text-xs text-matrix-muted">
           <span>Pagina 1 de 1</span>
           <span>{rows.length} itens</span>
         </div>
-      )}
+  );
+
+  if (constrainedHeight) {
+    return (
+      <div className="rounded-md border border-matrix-border bg-matrix-panel lg:flex lg:h-full lg:min-h-0 lg:flex-1 lg:flex-col lg:overflow-hidden">
+        <div className="matrix-scroll overflow-x-auto lg:h-0 lg:min-h-0 lg:flex-1 lg:overflow-auto lg:overscroll-contain lg:[&_thead]:sticky lg:[&_thead]:top-0 lg:[&_thead]:z-[1]">
+          {table}
+        </div>
+        {tableFooter}
+      </div>
+    );
+  }
+
+  return (
+    <div className="matrix-scroll overflow-x-auto rounded-md border border-matrix-border bg-matrix-panel">
+      {table}
+      {tableFooter}
     </div>
   );
 }
