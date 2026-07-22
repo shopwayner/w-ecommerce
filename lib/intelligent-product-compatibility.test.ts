@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildProductReferenceSearchQueries,
   calculateProductSuggestionCompatibility,
   extractProductTitleSignals,
   productSuggestionBadgeLabel,
@@ -86,18 +85,12 @@ test("marks a generic title without application evidence for attention", () => {
   assert.equal(productSuggestionNeedsAttention(result), true);
 });
 
-test("builds staged title queries without falling back to the generic part name", () => {
-  const queries = buildProductReferenceSearchQueries({
-    title: localSensor.name,
-    brand: localSensor.brand
-  });
+test("extracts title signals without changing the title used by the search", () => {
   const signals = extractProductTitleSignals(localSensor.name, localSensor.brand);
 
   assert.deepEqual(signals.applicationModels, ["pcx 150", "lead 110"]);
   assert.deepEqual(signals.years, ["2013-2015", "2010-2016"]);
-  assert.ok(queries.length <= 3);
-  assert.ok(queries.some((query) => query.includes("pcx 150") && query.includes("lead 110")));
-  assert.equal(queries.some((query) => query === "sensor hibrido"), false);
+  assert.equal(localSensor.name, "Sensor Hibrido PCX 150 13-15 / Lead 110 10-16 T-Mac");
 });
 
 test("keeps SKU 8650 applications in search and blocks another motorcycle model", () => {
@@ -105,17 +98,11 @@ test("keeps SKU 8650 applications in search and blocks another motorcycle model"
     name: "Tubo Interno Bengala Twister 250 01 A 08 Cb 300 T-Mac",
     brand: "T-Mac"
   };
-  const queries = buildProductReferenceSearchQueries({
-    title: localProduct.name,
-    brand: localProduct.brand
-  });
   const result = calculateProductSuggestionCompatibility(localProduct, {
     title: "Tubo Interno Bengala Titan 160 T-Mac",
     brand: "T-Mac"
   });
 
-  assert.ok(queries.some((query) => query.toLocaleLowerCase("pt-BR").includes("twister 250") && query.toLocaleLowerCase("pt-BR").includes("cb 300")));
-  assert.equal(queries.some((query) => query.toLocaleLowerCase("pt-BR") === "tubo interno bengala"), false);
   assert.equal(result.level, "DIFFERENT");
   assert.equal(productSuggestionNeedsAttention(result), true);
 });

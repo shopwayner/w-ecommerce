@@ -316,27 +316,6 @@ export function extractProductTitleSignals(title: unknown, explicitBrand?: unkno
   };
 }
 
-export function buildProductReferenceSearchQueries(input: { title: string; brand?: string | null }) {
-  const fullTitle = input.title.trim().replace(/\s+/g, " ");
-  if (!fullTitle) return [];
-
-  const signals = extractProductTitleSignals(fullTitle, input.brand);
-  const hasSpecificAnchor = Boolean(signals.applicationModels.length || signals.measurements.length || signals.positions.length || signals.brand);
-  if (!hasSpecificAnchor) return [fullTitle];
-
-  const partTokens = signals.partTokens;
-  const applicationTokens = signals.applicationModels.flatMap((model) => model.split(" "));
-  const coreTokens = unique([...partTokens, ...applicationTokens, ...signals.measurements, ...signals.positions]);
-  const brandTokens = expandedTokens(signals.brand);
-  const preciseWithBrand = unique([...coreTokens, ...brandTokens]).join(" ");
-  const preciseWithoutBrand = coreTokens.join(" ");
-
-  return unique([fullTitle, preciseWithBrand, preciseWithoutBrand]).filter((query) => {
-    const querySignals = extractProductTitleSignals(query, input.brand);
-    return Boolean(querySignals.applicationModels.length || querySignals.measurements.length || querySignals.positions.length || querySignals.brand);
-  }).slice(0, 3);
-}
-
 export function compatibilityLabel(level: ProductSuggestionCompatibilityLevel) {
   if (level === "HIGH") return "Alta compatibilidade";
   if (level === "MEDIUM") return "Compatibilidade aceitavel";
