@@ -20,8 +20,93 @@ test("accepts a complete reordered gallery and pending removals", () => {
       existingImages,
       changes: { keptImageIds: ["image-c", "image-a"], removedImageIds: ["image-b"] }
     }),
-    { orderedImageIds: ["image-c", "image-a"], removedImageIds: ["image-b"] }
+    {
+      orderedImageIds: ["image-c", "image-a"],
+      removedImageIds: ["image-b"],
+      orderedImages: [
+        { kind: "existing", id: "image-c" },
+        { kind: "existing", id: "image-a" }
+      ],
+      newImageUrls: []
+    }
   );
+});
+
+test("accepts new HTTPS photos in the explicit final gallery order", () => {
+  const result = validateProductImageUpdate({
+    organizationId: "org-1",
+    productId: "product-1",
+    existingImages: existingImages.map((image, index) => ({ ...image, url: `https://cdn.example.com/${index}.jpg` })),
+    changes: {
+      keptImageIds: ["image-a", "image-c"],
+      removedImageIds: ["image-b"],
+      order: [
+        { kind: "existing", id: "image-a" },
+        { kind: "new", url: "https://http2.mlstatic.com/new.jpg" },
+        { kind: "existing", id: "image-c" }
+      ]
+    }
+  });
+  assert.deepEqual(result.orderedImages, [
+    { kind: "existing", id: "image-a" },
+    { kind: "new", url: "https://http2.mlstatic.com/new.jpg" },
+    { kind: "existing", id: "image-c" }
+  ]);
+  assert.deepEqual(result.newImageUrls, ["https://http2.mlstatic.com/new.jpg"]);
+});
+
+test("rejects unsafe, duplicated and over-limit new photos", () => {
+  const base = {
+    organizationId: "org-1",
+    productId: "product-1",
+    existingImages
+  };
+  assert.throws(() => validateProductImageUpdate({
+    ...base,
+    changes: {
+      keptImageIds: existingImages.map((image) => image.id),
+      removedImageIds: [],
+      order: [
+        ...existingImages.map((image) => ({ kind: "existing" as const, id: image.id })),
+        { kind: "new", url: "http://cdn.example.com/image.jpg" }
+      ]
+    }
+  }), ProductImageUpdateValidationError);
+  assert.throws(() => validateProductImageUpdate({
+    ...base,
+    changes: {
+      keptImageIds: existingImages.map((image) => image.id),
+      removedImageIds: [],
+      order: [
+        ...existingImages.map((image) => ({ kind: "existing" as const, id: image.id })),
+        { kind: "new", url: "https://http2.mlstatic.com/D_NQ_NP_123-MLB999_072026-V.webp" },
+        { kind: "new", url: "https://http2.mlstatic.com/D_NQ_NP_2X_123-MLB999_072026-F.webp" }
+      ]
+    }
+  }), ProductImageUpdateValidationError);
+  assert.throws(() => validateProductImageUpdate({
+    ...base,
+    changes: {
+      keptImageIds: existingImages.map((image) => image.id),
+      removedImageIds: [],
+      order: [
+        ...existingImages.map((image) => ({ kind: "existing" as const, id: image.id })),
+        { kind: "new", url: "https://cdn.example.com/image.jpg" },
+        { kind: "new", url: "https://cdn.example.com/image.jpg" }
+      ]
+    }
+  }), ProductImageUpdateValidationError);
+  assert.throws(() => validateProductImageUpdate({
+    ...base,
+    changes: {
+      keptImageIds: existingImages.map((image) => image.id),
+      removedImageIds: [],
+      order: [
+        ...existingImages.map((image) => ({ kind: "existing" as const, id: image.id })),
+        ...Array.from({ length: 11 }, (_, index) => ({ kind: "new" as const, url: `https://cdn.example.com/${index}.jpg` }))
+      ]
+    }
+  }), ProductImageUpdateValidationError);
 });
 
 test("rejects duplicate image positions", () => {
@@ -76,6 +161,21 @@ test("accepts a strict gallery update contract", () => {
   const result = productUpdateSchema.safeParse({
     name: "Produto com galeria",
     images: { keptImageIds: ["image-b", "image-a"], removedImageIds: ["image-c"] }
+  });
+  assert.equal(result.success, true);
+});
+
+test("accepts a strict ordered gallery with pending URLs", () => {
+  const result = productUpdateSchema.safeParse({
+    name: "Produto com novas fotos",
+    images: {
+      keptImageIds: ["image-a"],
+      removedImageIds: ["image-b", "image-c"],
+      order: [
+        { kind: "new", url: "https://http2.mlstatic.com/new.jpg" },
+        { kind: "existing", id: "image-a" }
+      ]
+    }
   });
   assert.equal(result.success, true);
 });

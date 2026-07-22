@@ -7,6 +7,10 @@ import {
   ProductImageUpdateValidationError,
   validateProductImageUpdate
 } from "@/lib/product-image-update";
+import {
+  ProductImageUrlValidationError,
+  validateProductImageUrlsForPersistence
+} from "@/lib/product-image-url-validation";
 import { prisma } from "@/lib/prisma";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { productUpdateSchema } from "@/lib/validation";
@@ -275,6 +279,17 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     }
   }
 
+  if (imageUpdatePlan?.newImageUrls.length) {
+    try {
+      await validateProductImageUrlsForPersistence(imageUpdatePlan.newImageUrls);
+    } catch (error) {
+      if (error instanceof ProductImageUrlValidationError) {
+        return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+      throw error;
+    }
+  }
+
   try {
     await prisma.$transaction(async (tx) => {
       await tx.product.update({
@@ -345,14 +360,19 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           });
         }
 
-        await Promise.all(
-          imageUpdatePlan.orderedImageIds.map((imageId, position) =>
-            tx.productImage.update({
-              where: { id: imageId },
-              data: { position }
-            })
-          )
-        );
+        await Promise.all(imageUpdatePlan.orderedImages.map((image, position) => {
+          if (image.kind === "existing") {
+            return tx.productImage.update({ where: { id: image.id }, data: { position } });
+          }
+          return tx.productImage.create({
+            data: {
+              organizationId: auth.context.organizationId,
+              productId: existing.id,
+              url: image.url,
+              position
+            }
+          });
+        }));
       } else if (imageUrl) {
         if (existing.images[0]) {
           await tx.productImage.update({ where: { id: existing.images[0].id }, data: { url: imageUrl } });

@@ -15,9 +15,15 @@ export const productCreateSchema = z.object({
   minStock: z.coerce.number().int().nonnegative().optional()
 });
 
+const productImageOrderEntrySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("existing"), id: z.string().trim().min(1).max(120) }).strict(),
+  z.object({ kind: z.literal("new"), url: z.string().trim().url().max(2048) }).strict()
+]);
+
 const productImageChangesSchema = z.object({
   keptImageIds: z.array(z.string().trim().min(1).max(120)).max(50),
-  removedImageIds: z.array(z.string().trim().min(1).max(120)).max(50)
+  removedImageIds: z.array(z.string().trim().min(1).max(120)).max(50),
+  order: z.array(productImageOrderEntrySchema).max(50).optional()
 }).strict().superRefine((value, context) => {
   if (new Set(value.keptImageIds).size !== value.keptImageIds.length) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["keptImageIds"], message: "A ordem das imagens contem itens duplicados." });

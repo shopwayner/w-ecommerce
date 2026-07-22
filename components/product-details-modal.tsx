@@ -19,6 +19,7 @@ import {
   Globe2,
   GripVertical,
   ImageIcon,
+  ImagePlus,
   Maximize2,
   Minimize2,
   Package,
@@ -30,12 +31,16 @@ import {
   Trash2,
   X
 } from "lucide-react";
+import { MercadoLivrePhotoSearchModal } from "@/components/mercado-livre-photo-search-modal";
 import { Button } from "@/components/ui";
+import { INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES } from "@/lib/intelligent-product-preview";
+import { normalizeMercadoLivreReferenceImageUrl } from "@/lib/mercado-livre-reference-images";
 
 type ProductDetailsImage = {
   id: string;
   url: string;
   position: number;
+  pending?: boolean;
 };
 
 export type ProductDetailsProduct = {
@@ -221,9 +226,15 @@ function parseOptionalDecimal(value: string, field: string) {
 
 function orderedImages(product: ProductDetailsProduct) {
   if (product.images?.length) {
-    return [...product.images].sort((left, right) => left.position - right.position || left.id.localeCompare(right.id));
+    return [...product.images]
+      .sort((left, right) => left.position - right.position || left.id.localeCompare(right.id))
+      .map((image) => ({ ...image, pending: false }));
   }
-  return product.imageUrl ? [{ id: "preview-image", url: product.imageUrl, position: 0 }] : [];
+  return product.imageUrl ? [{ id: "preview-image", url: product.imageUrl, position: 0, pending: true }] : [];
+}
+
+function imageStateKey(image: ProductDetailsImage) {
+  return image.pending ? `new:${image.url}` : `existing:${image.id}`;
 }
 
 function arraysEqual(left: readonly string[], right: readonly string[]) {
@@ -265,6 +276,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   const [form, setForm] = useState<ProductEditForm>(() => formFromProduct(product));
   const [images, setImages] = useState<ProductDetailsImage[]>(() => orderedImages(product));
   const [baselineImageIds, setBaselineImageIds] = useState<string[]>(() => (product.images ?? []).map((image) => image.id));
+  const [baselineImageKeys, setBaselineImageKeys] = useState<string[]>(() => orderedImages(product).map(imageStateKey));
   const [selectedImageId, setSelectedImageId] = useState<string | null>(() => orderedImages(product)[0]?.id ?? null);
   const [draggedImageId, setDraggedImageId] = useState<string | null>(null);
   const [dragOverImageId, setDragOverImageId] = useState<string | null>(null);
@@ -273,15 +285,16 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   const [confirmingSave, setConfirmingSave] = useState(false);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [searchingMercadoLivrePhotos, setSearchingMercadoLivrePhotos] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const saveInFlight = useRef(false);
   const pointerDragImageId = useRef<string | null>(null);
 
   const baselineForm = useMemo(() => formFromProduct(currentProduct), [currentProduct]);
-  const currentImageIds = useMemo(() => images.map((image) => image.id), [images]);
+  const currentImageKeys = useMemo(() => images.map(imageStateKey), [images]);
   const hasPendingChanges = editing && (
-    JSON.stringify(form) !== JSON.stringify(baselineForm) || !arraysEqual(currentImageIds, baselineImageIds)
+    JSON.stringify(form) !== JSON.stringify(baselineForm) || !arraysEqual(currentImageKeys, baselineImageKeys)
   );
   const selectedImage = images.find((image) => image.id === selectedImageId) ?? images[0] ?? null;
 
@@ -315,7 +328,8 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
         setCurrentProduct(nextProduct);
         setForm(formFromProduct(nextProduct));
         setImages(nextImages);
-        setBaselineImageIds(nextImages.map((image) => image.id));
+        setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
+        setBaselineImageKeys(nextImages.map(imageStateKey));
         setSelectedImageId(nextImages[0]?.id ?? null);
         setDetailsLoaded(true);
       } catch (loadError) {
@@ -357,13 +371,14 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
+      if (searchingMercadoLivrePhotos) return setSearchingMercadoLivrePhotos(false);
       if (confirmingSave) return setConfirmingSave(false);
       if (confirmingDiscard) return setConfirmingDiscard(false);
       requestClose();
     }
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [confirmingDiscard, confirmingSave, requestClose]);
+  }, [confirmingDiscard, confirmingSave, requestClose, searchingMercadoLivrePhotos]);
 
   const statusText = statusLabels[currentProduct.status] ?? displayText(currentProduct.status);
   const originText = displayText(currentProduct.origin ?? currentProduct.source ?? (getBlingName(currentProduct) ? "BLING" : null));
@@ -453,11 +468,39 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     setFeedback(null);
   }
 
+  function applyMercadoLivrePhotos(urls: string[]) {
+    const seen = new Set(
+      images
+        .map((image) => normalizeMercadoLivreReferenceImageUrl(image.url))
+        .filter((url): url is string => Boolean(url))
+    );
+    const availableSlots = Math.max(0, INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES - images.length);
+    const additions = urls
+      .map(normalizeMercadoLivreReferenceImageUrl)
+      .filter((url): url is string => Boolean(url))
+      .filter((url) => !seen.has(url))
+      .slice(0, availableSlots)
+      .map((url, index) => ({
+        id: `pending-ml-${globalThis.crypto.randomUUID()}`,
+        url,
+        position: images.length + index,
+        pending: true
+      }));
+    if (additions.length) {
+      setImages([...images, ...additions]);
+      setSelectedImageId(additions[0].id);
+      setFeedback(`${additions.length} ${additions.length === 1 ? "foto adicionada" : "fotos adicionadas"} para revisao. Salve as alteracoes para gravar no W Ecommerce.`);
+    }
+    setSearchingMercadoLivrePhotos(false);
+    setError(null);
+  }
+
   function beginEditing() {
     setForm(formFromProduct(currentProduct));
     const nextImages = orderedImages(currentProduct);
     setImages(nextImages);
-    setBaselineImageIds(nextImages.map((image) => image.id));
+    setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
+    setBaselineImageKeys(nextImages.map(imageStateKey));
     setSelectedImageId(nextImages[0]?.id ?? null);
     setEditing(true);
     setFeedback(null);
@@ -468,7 +511,8 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     const nextImages = orderedImages(currentProduct);
     setForm(formFromProduct(currentProduct));
     setImages(nextImages);
-    setBaselineImageIds(nextImages.map((image) => image.id));
+    setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
+    setBaselineImageKeys(nextImages.map(imageStateKey));
     setSelectedImageId(nextImages[0]?.id ?? null);
     setEditing(false);
     setConfirmingSave(false);
@@ -495,8 +539,9 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     const originalAttributes = currentProduct.attributes && typeof currentProduct.attributes === "object" && !Array.isArray(currentProduct.attributes)
       ? currentProduct.attributes as Record<string, unknown>
       : {};
-    const keptImageIds = images.map((image) => image.id);
+    const keptImageIds = images.filter((image) => !image.pending).map((image) => image.id);
     const keptImageSet = new Set(keptImageIds);
+    const imagesChanged = !arraysEqual(images.map(imageStateKey), baselineImageKeys);
 
     return {
       payload: {
@@ -516,10 +561,15 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
           condition: form.condition.trim() || null,
           grossWeight: decimals.grossWeight === null || decimals.grossWeight === undefined ? null : String(decimals.grossWeight)
         },
-        images: {
-          keptImageIds,
-          removedImageIds: baselineImageIds.filter((imageId) => !keptImageSet.has(imageId))
-        }
+        ...(imagesChanged ? {
+          images: {
+            keptImageIds,
+            removedImageIds: baselineImageIds.filter((imageId) => !keptImageSet.has(imageId)),
+            order: images.map((image) => image.pending
+              ? { kind: "new" as const, url: image.url }
+              : { kind: "existing" as const, id: image.id })
+          }
+        } : {})
       }
     };
   }
@@ -563,7 +613,8 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
       setCurrentProduct(nextProduct);
       setForm(formFromProduct(nextProduct));
       setImages(nextImages);
-      setBaselineImageIds(nextImages.map((image) => image.id));
+      setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
+      setBaselineImageKeys(nextImages.map(imageStateKey));
       setSelectedImageId(nextImages[0]?.id ?? null);
       onProductUpdated(nextProduct);
       setEditing(false);
@@ -661,7 +712,12 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
                   ))}
                 </div>
               ) : null}
-              {editing && selectedImage && images[0]?.id !== selectedImage.id ? <Button className="mt-2 w-full" onClick={() => makePrimary(selectedImage.id)} type="button" variant="secondary">Definir imagem selecionada como principal</Button> : null}
+              {editing ? (
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  <Button onClick={() => setSearchingMercadoLivrePhotos(true)} type="button" variant="secondary"><ImagePlus className="h-4 w-4" />Buscar fotos no Mercado Livre</Button>
+                  {selectedImage && images[0]?.id !== selectedImage.id ? <Button onClick={() => makePrimary(selectedImage.id)} type="button" variant="secondary">Definir como principal</Button> : <span className="hidden sm:block" />}
+                </div>
+              ) : null}
             </section>
 
             <section className="relative order-1 min-w-0 pr-14 lg:order-2 lg:flex lg:min-h-full lg:flex-col lg:justify-center lg:py-8 lg:pr-16">
@@ -702,6 +758,17 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
           </div>
         </footer>
       </section>
+
+      {searchingMercadoLivrePhotos ? (
+        <MercadoLivrePhotoSearchModal
+          existingImageUrls={images.map((image) => image.url)}
+          maximumSelectable={Math.max(0, INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES - images.length)}
+          onApply={applyMercadoLivrePhotos}
+          onCancel={() => setSearchingMercadoLivrePhotos(false)}
+          productId={currentProduct.id}
+          productName={currentProduct.name}
+        />
+      ) : null}
 
       {confirmingSave ? <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4"><div className="w-full max-w-lg rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-glow"><div className="flex gap-3"><AlertTriangle className="h-5 w-5 shrink-0 text-matrix-goldDark" /><div><h3 className="text-lg font-bold">Salvar alteracoes locais?</h3><p className="mt-2 text-sm leading-6 text-matrix-muted">A ordem e as remocoes de fotos serao gravadas somente no W Ecommerce. Nenhuma integracao externa sera atualizada.</p></div></div><div className="mt-5 flex justify-end gap-2"><Button disabled={saving} onClick={() => setConfirmingSave(false)} type="button" variant="secondary">Voltar</Button><Button disabled={saving} onClick={() => void confirmSave()} type="button">{saving ? "Salvando..." : "Confirmar salvamento local"}</Button></div></div></div> : null}
 

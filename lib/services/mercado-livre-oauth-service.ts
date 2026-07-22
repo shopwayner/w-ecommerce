@@ -19,6 +19,15 @@ import {
   type MercadoLivreMatchType,
   type MercadoLivreResultKind
 } from "@/lib/mercado-livre-combined-search";
+import {
+  accumulateMercadoLivreProductPhotos,
+  MERCADO_LIVRE_PHOTO_SESSION_MAX_PHOTOS,
+  MERCADO_LIVRE_PHOTO_SESSION_MAX_RESULTS,
+  mercadoLivreProductPhotoResultKey,
+  runMercadoLivreProductPhotoSearchPage,
+  type MercadoLivreProductPhoto,
+  type MercadoLivreProductPhotoCandidate
+} from "@/lib/mercado-livre-product-photos";
 
 const tokenUrl = "https://api.mercadolibre.com/oauth/token";
 const apiBaseUrl = "https://api.mercadolibre.com";
@@ -40,6 +49,14 @@ type MercadoLivreTokenResponse = {
 type MercadoLivreUserResponse = {
   id?: number | string;
   nickname?: string;
+};
+
+type MercadoLivrePicture = {
+  id?: string | null;
+  url?: string | null;
+  secure_url?: string | null;
+  size?: string | null;
+  max_size?: string | null;
 };
 
 type MercadoLivreSearchItem = {
@@ -75,7 +92,7 @@ type MercadoLivreProductSearchItem = {
   status?: string;
   domain_id?: string;
   category_id?: string;
-  pictures?: Array<{ url?: string; secure_url?: string }>;
+  pictures?: MercadoLivrePicture[];
   attributes?: Array<{ id?: string; name?: string; value_name?: string; values?: Array<{ name?: string }> }>;
   buy_box_winner?: {
     item_id?: string;
@@ -155,8 +172,13 @@ type NormalizedMercadoLivreSearchItem = {
 };
 
 type MercadoLivreItemDetailResponse = MercadoLivreSearchItem & {
-  pictures?: Array<{ url?: string | null; secure_url?: string | null }>;
+  pictures?: MercadoLivrePicture[];
   catalog_product_id?: string | null;
+};
+
+type MercadoLivreItemMultiGetEntry = {
+  code?: number;
+  body?: MercadoLivreItemDetailResponse;
 };
 
 type MercadoLivreProductDetailResponse = MercadoLivreProductSearchItem & {
@@ -229,6 +251,65 @@ export type MercadoLivreSearchAuthContext = {
   };
   role?: string;
 };
+
+const mercadoLivrePhotoSessionTtlMs = 10 * 60 * 1000;
+
+type MercadoLivrePhotoSearchPageResponse = {
+  provider: "MERCADO_LIVRE";
+  sessionId: string;
+  photos: MercadoLivreProductPhoto[];
+  paging: {
+    page: number;
+    pageSize: number;
+    hasNextPage: boolean;
+    sessionLimitReached: boolean;
+  };
+  progress: {
+    analyzedResults: number;
+    nextStart: number | null;
+    nextEnd: number | null;
+  };
+  stats: {
+    gtinResults: number | null;
+    titleResults: number | null;
+    batchResultsAnalyzed: number;
+    analyzedResults: number;
+    batchUrlsFound: number;
+    urlsFound: number;
+    batchNewPhotos: number;
+    duplicatesRemoved: number;
+    displayedPhotos: number;
+  };
+  requestCount: number;
+  readOnly: true;
+  externalWrite: false;
+};
+
+type MercadoLivrePhotoSearchSession = {
+  id: string;
+  organizationId: string;
+  userId: string;
+  productId: string;
+  title: string;
+  gtin: string | null;
+  expiresAt: number;
+  nextPage: number;
+  loadingPage: number | null;
+  detailsByResult: Map<string, MercadoLivreProductPhotoCandidate[]>;
+  photos: MercadoLivreProductPhoto[];
+  analyzedResults: number;
+  urlsFound: number;
+  duplicatesRemoved: number;
+  pages: Map<number, MercadoLivrePhotoSearchPageResponse>;
+};
+
+const mercadoLivrePhotoSearchSessions = new Map<string, MercadoLivrePhotoSearchSession>();
+
+function pruneMercadoLivrePhotoSearchSessions(now = Date.now()) {
+  for (const [id, session] of mercadoLivrePhotoSearchSessions) {
+    if (session.expiresAt <= now) mercadoLivrePhotoSearchSessions.delete(id);
+  }
+}
 
 const localProductSearchSelect = {
   id: true,
@@ -908,8 +989,12 @@ async function fetchMercadoLivreReadOnly<T>(input: {
   endpointDiagnostics: MercadoLivreEndpointDiagnostic[];
   results?: number;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }) {
   const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (input.signal?.aborted) controller.abort();
+  else input.signal?.addEventListener("abort", cancel, { once: true });
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs ?? mercadoLivreDetailTimeoutMs);
   let response: Response;
   try {
@@ -918,6 +1003,7 @@ async function fetchMercadoLivreReadOnly<T>(input: {
       signal: controller.signal
     });
   } catch (error) {
+    if (input.signal?.aborted) throw error;
     input.endpointDiagnostics.push({
       endpoint: input.endpoint,
       httpStatus: 0,
@@ -976,6 +1062,7 @@ async function searchMercadoLivreProductsReadOnly(input: {
   paging: { page: number; pageSize: number; offset: number };
   endpointDiagnostics: MercadoLivreEndpointDiagnostic[];
   searchType: MercadoLivreSearchType;
+  signal?: AbortSignal;
 }) {
   const apiMode: MercadoLivreSearchApiMode = input.searchType === "GTIN" ? "product_identifier" : "q";
   const productSearchUrl = new URL(`${apiBaseUrl}/products/search`);
@@ -987,9 +1074,56 @@ async function searchMercadoLivreProductsReadOnly(input: {
     offset: input.paging.offset
   }).toString();
 
-  const response = await fetch(productSearchUrl, {
-    headers: { Authorization: `Bearer ${input.accessToken}`, Accept: "application/json" }
-  });
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (input.signal?.aborted) controller.abort();
+  else input.signal?.addEventListener("abort", cancel, { once: true });
+  const timeout = setTimeout(() => controller.abort(), mercadoLivreDetailTimeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(productSearchUrl, {
+      headers: { Authorization: `Bearer ${input.accessToken}`, Accept: "application/json" },
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (input.signal?.aborted) throw error;
+    const message = error instanceof Error && error.name === "AbortError" ? "timeout" : "fetch_error";
+    input.endpointDiagnostics.push({
+      endpoint: "/products/search",
+      apiMode,
+      httpStatus: 0,
+      status: "error",
+      error: message,
+      code: null,
+      message: "Chamada read-only Mercado Livre nao concluida em tempo seguro.",
+      blockedBy: null,
+      requestId: null,
+      correlationId: null,
+      results: 0
+    });
+    return {
+      items: [],
+      paging: buildMercadoLivrePaging({
+        page: input.paging.page,
+        pageSize: input.paging.pageSize,
+        offset: input.paging.offset,
+        resultCount: 0
+      }),
+      total: 0,
+      error: {
+        httpStatus: 0,
+        error: message,
+        code: null,
+        message: "Nao foi possivel consultar o Mercado Livre agora.",
+        blockedBy: null,
+        requestId: null,
+        correlationId: null
+      } satisfies MercadoLivreSearchError
+    };
+  } finally {
+    clearTimeout(timeout);
+    input.signal?.removeEventListener("abort", cancel);
+  }
 
   if (response.ok) {
     const payload = (await response.json()) as MercadoLivreProductSearchResponse;
@@ -1140,6 +1274,109 @@ async function enrichMercadoLivreSearchItem(input: {
     mergeMercadoLivreSearchItem(input.item, detail, seller, category, productDetail, description),
     input.endpointDiagnostics
   );
+}
+
+function mercadoLivrePictureDimensions(picture: MercadoLivrePicture) {
+  const raw = firstText(picture.max_size, picture.size);
+  const match = raw?.match(/^(\d+)x(\d+)$/i);
+  if (!match) return { width: null, height: null };
+  return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+function mercadoLivrePictureCandidates(pictures: readonly MercadoLivrePicture[] | null | undefined) {
+  return (pictures ?? []).flatMap<MercadoLivreProductPhotoCandidate>((picture) => {
+    const url = firstText(picture.secure_url, picture.url);
+    if (!url) return [];
+    const dimensions = mercadoLivrePictureDimensions(picture);
+    return [{ imageId: firstText(picture.id), url, ...dimensions }];
+  });
+}
+
+function mercadoLivreUrlCandidates(urls: readonly string[]) {
+  return urls.map<MercadoLivreProductPhotoCandidate>((url) => ({ url }));
+}
+
+async function mapPhotoDetailsWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  signal: AbortSignal | undefined,
+  mapper: (value: T, index: number) => Promise<R>
+) {
+  const results = new Array<R>(values.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, concurrency), values.length) }, async () => {
+    while (cursor < values.length) {
+      if (signal?.aborted) throw new DOMException("A consulta foi cancelada.", "AbortError");
+      const index = cursor;
+      cursor += 1;
+      results[index] = await mapper(values[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+async function loadMercadoLivreProductPhotoCandidateGroups(input: {
+  items: NormalizedMercadoLivreSearchItem[];
+  accessToken: string;
+  endpointDiagnostics: MercadoLivreEndpointDiagnostic[];
+  signal?: AbortSignal;
+}) {
+  const groups = input.items.map((item) => mercadoLivreUrlCandidates(item.imageUrls));
+  const resolvedItemIds = input.items.map((item) => item.externalItemId?.trim().toUpperCase() || null);
+
+  await mapPhotoDetailsWithConcurrency(input.items, 3, input.signal, async (item, index) => {
+    const catalogProductId = item.catalogProductId?.trim() || null;
+    const productDetail = catalogProductId && !item.imageUrls.length
+      ? await fetchMercadoLivreReadOnly<MercadoLivreProductDetailResponse>({
+        accessToken: input.accessToken,
+        endpoint: `/products/${encodeURIComponent(catalogProductId)}`,
+        endpointDiagnostics: input.endpointDiagnostics,
+        signal: input.signal
+      })
+      : null;
+    groups[index].push(...mercadoLivrePictureCandidates(productDetail?.pictures));
+
+    if (!resolvedItemIds[index]) {
+      resolvedItemIds[index] = firstText(productDetail?.buy_box_winner?.item_id)?.toUpperCase() ?? null;
+    }
+
+    if (!resolvedItemIds[index] && catalogProductId) {
+      const offers = await fetchMercadoLivreReadOnly<MercadoLivreCatalogOffersResponse>({
+        accessToken: input.accessToken,
+        endpoint: `/products/${encodeURIComponent(catalogProductId)}/items?limit=5`,
+        endpointDiagnostics: input.endpointDiagnostics,
+        signal: input.signal
+      });
+      resolvedItemIds[index] = mercadoLivreItemId(pickBestCatalogOffer(offers));
+    }
+  });
+
+  const uniqueItemIds = Array.from(new Set(resolvedItemIds.filter((id): id is string => Boolean(id))));
+  const detailsByItemId = new Map<string, MercadoLivreItemDetailResponse>();
+  for (let start = 0; start < uniqueItemIds.length; start += 20) {
+    if (input.signal?.aborted) throw new DOMException("A consulta foi cancelada.", "AbortError");
+    const itemIds = uniqueItemIds.slice(start, start + 20);
+    const entries = await fetchMercadoLivreReadOnly<MercadoLivreItemMultiGetEntry[]>({
+      accessToken: input.accessToken,
+      endpoint: `/items?ids=${itemIds.map(encodeURIComponent).join(",")}`,
+      endpointDiagnostics: input.endpointDiagnostics,
+      results: itemIds.length,
+      signal: input.signal
+    });
+    for (let index = 0; index < (entries?.length ?? 0); index += 1) {
+      const entry = entries?.[index];
+      if (entry?.code !== 200 || !entry.body) continue;
+      const itemId = firstText(entry.body.id, entry.body.item_id, itemIds[index]);
+      if (itemId) detailsByItemId.set(itemId.toUpperCase(), entry.body);
+    }
+  }
+
+  for (let index = 0; index < groups.length; index += 1) {
+    const itemId = resolvedItemIds[index];
+    if (itemId) groups[index].push(...mercadoLivrePictureCandidates(detailsByItemId.get(itemId)?.pictures));
+  }
+  return groups;
 }
 
 export function toSafeMercadoLivreAccount(connection: MercadoLivreConnection) {
@@ -1800,6 +2037,194 @@ export class MercadoLivreOAuthService {
       externalWrite: false,
       items: enrichedItems
     };
+  }
+
+  async searchProductPhotosReadOnly(input: {
+    authContext: MercadoLivreSearchAuthContext;
+    productId: string;
+    title: string;
+    gtin?: string | null;
+    existingImageUrls?: readonly string[];
+    connectionId?: string | null;
+    sessionId?: string | null;
+    page?: string | number | null;
+    pageSize?: string | number | null;
+    signal?: AbortSignal;
+  }) {
+    const title = input.title.trim();
+    if (!title) throw new Error("Informe o titulo completo do produto.");
+    const normalizedGtin = normalizeGtin(input.gtin ?? "");
+    const gtin = isValidGtin(normalizedGtin) ? normalizedGtin : null;
+    const paging = resolveMercadoLivrePagingInput(input.page, input.pageSize);
+    pruneMercadoLivrePhotoSearchSessions();
+
+    let session = input.sessionId ? mercadoLivrePhotoSearchSessions.get(input.sessionId) : null;
+    if (!session) {
+      if (input.sessionId || paging.page !== 1) throw new Error("A sessao da busca expirou. Feche e abra a busca novamente.");
+      for (const [id, existingSession] of mercadoLivrePhotoSearchSessions) {
+        if (
+          existingSession.organizationId === input.authContext.organizationId
+          && existingSession.userId === input.authContext.user.id
+          && existingSession.productId === input.productId
+        ) {
+          mercadoLivrePhotoSearchSessions.delete(id);
+        }
+      }
+      const id = randomBytes(18).toString("hex");
+      session = {
+        id,
+        organizationId: input.authContext.organizationId,
+        userId: input.authContext.user.id,
+        productId: input.productId,
+        title,
+        gtin,
+        expiresAt: Date.now() + mercadoLivrePhotoSessionTtlMs,
+        nextPage: 1,
+        loadingPage: null,
+        detailsByResult: new Map(),
+        photos: [],
+        analyzedResults: 0,
+        urlsFound: 0,
+        duplicatesRemoved: 0,
+        pages: new Map()
+      };
+      mercadoLivrePhotoSearchSessions.set(id, session);
+    }
+
+    if (
+      session.organizationId !== input.authContext.organizationId
+      || session.userId !== input.authContext.user.id
+      || session.productId !== input.productId
+      || session.title !== title
+      || session.gtin !== gtin
+    ) {
+      throw new Error("A sessao da busca nao pertence a este produto.");
+    }
+    session.expiresAt = Date.now() + mercadoLivrePhotoSessionTtlMs;
+    const cachedPage = session.pages.get(paging.page);
+    if (cachedPage) return cachedPage;
+    if (session.loadingPage !== null) throw new Error("Uma consulta de fotos ja esta em andamento.");
+    if (paging.page !== session.nextPage) throw new Error("Carregue os lotes de fotos na ordem apresentada.");
+
+    session.loadingPage = paging.page;
+    try {
+      const token = await this.getUnexpiredAccessTokenForConnectionReadOnly(
+        input.authContext.organizationId,
+        input.connectionId
+      );
+      if (!token) throw new Error("Conecte uma conta Mercado Livre antes de buscar fotos.");
+
+      const endpointDiagnostics: MercadoLivreEndpointDiagnostic[] = [];
+      const result = await runMercadoLivreProductPhotoSearchPage<NormalizedMercadoLivreSearchItem>({
+        gtin,
+        title,
+        existingImageUrls: input.existingImageUrls,
+        detailConcurrency: 3,
+        maxResults: MERCADO_LIVRE_PHOTO_SESSION_MAX_RESULTS - session.analyzedResults,
+        runSearch: async ({ source, value }) => {
+          const search = await searchMercadoLivreProductsReadOnly({
+            accessToken: token.accessToken,
+            siteId: token.connection.siteId || "MLB",
+            searchValue: value,
+            paging,
+            endpointDiagnostics,
+            searchType: source,
+            signal: input.signal
+          });
+          if (search.error) throw new Error("Nao foi possivel consultar o Mercado Livre agora.");
+          return { items: search.items, total: search.total, hasNextPage: search.paging.hasNextPage };
+        },
+        loadPhotos: async () => [],
+        loadPhotoGroups: async (items) => {
+          const groups = new Array<MercadoLivreProductPhotoCandidate[]>(items.length);
+          const uncachedItems: NormalizedMercadoLivreSearchItem[] = [];
+          const uncachedIndexes: number[] = [];
+          items.forEach((item, index) => {
+            const key = mercadoLivreProductPhotoResultKey(item, paging.offset + index);
+            const cached = session.detailsByResult.get(key);
+            if (cached) groups[index] = cached;
+            else {
+              uncachedItems.push(item);
+              uncachedIndexes.push(index);
+            }
+          });
+          if (uncachedItems.length) {
+            const loaded = await loadMercadoLivreProductPhotoCandidateGroups({
+              items: uncachedItems,
+              accessToken: token.accessToken,
+              endpointDiagnostics,
+              signal: input.signal
+            });
+            loaded.forEach((photos, loadedIndex) => {
+              const resultIndex = uncachedIndexes[loadedIndex];
+              const key = mercadoLivreProductPhotoResultKey(items[resultIndex], paging.offset + resultIndex);
+              session.detailsByResult.set(key, photos);
+              groups[resultIndex] = photos;
+            });
+          }
+          return groups;
+        }
+      });
+
+      const accumulated = accumulateMercadoLivreProductPhotos(
+        session.photos,
+        result.photos,
+        MERCADO_LIVRE_PHOTO_SESSION_MAX_PHOTOS
+      );
+      session.photos = accumulated.photos;
+      session.analyzedResults += result.stats.resultItemsAfterDeduplication;
+      session.urlsFound += result.stats.urlsFound;
+      session.duplicatesRemoved += result.stats.duplicatesRemoved + accumulated.duplicatesRemoved;
+
+      const sessionLimitReached =
+        session.analyzedResults >= MERCADO_LIVRE_PHOTO_SESSION_MAX_RESULTS
+        || accumulated.limitReached;
+      const hasNextPage = result.paging.hasNextPage && !sessionLimitReached;
+      const nextSourceCapacity = (total: number | null) => {
+        if (total === null) return paging.pageSize;
+        return Math.min(paging.pageSize, Math.max(0, total - paging.page * paging.pageSize));
+      };
+      const nextBatchCapacity =
+        (gtin ? nextSourceCapacity(result.stats.gtinResults) : 0)
+        + nextSourceCapacity(result.stats.titleResults);
+      const response: MercadoLivrePhotoSearchPageResponse = {
+        provider: "MERCADO_LIVRE",
+        sessionId: session.id,
+        photos: session.photos,
+        paging: {
+          page: paging.page,
+          pageSize: paging.pageSize,
+          hasNextPage,
+          sessionLimitReached
+        },
+        progress: {
+          analyzedResults: session.analyzedResults,
+          nextStart: hasNextPage ? session.analyzedResults + 1 : null,
+          nextEnd: hasNextPage
+            ? Math.min(MERCADO_LIVRE_PHOTO_SESSION_MAX_RESULTS, session.analyzedResults + nextBatchCapacity)
+            : null
+        },
+        stats: {
+          gtinResults: result.stats.gtinResults,
+          titleResults: result.stats.titleResults,
+          batchResultsAnalyzed: result.stats.resultItemsAfterDeduplication,
+          analyzedResults: session.analyzedResults,
+          batchUrlsFound: result.stats.urlsFound,
+          urlsFound: session.urlsFound,
+          batchNewPhotos: accumulated.newPhotos,
+          duplicatesRemoved: session.duplicatesRemoved,
+          displayedPhotos: session.photos.length
+        },
+        requestCount: endpointDiagnostics.length,
+        readOnly: true,
+        externalWrite: false
+      };
+      session.pages.set(paging.page, response);
+      session.nextPage += 1;
+      return response;
+    } finally {
+      session.loadingPage = null;
+    }
   }
 
   async getReadOnlySearchItemDetail(input: {

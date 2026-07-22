@@ -1,12 +1,22 @@
+import { INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES } from "@/lib/intelligent-product-preview";
+import { deduplicateMercadoLivreProductPhotos } from "@/lib/mercado-livre-product-photos";
+import { normalizeMercadoLivreReferenceImageUrl } from "@/lib/mercado-livre-reference-images";
+
 export type ProductImageOwnershipRecord = {
   id: string;
   organizationId: string;
   productId: string;
+  url?: string;
 };
+
+export type ProductImageOrderEntry =
+  | { kind: "existing"; id: string }
+  | { kind: "new"; url: string };
 
 export type ProductImageUpdateInput = {
   keptImageIds: string[];
   removedImageIds: string[];
+  order?: ProductImageOrderEntry[];
 };
 
 export class ProductImageUpdateValidationError extends Error {
@@ -52,8 +62,49 @@ export function validateProductImageUpdate(input: {
     throw new ProductImageUpdateValidationError("A lista de imagens nao corresponde ao cadastro atual do produto.");
   }
 
+  const order = changes.order ?? changes.keptImageIds.map((id) => ({ kind: "existing" as const, id }));
+  const orderedExistingIds = order
+    .filter((entry): entry is Extract<ProductImageOrderEntry, { kind: "existing" }> => entry.kind === "existing")
+    .map((entry) => entry.id);
+  if (
+    orderedExistingIds.length !== changes.keptImageIds.length
+    || orderedExistingIds.some((id) => !keptIds.has(id))
+    || new Set(orderedExistingIds).size !== orderedExistingIds.length
+  ) {
+    throw new ProductImageUpdateValidationError("A ordem final nao corresponde as imagens mantidas.");
+  }
+
+  const existingUrls = new Set(
+    existingImages
+      .filter((image) => keptIds.has(image.id))
+      .map((image) => normalizeMercadoLivreReferenceImageUrl(image.url))
+      .filter((url): url is string => Boolean(url))
+  );
+  const newImageUrls: string[] = [];
+  const normalizedOrder = order.map<ProductImageOrderEntry>((entry) => {
+    if (entry.kind === "existing") return entry;
+    const url = normalizeMercadoLivreReferenceImageUrl(entry.url);
+    if (!url) throw new ProductImageUpdateValidationError("Uma das novas imagens possui URL insegura ou invalida.");
+    if (existingUrls.has(url) || newImageUrls.includes(url)) {
+      throw new ProductImageUpdateValidationError("A galeria final contem imagens duplicadas.");
+    }
+    newImageUrls.push(url);
+    return { kind: "new", url };
+  });
+  if (newImageUrls.length && normalizedOrder.length > INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES) {
+    throw new ProductImageUpdateValidationError(
+      `A galeria permite no maximo ${INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES} imagens.`
+    );
+  }
+  const allFinalUrls = [...existingUrls, ...newImageUrls];
+  if (deduplicateMercadoLivreProductPhotos(allFinalUrls.map((url) => ({ url }))).photos.length !== allFinalUrls.length) {
+    throw new ProductImageUpdateValidationError("A galeria final contem imagens duplicadas.");
+  }
+
   return {
     orderedImageIds: [...changes.keptImageIds],
-    removedImageIds: [...changes.removedImageIds]
+    removedImageIds: [...changes.removedImageIds],
+    orderedImages: normalizedOrder,
+    newImageUrls
   };
 }
