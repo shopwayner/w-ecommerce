@@ -47,6 +47,7 @@ import {
   type BlingProductUpdateResult
 } from "@/components/bling-product-update-modal";
 import { ProductCopyButton } from "@/components/product-copy-button";
+import { ProductDetailsModal } from "@/components/product-details-modal";
 import { Badge, Button, Card, DataTable, KpiCard, PageHeader } from "@/components/ui";
 import {
   EMPTY_PRODUCT_LIST_FILTERS,
@@ -75,10 +76,13 @@ type ProductListItem = {
   salePriceDisplay: string | null;
   costPriceDisplay?: string | null;
   imageUrl: string | null;
+  images?: Array<{ id: string; url: string; position: number }>;
   weight?: string | null;
+  grossWeight?: string | null;
   height?: string | null;
   width?: string | null;
   depth?: string | null;
+  condition?: string | null;
   attributes?: unknown;
   hasEnrichmentDraft: boolean;
   externalProductId?: string | null;
@@ -1640,7 +1644,7 @@ function parseOptionalFormDecimal(value: string, field: string) {
   return { value: parsed };
 }
 
-function ProductDetailsModal({
+export function LegacyProductDetailsModal({
   product,
   onClose,
   onProductUpdated

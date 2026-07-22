@@ -15,8 +15,20 @@ export const productCreateSchema = z.object({
   minStock: z.coerce.number().int().nonnegative().optional()
 });
 
+const productImageChangesSchema = z.object({
+  keptImageIds: z.array(z.string().trim().min(1).max(120)).max(50),
+  removedImageIds: z.array(z.string().trim().min(1).max(120)).max(50)
+}).strict().superRefine((value, context) => {
+  if (new Set(value.keptImageIds).size !== value.keptImageIds.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["keptImageIds"], message: "A ordem das imagens contem itens duplicados." });
+  }
+  if (new Set(value.removedImageIds).size !== value.removedImageIds.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["removedImageIds"], message: "A lista de remocoes contem itens duplicados." });
+  }
+});
+
 export const productUpdateSchema = z.object({
-  name: z.string().trim().min(2),
+  name: z.string().trim().min(2).max(60, "O titulo deve ter no maximo 60 caracteres."),
   sku: z.string().trim().nullable().optional(),
   ean: z.string().nullable().optional(),
   unit: z.string().trim().nullable().optional(),
@@ -36,8 +48,9 @@ export const productUpdateSchema = z.object({
   salePriceDisplay: z.string().trim().nullable().optional(),
   stock: z.coerce.number().int().nonnegative().optional(),
   imageUrl: z.string().trim().url().nullable().or(z.literal("")).optional(),
+  images: productImageChangesSchema.optional(),
   description: z.string().trim().nullable().optional()
-});
+}).strict();
 
 export const productQuickEditSchema = z.object({
   name: z.string().trim().min(2).optional(),

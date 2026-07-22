@@ -3,6 +3,10 @@ import { Prisma } from "@prisma/client";
 import { requireApiAuth } from "@/lib/auth/api";
 import { parseDecimalPrice } from "@/lib/decimal-price";
 import { normalizeProductBrand } from "@/lib/product-brand";
+import {
+  ProductImageUpdateValidationError,
+  validateProductImageUpdate
+} from "@/lib/product-image-update";
 import { prisma } from "@/lib/prisma";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { productUpdateSchema } from "@/lib/validation";
@@ -72,6 +76,11 @@ function formatProductResponse(product: Awaited<ReturnType<typeof loadProductFor
     unit: typeof metadata.unit === "string" ? metadata.unit : typeof attributes.unit === "string" ? attributes.unit : null,
     description: product.description,
     imageUrl: product.images[0]?.url ?? null,
+    images: product.images.map((image) => ({
+      id: image.id,
+      url: image.url,
+      position: image.position
+    })),
     hasEnrichmentDraft: product.enrichmentDrafts.length > 0,
     status: product.status,
     enrichmentStatus: product.enrichmentStatus,
@@ -107,9 +116,12 @@ function formatProductResponse(product: Awaited<ReturnType<typeof loadProductFor
     })),
     confidenceScore: product.confidenceScore,
     weight: product.weight?.toString() ?? null,
+    grossWeight: product.grossWeight?.toString() ?? null,
     height: product.height?.toString() ?? null,
     width: product.width?.toString() ?? null,
     depth: product.depth?.toString() ?? null,
+    dimensionUnit: product.dimensionUnit,
+    condition: product.condition,
     attributes: product.attributes,
     displayValue: typeof metadata.displayValue === "string" ? metadata.displayValue : null,
     salePriceDisplay: typeof metadata.salePriceDisplay === "string" ? metadata.salePriceDisplay : currentPrice?.salePrice.toString() ?? null,
@@ -127,7 +139,7 @@ function loadProductForResponse(productId: string, organizationId: string) {
     include: {
       prices: { take: 1, orderBy: { createdAt: "desc" } },
       inventory: true,
-      images: { take: 1, orderBy: { position: "asc" } },
+      images: { orderBy: [{ position: "asc" }, { id: "asc" }] },
       enrichmentDrafts: { take: 1, orderBy: { updatedAt: "desc" } },
       mappings: {
         take: 1,
@@ -170,7 +182,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     include: {
       prices: { take: 1, orderBy: { createdAt: "desc" } },
       inventory: true,
-      images: { take: 1, orderBy: { position: "asc" } },
+      images: { orderBy: [{ position: "asc" }, { id: "asc" }] },
       enrichmentDrafts: { take: 1, orderBy: { updatedAt: "desc" } },
       mappings: {
         take: 1,
@@ -234,7 +246,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     include: {
       prices: { take: 1, orderBy: { createdAt: "desc" } },
       inventory: true,
-      images: { take: 1, orderBy: { position: "asc" } }
+      images: { orderBy: [{ position: "asc" }, { id: "asc" }] }
     }
   });
 
@@ -245,6 +257,23 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const metadata = getMetadata(existing.blockedFields);
   const imageUrl = normalizeOptionalText(parsed.data.imageUrl);
   const description = normalizeOptionalText(parsed.data.description);
+  let imageUpdatePlan: ReturnType<typeof validateProductImageUpdate> | null = null;
+
+  if (parsed.data.images) {
+    try {
+      imageUpdatePlan = validateProductImageUpdate({
+        organizationId: auth.context.organizationId,
+        productId: existing.id,
+        existingImages: existing.images,
+        changes: parsed.data.images
+      });
+    } catch (error) {
+      if (error instanceof ProductImageUpdateValidationError) {
+        return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+      throw error;
+    }
+  }
 
   try {
     await prisma.$transaction(async (tx) => {
@@ -256,7 +285,6 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           ean,
           description,
           category: normalizeOptionalText(parsed.data.category),
-          brand: normalizeOptionalText(parsed.data.origin),
           status: parsed.data.status ?? existing.status,
           enrichmentStatus: parsed.data.enrichmentStatus ?? existing.enrichmentStatus,
           syncStatus: parsed.data.syncStatus ?? existing.syncStatus,
@@ -270,10 +298,14 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           blockedFields: {
             ...metadata,
             unit: normalizeOptionalText(parsed.data.unit),
-            origin: normalizeOptionalText(parsed.data.origin),
+            origin: parsed.data.origin !== undefined
+              ? normalizeOptionalText(parsed.data.origin)
+              : typeof metadata.origin === "string" ? metadata.origin : null,
             displayValue: displayValue.displayValue,
             salePriceDisplay: salePrice.displayValue,
-            stockOverride: parsed.data.stock ?? 0
+            stockOverride: parsed.data.stock !== undefined
+              ? parsed.data.stock
+              : typeof metadata.stockOverride === "number" ? metadata.stockOverride : 0
           }
         }
       });
@@ -302,7 +334,26 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
         });
       }
 
-      if (imageUrl) {
+      if (imageUpdatePlan) {
+        if (imageUpdatePlan.removedImageIds.length) {
+          await tx.productImage.deleteMany({
+            where: {
+              id: { in: imageUpdatePlan.removedImageIds },
+              organizationId: auth.context.organizationId,
+              productId: existing.id
+            }
+          });
+        }
+
+        await Promise.all(
+          imageUpdatePlan.orderedImageIds.map((imageId, position) =>
+            tx.productImage.update({
+              where: { id: imageId },
+              data: { position }
+            })
+          )
+        );
+      } else if (imageUrl) {
         if (existing.images[0]) {
           await tx.productImage.update({ where: { id: existing.images[0].id }, data: { url: imageUrl } });
         } else {
