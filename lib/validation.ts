@@ -34,7 +34,8 @@ const productImageChangesSchema = z.object({
 });
 
 export const productUpdateSchema = z.object({
-  name: z.string().trim().min(2).max(60, "O titulo deve ter no maximo 60 caracteres."),
+  name: z.string().trim().min(2).max(60, "O titulo deve ter no maximo 60 caracteres.").optional(),
+  brand: z.string().trim().max(120).nullable().optional(),
   sku: z.string().trim().nullable().optional(),
   ean: z.string().nullable().optional(),
   unit: z.string().trim().nullable().optional(),
@@ -46,17 +47,21 @@ export const productUpdateSchema = z.object({
   source: z.string().trim().nullable().optional(),
   confidenceScore: z.coerce.number().int().min(0).max(100).optional(),
   weight: z.coerce.number().nonnegative().nullable().optional(),
+  grossWeight: z.coerce.number().nonnegative().nullable().optional(),
   height: z.coerce.number().nonnegative().nullable().optional(),
   width: z.coerce.number().nonnegative().nullable().optional(),
   depth: z.coerce.number().nonnegative().nullable().optional(),
+  condition: z.enum(["UNSPECIFIED", "NEW", "USED"]).nullable().optional(),
   attributes: z.record(z.unknown()).nullable().optional(),
-  displayValue: z.string().trim().nullable().optional(),
-  salePriceDisplay: z.string().trim().nullable().optional(),
+  displayValue: z.string().trim().min(1).optional(),
+  salePriceDisplay: z.string().trim().min(1).optional(),
   stock: z.coerce.number().int().nonnegative().optional(),
   imageUrl: z.string().trim().url().nullable().or(z.literal("")).optional(),
   images: productImageChangesSchema.optional(),
   description: z.string().trim().nullable().optional()
-}).strict();
+}).strict().refine((value) => Object.keys(value).length > 0, {
+  message: "Informe ao menos uma alteracao."
+});
 
 export const productQuickEditSchema = z.object({
   name: z.string().trim().min(2).optional(),

@@ -231,19 +231,46 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     return NextResponse.json({ error: "Dados invalidos", issues: parsed.error.flatten() }, { status: 400 });
   }
 
-  const ean = normalizeGtin(parsed.data.ean);
-  if (!isValidGtin(ean)) {
-    return NextResponse.json(
-      { error: "GTIN/EAN invalido. Informe 8, 12, 13 ou 14 digitos validos." },
-      { status: 400 }
-    );
+  let ean: string | null | undefined;
+  if (parsed.data.ean !== undefined) {
+    const rawEan = parsed.data.ean?.trim() ?? "";
+    if (rawEan && !/^\d+$/.test(rawEan)) {
+      return NextResponse.json(
+        { error: "GTIN/EAN invalido. Informe somente digitos." },
+        { status: 400 }
+      );
+    }
+    ean = normalizeGtin(rawEan);
+    if (!isValidGtin(ean)) {
+      return NextResponse.json(
+        { error: "GTIN/EAN invalido. Informe 8, 12, 13 ou 14 digitos validos." },
+        { status: 400 }
+      );
+    }
   }
 
-  const displayValue = parseBrazilianDecimal(parsed.data.displayValue, "Valor");
-  if ("error" in displayValue) return NextResponse.json({ error: displayValue.error }, { status: 400 });
+  const displayValue = parsed.data.displayValue !== undefined
+    ? parseBrazilianDecimal(parsed.data.displayValue, "Valor")
+    : null;
+  if (displayValue && "error" in displayValue) {
+    return NextResponse.json({ error: displayValue.error }, { status: 400 });
+  }
 
-  const salePrice = parseBrazilianDecimal(parsed.data.salePriceDisplay, "Preco de venda");
-  if ("error" in salePrice) return NextResponse.json({ error: salePrice.error }, { status: 400 });
+  const salePrice = parsed.data.salePriceDisplay !== undefined
+    ? parseBrazilianDecimal(parsed.data.salePriceDisplay, "Preco de venda")
+    : null;
+  if (salePrice && "error" in salePrice) {
+    return NextResponse.json({ error: salePrice.error }, { status: 400 });
+  }
+
+  let brand: string | null | undefined;
+  if (parsed.data.brand !== undefined) {
+    const brandText = normalizeOptionalText(parsed.data.brand);
+    brand = brandText === null ? null : normalizeProductBrand(brandText);
+    if (brandText && !brand) {
+      return NextResponse.json({ error: "Informe uma marca valida ou deixe o campo vazio." }, { status: 400 });
+    }
+  }
 
   const existing = await prisma.product.findFirst({
     where: { id, organizationId: auth.context.organizationId },
@@ -292,54 +319,73 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
   try {
     await prisma.$transaction(async (tx) => {
-      await tx.product.update({
-        where: { id: existing.id },
-        data: {
-          name: parsed.data.name,
-          ...(parsed.data.sku !== undefined ? { sku: normalizeOptionalText(parsed.data.sku) } : {}),
-          ean,
-          description,
-          category: normalizeOptionalText(parsed.data.category),
-          status: parsed.data.status ?? existing.status,
-          enrichmentStatus: parsed.data.enrichmentStatus ?? existing.enrichmentStatus,
-          syncStatus: parsed.data.syncStatus ?? existing.syncStatus,
-          source: normalizeOptionalText(parsed.data.source) ?? existing.source,
-          confidenceScore: parsed.data.confidenceScore ?? existing.confidenceScore,
-          weight: parsed.data.weight,
-          height: parsed.data.height,
-          width: parsed.data.width,
-          depth: parsed.data.depth,
-          attributes: toOptionalJson(parsed.data.attributes),
-          blockedFields: {
-            ...metadata,
-            unit: normalizeOptionalText(parsed.data.unit),
-            origin: parsed.data.origin !== undefined
-              ? normalizeOptionalText(parsed.data.origin)
-              : typeof metadata.origin === "string" ? metadata.origin : null,
-            displayValue: displayValue.displayValue,
-            salePriceDisplay: salePrice.displayValue,
-            stockOverride: parsed.data.stock !== undefined
-              ? parsed.data.stock
-              : typeof metadata.stockOverride === "number" ? metadata.stockOverride : 0
-          }
-        }
-      });
+      const productData: Prisma.ProductUpdateInput = {};
+      if (parsed.data.name !== undefined) productData.name = parsed.data.name;
+      if (brand !== undefined) productData.brand = brand;
+      if (parsed.data.sku !== undefined) productData.sku = normalizeOptionalText(parsed.data.sku);
+      if (ean !== undefined) productData.ean = ean;
+      if (description !== undefined) productData.description = description;
+      if (parsed.data.category !== undefined) productData.category = normalizeOptionalText(parsed.data.category);
+      if (parsed.data.status !== undefined) productData.status = parsed.data.status;
+      if (parsed.data.enrichmentStatus !== undefined) productData.enrichmentStatus = parsed.data.enrichmentStatus;
+      if (parsed.data.syncStatus !== undefined) productData.syncStatus = parsed.data.syncStatus;
+      if (parsed.data.source !== undefined) productData.source = normalizeOptionalText(parsed.data.source);
+      if (parsed.data.confidenceScore !== undefined) productData.confidenceScore = parsed.data.confidenceScore;
+      if (parsed.data.weight !== undefined) productData.weight = parsed.data.weight;
+      if (parsed.data.grossWeight !== undefined) productData.grossWeight = parsed.data.grossWeight;
+      if (parsed.data.height !== undefined) productData.height = parsed.data.height;
+      if (parsed.data.width !== undefined) productData.width = parsed.data.width;
+      if (parsed.data.depth !== undefined) productData.depth = parsed.data.depth;
+      if (parsed.data.condition !== undefined) productData.condition = parsed.data.condition;
+      if (parsed.data.attributes !== undefined) productData.attributes = toOptionalJson(parsed.data.attributes);
 
-      if (existing.prices[0]) {
-        await tx.productPrice.update({
-          where: { id: existing.prices[0].id },
-          data: { salePrice: salePrice.numberValue, costPrice: displayValue.numberValue, status: "ACTIVE" }
-        });
-      } else {
-        await tx.productPrice.create({
-          data: {
-            organizationId: auth.context.organizationId,
-            productId: existing.id,
-            costPrice: displayValue.numberValue,
-            salePrice: salePrice.numberValue,
-            status: "ACTIVE"
-          }
-        });
+      const metadataChanged = parsed.data.unit !== undefined
+        || parsed.data.origin !== undefined
+        || displayValue !== null
+        || salePrice !== null
+        || parsed.data.stock !== undefined;
+      if (metadataChanged) {
+        productData.blockedFields = {
+          ...metadata,
+          ...(parsed.data.unit !== undefined ? { unit: normalizeOptionalText(parsed.data.unit) } : {}),
+          ...(parsed.data.origin !== undefined ? { origin: normalizeOptionalText(parsed.data.origin) } : {}),
+          ...(displayValue && !("error" in displayValue) ? { displayValue: displayValue.displayValue } : {}),
+          ...(salePrice && !("error" in salePrice) ? { salePriceDisplay: salePrice.displayValue } : {}),
+          ...(parsed.data.stock !== undefined ? { stockOverride: parsed.data.stock } : {})
+        } as Prisma.InputJsonValue;
+      }
+
+      if (Object.keys(productData).length > 0) {
+        await tx.product.update({ where: { id: existing.id }, data: productData });
+      }
+
+      if (displayValue !== null || salePrice !== null) {
+        const costPrice = displayValue && !("error" in displayValue)
+          ? displayValue.numberValue
+          : Number(existing.prices[0]?.costPrice ?? 0);
+        const nextSalePrice = salePrice && !("error" in salePrice)
+          ? salePrice.numberValue
+          : Number(existing.prices[0]?.salePrice ?? 0);
+        if (existing.prices[0]) {
+          await tx.productPrice.update({
+            where: { id: existing.prices[0].id },
+            data: {
+              ...(displayValue !== null ? { costPrice } : {}),
+              ...(salePrice !== null ? { salePrice: nextSalePrice } : {}),
+              status: "ACTIVE"
+            }
+          });
+        } else {
+          await tx.productPrice.create({
+            data: {
+              organizationId: auth.context.organizationId,
+              productId: existing.id,
+              costPrice,
+              salePrice: nextSalePrice,
+              status: "ACTIVE"
+            }
+          });
+        }
       }
 
       if (existing.inventory[0] && parsed.data.stock !== undefined) {

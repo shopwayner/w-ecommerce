@@ -35,6 +35,14 @@ import { MercadoLivrePhotoSearchModal } from "@/components/mercado-livre-photo-s
 import { Button } from "@/components/ui";
 import { INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES } from "@/lib/intelligent-product-preview";
 import { normalizeMercadoLivreReferenceImageUrl } from "@/lib/mercado-livre-reference-images";
+import {
+  buildProductDetailsPatch,
+  createProductDetailsEditForm,
+  PRODUCT_DETAILS_NAME_MAX_LENGTH,
+  productDetailsFieldDefinitions,
+  type ProductDetailsEditForm,
+  type ProductDetailsFieldId
+} from "@/lib/product-details-edit";
 
 type ProductDetailsImage = {
   id: string;
@@ -75,22 +83,6 @@ export type ProductDetailsProduct = {
   price: string;
   stock: number;
   updatedAt: string;
-};
-
-type ProductEditForm = {
-  name: string;
-  ean: string;
-  unit: string;
-  category: string;
-  costPrice: string;
-  salePrice: string;
-  weight: string;
-  grossWeight: string;
-  height: string;
-  width: string;
-  depth: string;
-  condition: string;
-  description: string;
 };
 
 const statusLabels: Record<string, string> = {
@@ -185,10 +177,6 @@ function formatDate(value: string) {
   }).format(new Date(value));
 }
 
-function toFormText(value: string | number | null | undefined) {
-  return value === null || value === undefined ? "" : String(value);
-}
-
 function getCondition(product: ProductDetailsProduct) {
   return product.condition ?? productAttributeValue(product.attributes, conditionAliases);
 }
@@ -197,31 +185,23 @@ function getGrossWeight(product: ProductDetailsProduct) {
   return product.grossWeight ?? productAttributeValue(product.attributes, grossWeightAliases);
 }
 
-function formFromProduct(product: ProductDetailsProduct): ProductEditForm {
-  return {
+function formFromProduct(product: ProductDetailsProduct): ProductDetailsEditForm {
+  return createProductDetailsEditForm({
     name: product.name,
-    ean: toFormText(product.ean),
-    unit: toFormText(product.unit),
-    category: toFormText(product.category),
-    costPrice: toFormText(product.costPriceDisplay ?? product.displayValue),
-    salePrice: toFormText(product.salePriceDisplay ?? product.price),
-    weight: toFormText(product.weight),
-    grossWeight: toFormText(getGrossWeight(product)),
-    height: toFormText(product.height),
-    width: toFormText(product.width),
-    depth: toFormText(product.depth),
-    condition: toFormText(getCondition(product)),
+    brand: product.brand,
+    ean: product.ean,
+    unit: product.unit,
+    category: product.category,
+    costPrice: product.costPriceDisplay ?? product.displayValue,
+    salePrice: product.salePriceDisplay ?? product.price,
+    weight: product.weight,
+    grossWeight: getGrossWeight(product),
+    height: product.height,
+    width: product.width,
+    depth: product.depth,
+    condition: getCondition(product),
     description: sanitizeDescription(product.description)
-  };
-}
-
-function parseOptionalDecimal(value: string, field: string) {
-  const text = value.trim();
-  if (!text) return { value: null };
-  const parsed = Number(text.includes(",") ? text.replace(/\./g, "").replace(",", ".") : text);
-  if (!Number.isFinite(parsed)) return { error: `${field} deve ser numerico.` };
-  if (parsed < 0) return { error: `${field} nao pode ser negativo.` };
-  return { value: parsed };
+  });
 }
 
 function orderedImages(product: ProductDetailsProduct) {
@@ -273,7 +253,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   const [detailsLoading, setDetailsLoading] = useState(true);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState<ProductEditForm>(() => formFromProduct(product));
+  const [form, setForm] = useState<ProductDetailsEditForm>(() => formFromProduct(product));
   const [images, setImages] = useState<ProductDetailsImage[]>(() => orderedImages(product));
   const [baselineImageIds, setBaselineImageIds] = useState<string[]>(() => (product.images ?? []).map((image) => image.id));
   const [baselineImageKeys, setBaselineImageKeys] = useState<string[]>(() => orderedImages(product).map(imageStateKey));
@@ -388,43 +368,48 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   const cardClass = "rounded-lg border border-matrix-border bg-matrix-panel2/65 p-3";
   const inputClass = "mt-2 h-10 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 text-sm font-semibold text-matrix-fg outline-none transition focus:border-matrix-gold/70 focus:ring-2 focus:ring-matrix-gold/20";
 
-  const readOnlyDetails = [
-    { label: "Nome do produto", value: currentProduct.name, Icon: Package, empty: "Nao informado" },
-    { label: "Marca", value: currentProduct.brand, Icon: Factory, empty: "Sem marca" },
-    { label: "SKU", value: currentProduct.sku, Icon: Tag, empty: "Nao informado" },
-    { label: "EAN/GTIN", value: currentProduct.ean, Icon: Barcode, empty: "Nao informado" },
-    { label: "Unidade", value: currentProduct.unit, Icon: ClipboardList, empty: "Nao informado" },
-    { label: "Categoria", value: currentProduct.category, Icon: Folder, empty: "Sem categoria" },
-    { label: "Origem", value: originText, Icon: Globe2, empty: "Nao informado" },
-    { label: "Status no Bling", value: getBlingStatusLabel(currentProduct.blingStatus), Icon: ShieldCheck, empty: "Nao informado" },
-    { label: "Custo", value: formatCurrency(currentProduct.costPriceDisplay ?? currentProduct.displayValue), Icon: DollarSign, empty: "Nao informado" },
-    { label: "Preco de venda", value: formatCurrency(currentProduct.salePriceDisplay), Icon: Tag, empty: "Nao informado" },
-    { label: "Estoque", value: currentProduct.stock, Icon: Box, empty: "Nao informado" },
-    { label: "Peso liquido", value: formatMeasurement(currentProduct.weight, "kg"), Icon: Scale, empty: "Nao informado" },
-    { label: "Peso bruto", value: formatMeasurement(getGrossWeight(currentProduct), "kg"), Icon: Scale, empty: "Nao informado" },
-    { label: "Condicao", value: getCondition(currentProduct), Icon: ShieldCheck, empty: "Nao informado" },
-    { label: "Altura", value: formatMeasurement(currentProduct.height, "cm"), Icon: Ruler, empty: "Nao informado" },
-    { label: "Largura", value: formatMeasurement(currentProduct.width, "cm"), Icon: Ruler, empty: "Nao informado" },
-    { label: "Profundidade", value: formatMeasurement(currentProduct.depth, "cm"), Icon: Ruler, empty: "Nao informado" },
-    { label: "Data de atualizacao", value: formatDate(currentProduct.updatedAt), Icon: CalendarDays, empty: "Nao informado" }
-  ];
+  const detailIcons: Record<ProductDetailsFieldId, typeof Package> = {
+    name: Package,
+    brand: Factory,
+    sku: Tag,
+    ean: Barcode,
+    unit: ClipboardList,
+    category: Folder,
+    origin: Globe2,
+    blingStatus: ShieldCheck,
+    costPrice: DollarSign,
+    salePrice: Tag,
+    stock: Box,
+    weight: Scale,
+    grossWeight: Scale,
+    condition: ShieldCheck,
+    height: Ruler,
+    width: Ruler,
+    depth: Ruler,
+    updatedAt: CalendarDays
+  };
+  const detailValues: Record<ProductDetailsFieldId, string | number | null | undefined> = {
+    name: currentProduct.name,
+    brand: currentProduct.brand,
+    sku: currentProduct.sku,
+    ean: currentProduct.ean,
+    unit: currentProduct.unit,
+    category: currentProduct.category,
+    origin: originText,
+    blingStatus: getBlingStatusLabel(currentProduct.blingStatus),
+    costPrice: formatCurrency(currentProduct.costPriceDisplay ?? currentProduct.displayValue),
+    salePrice: formatCurrency(currentProduct.salePriceDisplay),
+    stock: currentProduct.stock,
+    weight: formatMeasurement(currentProduct.weight, "kg"),
+    grossWeight: formatMeasurement(getGrossWeight(currentProduct), "kg"),
+    condition: getCondition(currentProduct),
+    height: formatMeasurement(currentProduct.height, "cm"),
+    width: formatMeasurement(currentProduct.width, "cm"),
+    depth: formatMeasurement(currentProduct.depth, "cm"),
+    updatedAt: formatDate(currentProduct.updatedAt)
+  };
 
-  const editFields: Array<{ key: keyof ProductEditForm; label: string; Icon: typeof Package; inputMode?: "decimal" | "text" }> = [
-    { key: "name", label: "Nome do produto", Icon: Package },
-    { key: "ean", label: "EAN/GTIN", Icon: Barcode },
-    { key: "unit", label: "Unidade", Icon: ClipboardList },
-    { key: "category", label: "Categoria", Icon: Folder },
-    { key: "costPrice", label: "Custo", Icon: DollarSign, inputMode: "decimal" },
-    { key: "salePrice", label: "Preco de venda", Icon: Tag, inputMode: "decimal" },
-    { key: "weight", label: "Peso liquido (kg)", Icon: Scale, inputMode: "decimal" },
-    { key: "grossWeight", label: "Peso bruto (kg)", Icon: Scale, inputMode: "decimal" },
-    { key: "condition", label: "Condicao", Icon: ShieldCheck },
-    { key: "height", label: "Altura (cm)", Icon: Ruler, inputMode: "decimal" },
-    { key: "width", label: "Largura (cm)", Icon: Ruler, inputMode: "decimal" },
-    { key: "depth", label: "Profundidade (cm)", Icon: Ruler, inputMode: "decimal" }
-  ];
-
-  function updateField(key: keyof ProductEditForm, value: string) {
+  function updateField(key: keyof ProductDetailsEditForm, value: string) {
     setForm((current) => ({ ...current, [key]: value }));
     setError(null);
     setFeedback(null);
@@ -521,63 +506,35 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   }
 
   function buildPayload() {
-    const normalizedName = form.name.trim().replace(/\s+/g, " ");
-    if (normalizedName.length < 2) return { error: "Nome do produto deve ter ao menos 2 caracteres." };
-    if (normalizedName.length > 60) return { error: "O titulo deve ter no maximo 60 caracteres." };
-
-    const decimalFields: Array<[keyof ProductEditForm, string]> = [
-      ["costPrice", "Custo"], ["salePrice", "Preco de venda"], ["weight", "Peso liquido"],
-      ["grossWeight", "Peso bruto"], ["height", "Altura"], ["width", "Largura"], ["depth", "Profundidade"]
-    ];
-    const decimals: Partial<Record<keyof ProductEditForm, number | null>> = {};
-    for (const [key, label] of decimalFields) {
-      const parsed = parseOptionalDecimal(form[key], label);
-      if ("error" in parsed) return { error: parsed.error };
-      decimals[key] = parsed.value;
-    }
-
-    const originalAttributes = currentProduct.attributes && typeof currentProduct.attributes === "object" && !Array.isArray(currentProduct.attributes)
-      ? currentProduct.attributes as Record<string, unknown>
-      : {};
+    const fieldsResult = buildProductDetailsPatch(baselineForm, form);
+    if ("error" in fieldsResult) return fieldsResult;
     const keptImageIds = images.filter((image) => !image.pending).map((image) => image.id);
     const keptImageSet = new Set(keptImageIds);
     const imagesChanged = !arraysEqual(images.map(imageStateKey), baselineImageKeys);
-
-    return {
-      payload: {
-        name: normalizedName,
-        ean: form.ean.trim() || null,
-        unit: form.unit.trim() || null,
-        category: form.category.trim() || null,
-        displayValue: form.costPrice.trim() || null,
-        salePriceDisplay: form.salePrice.trim() || null,
-        weight: decimals.weight ?? null,
-        height: decimals.height ?? null,
-        width: decimals.width ?? null,
-        depth: decimals.depth ?? null,
-        description: form.description,
-        attributes: {
-          ...originalAttributes,
-          condition: form.condition.trim() || null,
-          grossWeight: decimals.grossWeight === null || decimals.grossWeight === undefined ? null : String(decimals.grossWeight)
-        },
-        ...(imagesChanged ? {
-          images: {
-            keptImageIds,
-            removedImageIds: baselineImageIds.filter((imageId) => !keptImageSet.has(imageId)),
-            order: images.map((image) => image.pending
-              ? { kind: "new" as const, url: image.url }
-              : { kind: "existing" as const, id: image.id })
-          }
-        } : {})
-      }
+    const payload = {
+      ...fieldsResult.payload,
+      ...(imagesChanged ? {
+        images: {
+          keptImageIds,
+          removedImageIds: baselineImageIds.filter((imageId) => !keptImageSet.has(imageId)),
+          order: images.map((image) => image.pending
+            ? { kind: "new" as const, url: image.url }
+            : { kind: "existing" as const, id: image.id })
+        }
+      } : {})
     };
+
+    return { payload, changed: Object.keys(payload).length > 0 };
   }
 
   function requestSave() {
     const result = buildPayload();
     if ("error" in result) {
       setError(result.error ?? "Dados invalidos.");
+      return;
+    }
+    if (!result.changed) {
+      setFeedback("Nenhuma alteracao para salvar.");
       return;
     }
     setConfirmingSave(true);
@@ -589,6 +546,11 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     if ("error" in result) {
       setError(result.error ?? "Dados invalidos.");
       setConfirmingSave(false);
+      return;
+    }
+    if (!result.changed) {
+      setConfirmingSave(false);
+      setFeedback("Nenhuma alteracao para salvar.");
       return;
     }
 
@@ -734,15 +696,40 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
           </div>
 
           <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {editing ? editFields.map(({ key, label, Icon, inputMode }) => (
-              <label key={key} className={cardClass}>
-                <span className="flex items-center gap-2 text-xs text-matrix-muted"><Icon className="h-4 w-4 text-matrix-goldDark" />{label}</span>
-                <input className={inputClass} inputMode={inputMode} maxLength={key === "name" ? 60 : undefined} onChange={(event) => updateField(key, event.target.value)} value={form[key]} />
-                {key === "name" ? <span className={`mt-1 block text-right text-xs ${form.name.length >= 55 ? "text-matrix-goldDark" : "text-matrix-muted"}`}>{form.name.length}/60</span> : null}
-              </label>
-            )) : readOnlyDetails.map(({ label, value, Icon, empty }) => (
-              <div key={label} className={cardClass}><div className="flex gap-3"><Icon className="mt-0.5 h-4 w-4 shrink-0 text-matrix-goldDark" /><div className="min-w-0"><p className="text-xs text-matrix-muted">{label}</p><p className="mt-1 break-words text-sm font-semibold">{displayText(value, empty)}</p></div></div></div>
-            ))}
+            {productDetailsFieldDefinitions.map((field) => {
+              const Icon = detailIcons[field.id];
+              if (editing && field.editable) {
+                const formKey = field.id as keyof ProductDetailsEditForm;
+                return (
+                  <label key={field.id} className={cardClass}>
+                    <span className="flex items-center gap-2 text-xs text-matrix-muted"><Icon className="h-4 w-4 text-matrix-goldDark" />{field.label}</span>
+                    {field.id === "condition" ? (
+                      <select className={inputClass} onChange={(event) => updateField("condition", event.target.value)} value={form.condition}>
+                        <option value="">Nao informado</option>
+                        <option value="NEW">Novo</option>
+                        <option value="USED">Usado</option>
+                        <option value="UNSPECIFIED">Nao especificado</option>
+                      </select>
+                    ) : (
+                      <input
+                        className={inputClass}
+                        inputMode={field.inputMode}
+                        maxLength={field.id === "name" ? PRODUCT_DETAILS_NAME_MAX_LENGTH : field.id === "brand" ? 120 : undefined}
+                        onChange={(event) => updateField(formKey, event.target.value)}
+                        placeholder={field.placeholder}
+                        value={form[formKey]}
+                      />
+                    )}
+                    {field.id === "name" ? <span className={`mt-1 block text-right text-xs ${form.name.length >= 55 ? "text-matrix-goldDark" : "text-matrix-muted"}`}>{form.name.length}/{PRODUCT_DETAILS_NAME_MAX_LENGTH}</span> : null}
+                  </label>
+                );
+              }
+              return (
+                <div key={field.id} className={cardClass}>
+                  <div className="flex gap-3"><Icon className="mt-0.5 h-4 w-4 shrink-0 text-matrix-goldDark" /><div className="min-w-0"><p className="text-xs text-matrix-muted">{field.label}</p><p className="mt-1 break-words text-sm font-semibold">{displayText(detailValues[field.id], field.placeholder)}</p></div></div>
+                </div>
+              );
+            })}
           </div>
 
           <section className="mt-3 rounded-lg border border-matrix-border bg-matrix-panel2/65 p-4">
@@ -754,7 +741,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
         <footer className="z-10 flex shrink-0 flex-col gap-3 border-t border-matrix-border bg-matrix-panel px-4 py-3 shadow-[0_-12px_32px_rgb(0_0_0/0.2)] sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <p className="text-xs text-matrix-muted">{editing ? "As mudancas permanecem locais ate a confirmacao do salvamento." : permissionChecked && !canEditProduct ? "Seu usuario pode visualizar, mas nao editar produtos." : "Visualizacao do cadastro local do W Ecommerce."}</p>
           <div className="grid grid-cols-2 gap-2 sm:flex sm:justify-end">
-            {editing ? <><Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">Cancelar</Button><Button disabled={saving || form.name.trim().length < 2 || form.name.trim().length > 60} onClick={requestSave} type="button"><Save className="h-4 w-4" />Salvar alteracoes</Button></> : <><Button onClick={requestClose} type="button" variant="secondary">Fechar</Button>{canEditProduct ? <Button disabled={!detailsLoaded || detailsLoading} onClick={beginEditing} type="button"><Edit3 className="h-4 w-4" />Editar</Button> : null}</>}
+            {editing ? <><Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">Cancelar</Button><Button disabled={saving || !hasPendingChanges || form.name.trim().length < 2 || form.name.trim().length > PRODUCT_DETAILS_NAME_MAX_LENGTH} onClick={requestSave} type="button"><Save className="h-4 w-4" />Salvar alteracoes</Button></> : <><Button onClick={requestClose} type="button" variant="secondary">Fechar</Button>{canEditProduct ? <Button disabled={!detailsLoaded || detailsLoading} onClick={beginEditing} type="button"><Edit3 className="h-4 w-4" />Editar</Button> : null}</>}
           </div>
         </footer>
       </section>
