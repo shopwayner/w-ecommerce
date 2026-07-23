@@ -25,6 +25,15 @@ function requestsImageUpdate(value: unknown) {
   );
 }
 
+function requestsImageDryRun(value: unknown) {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && (value as { dryRun?: unknown }).dryRun === true
+  );
+}
+
 function safeRouteError(error: unknown) {
   const message = error instanceof Error ? error.message : "";
   if (message.includes("Conta Bling nao encontrada")) return { status: 404, message: "Conta Bling nao encontrada." };
@@ -36,6 +45,7 @@ function safeRouteError(error: unknown) {
     return { status: 423, message };
   }
   if (message.toLowerCase().includes("vinculo")) return { status: 409, message: "Revise o vinculo novamente antes de atualizar." };
+  if (message.includes("galeria do Bling mudou")) return { status: 409, message };
   if (message.includes("titulo") || message.includes("fotos")) return { status: 400, message };
   return { status: 503, message: "Nao foi possivel atualizar o produto no Bling agora." };
 }
@@ -48,8 +58,8 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json().catch(() => null);
-  if (requestsImageUpdate(body)) {
-    const imageBlock = getBlingProductPatchBlock("IMAGES_ONLY");
+  if (requestsImageUpdate(body) && !requestsImageDryRun(body)) {
+    const imageBlock = getBlingProductPatchBlock("IMAGES_ONLY_APPEND");
     if (imageBlock) {
       return NextResponse.json(
         { error: imageBlock.message, code: imageBlock.code },
@@ -77,6 +87,26 @@ export async function POST(request: Request) {
       return NextResponse.json(
         { error: capabilityBlock.message, code: capabilityBlock.code },
         { status: 423 }
+      );
+    }
+  }
+
+  if (parsed.data.dryRun) {
+    try {
+      const preview = await blingProductUpdateService.previewImageAppendOnly({
+        userId: auth.context.user.id,
+        organizationId: auth.context.organizationId,
+        connectionId: parsed.data.connectionId,
+        productId: parsed.data.productId,
+        images: parsed.data.fields?.images ?? [],
+        idempotencyKey: parsed.data.idempotencyKey as string
+      });
+      return NextResponse.json({ data: preview });
+    } catch (error) {
+      const safeError = safeRouteError(error);
+      return NextResponse.json(
+        { error: safeError.message, code: "IMAGES_DRY_RUN_BLOCKED" },
+        { status: safeError.status }
       );
     }
   }
@@ -166,7 +196,9 @@ export async function POST(request: Request) {
       confirmation: true,
       status: "SUCCESS",
       riskLevel: "CRITICAL",
-      summary: "Atualizacao de titulo ou fotos no Bling confirmada pelo usuario.",
+      summary: parsed.data.operation === "IMAGES_ONLY_APPEND"
+        ? "Adicao append-only de fotos no Bling confirmada pelo usuario."
+        : "Atualizacao de nome no Bling confirmada pelo usuario.",
       metadata: {
         connectionId: parsed.data.connectionId,
         productId: parsed.data.productId,
@@ -191,7 +223,8 @@ export async function POST(request: Request) {
       idempotencyKey,
       incidentReviewConfirmation: parsed.data.incidentReviewConfirmation,
       confirmedLinkMismatch: parsed.data.confirmedLinkMismatch,
-      linkMismatchConfirmation: parsed.data.linkMismatchConfirmation
+      linkMismatchConfirmation: parsed.data.linkMismatchConfirmation,
+      imageAppendConfirmation: parsed.data.imageAppendConfirmation
     });
 
     await createAuditLog({
@@ -210,7 +243,7 @@ export async function POST(request: Request) {
         productId: parsed.data.productId,
         externalProductIdMasked: result.externalProductIdMasked,
         fields: result.fields,
-        resultCode: result.status,
+        resultCode: result.code ?? result.status,
         replayed: result.replayed === true,
         correlationId,
         idempotencyRef,
@@ -227,6 +260,31 @@ export async function POST(request: Request) {
       },
       request
     });
+
+    if (result.code === "EXTERNAL_UPDATE_INTEGRITY_FAILED") {
+      await createAuditLog({
+        authContext: auth.context,
+        action: "BLING_PRODUCT_UPDATE_INTEGRITY_FAILED",
+        entityType: "Product",
+        entityId: parsed.data.productId,
+        route: "/api/products/bling/update",
+        method: "POST",
+        confirmation: true,
+        status: "FAILED",
+        riskLevel: "CRITICAL",
+        summary: "A verificacao append-only detectou divergencia e bloqueou novas operacoes.",
+        metadata: {
+          connectionId: parsed.data.connectionId,
+          externalProductIdMasked: result.externalProductIdMasked,
+          operation: parsed.data.operation,
+          correlationId,
+          idempotencyRef,
+          patchRequests: result.audit?.patchRequests,
+          verificationGetExecuted: result.audit?.verificationGetExecuted
+        },
+        request
+      });
+    }
 
     const publicResult = { ...result };
     delete publicResult.audit;

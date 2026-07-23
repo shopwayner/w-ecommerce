@@ -7,8 +7,7 @@ export const BLING_PRODUCT_IMAGES_PATCH_BLOCK_MESSAGE =
 
 export const blingProductPatchOperationSchema = z.enum([
   "NAME_ONLY",
-  "IMAGES_ONLY",
-  "NAME_AND_IMAGES"
+  "IMAGES_ONLY_APPEND"
 ]);
 
 export type BlingProductPatchOperation = z.infer<typeof blingProductPatchOperationSchema>;
@@ -44,11 +43,11 @@ export type BlingProductReviewInput = z.infer<typeof blingProductReviewedFieldsS
 
 export function getBlingProductPatchOperation(
   fields: BlingProductReviewInput
-): BlingProductPatchOperation {
+): BlingProductPatchOperation | null {
   if (fields.name !== undefined && fields.images !== undefined) {
-    return "NAME_AND_IMAGES";
+    return null;
   }
-  return fields.images !== undefined ? "IMAGES_ONLY" : "NAME_ONLY";
+  return fields.images !== undefined ? "IMAGES_ONLY_APPEND" : "NAME_ONLY";
 }
 
 export type BlingProductPatchBlock = {
@@ -84,7 +83,9 @@ export const blingProductUpdateRequestSchema = z
     fields: blingProductReviewedFieldsSchema.optional(),
     operation: blingProductPatchOperationSchema.optional(),
     confirmed: z.boolean().optional().default(false),
+    dryRun: z.boolean().optional().default(false),
     idempotencyKey: z.string().trim().min(16).max(200).regex(/^[A-Za-z0-9:_-]+$/).optional(),
+    imageAppendConfirmation: z.string().trim().min(32).max(12_000).optional(),
     confirmIncidentReview: z.boolean().optional().default(false),
     incidentReviewConfirmation: z.string().trim().min(32).max(4_000).optional(),
     confirmedLinkMismatch: z.boolean().optional().default(false),
@@ -92,6 +93,24 @@ export const blingProductUpdateRequestSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (value.dryRun && (
+      value.confirmed
+      || value.operation !== "IMAGES_ONLY_APPEND"
+      || value.fields?.images === undefined
+      || value.fields.name !== undefined
+      || value.idempotencyKey === undefined
+      || value.imageAppendConfirmation !== undefined
+      || value.confirmIncidentReview
+      || value.incidentReviewConfirmation !== undefined
+      || value.confirmedLinkMismatch
+      || value.linkMismatchConfirmation !== undefined
+    )) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["dryRun"],
+        message: "A previa de fotos aceita somente a operacao IMAGES_ONLY_APPEND sem confirmacao."
+      });
+    }
     if (value.confirmed && !value.fields) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -125,6 +144,27 @@ export const blingProductUpdateRequestSchema = z
         message: "Confirme novamente esta atualizacao."
       });
     }
+    if (
+      value.confirmed
+      && value.operation === "IMAGES_ONLY_APPEND"
+      && !value.imageAppendConfirmation
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["imageAppendConfirmation"],
+        message: "Gere uma nova previa das fotos antes de confirmar."
+      });
+    }
+    if (
+      value.imageAppendConfirmation
+      && (!value.confirmed || value.operation !== "IMAGES_ONLY_APPEND")
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["imageAppendConfirmation"],
+        message: "A confirmacao das fotos nao corresponde a esta operacao."
+      });
+    }
     if (value.confirmedLinkMismatch && !value.idempotencyKey) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -143,6 +183,7 @@ export const blingProductUpdateRequestSchema = z
       value.confirmed
       || value.fields !== undefined
       || value.operation !== undefined
+      || value.imageAppendConfirmation !== undefined
       || value.confirmedLinkMismatch
       || value.linkMismatchConfirmation !== undefined
       || value.incidentReviewConfirmation !== undefined
@@ -177,7 +218,7 @@ export const blingProductUpdateRequestSchema = z
         message: "A confirmacao nao corresponde a esta operacao."
       });
     }
-    if (!value.confirmed && value.operation !== undefined) {
+    if (!value.confirmed && !value.dryRun && value.operation !== undefined) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["operation"],
@@ -191,9 +232,10 @@ export const blingProductUpdateRequestSchema = z
         message: "Revise o vinculo antes de editar o produto."
       });
     }
-    if (!value.confirmed && !value.confirmedLinkMismatch && !value.confirmIncidentReview && (
+    if (!value.confirmed && !value.dryRun && !value.confirmedLinkMismatch && !value.confirmIncidentReview && (
       value.fields !== undefined
       || value.idempotencyKey !== undefined
+      || value.imageAppendConfirmation !== undefined
       || value.incidentReviewConfirmation !== undefined
       || value.linkMismatchConfirmation !== undefined
     )) {

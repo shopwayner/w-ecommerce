@@ -22,7 +22,10 @@ import {
   compareBlingProductValues,
   compareBlingProductIntegrity,
   createBlingProductIncidentReviewConfirmation,
+  createBlingProductImageAppendConfirmation,
   createBlingProductLinkMismatchConfirmation,
+  createBlingProductProtectedFieldsFingerprint,
+  createBlingProductRemoteGalleryFingerprint,
   createBlingProductRestorationDryRun,
   createBlingProductUpdateDryRun,
   describeBlingProductUpdateFailure,
@@ -36,6 +39,7 @@ import {
   recordConfirmedBlingMappingSync,
   validateBlingProductImageAccessibility,
   verifyBlingProductIncidentReviewConfirmation,
+  verifyBlingProductImageAppendConfirmation,
   verifyBlingProductLinkMismatchConfirmation,
   type BlingProductMappingSnapshot,
   type BlingProductRestorationTarget,
@@ -279,7 +283,10 @@ test("rejects photos that are not part of the reviewed local gallery", () => {
   );
 });
 
-test("builds a strict partial payload with only the reviewed name and images", () => {
+test("builds the complete append-only gallery payload while the capability stays disabled", () => {
+  const previousImagesFlag = process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED;
+  process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED = "false";
+  try {
   const reviewed = normalizeBlingProductReview(
     {
       name: "Produto Matrix revisado",
@@ -287,26 +294,37 @@ test("builds a strict partial payload with only the reviewed name and images", (
     },
     localProduct
   );
-  const payload = buildBlingProductPatchPayload(
+  const dryRun = createBlingProductUpdateDryRun({
+    externalProductId: "123456789",
+    remoteValue: remoteProduct,
     reviewed,
-    remoteProduct,
-    BLING_PRODUCT_UPDATE_FIELDS,
-    { confirmed: true }
-  );
-
-  assert.deepEqual(payload, {
+    fields: BLING_PRODUCT_UPDATE_FIELDS
+  });
+  assert.deepEqual(dryRun.payloadPreview, {
     nome: "Produto Matrix revisado",
     midia: {
       video: { url: "https://www.youtube.com/watch?v=matrix" },
       imagens: {
         imagensURL: [
+          { link: "https://cdn.example.com/antiga.jpg" },
           { link: localProduct.images[1] },
           { link: localProduct.images[0] }
         ]
       }
     }
   });
-  assert.deepEqual(Object.keys(payload).sort(), ["midia", "nome"]);
+  assert.equal(dryRun.imageWriteContract, "COMPLETE_GALLERY_PATCH");
+  assert.equal(dryRun.remoteGalleryComplete, true);
+  assert.equal(dryRun.canUpdate, false);
+  assert.equal(dryRun.safeToExecute, false);
+  assert.deepEqual(
+    buildBlingProductPatchPayload(reviewed, remoteProduct, BLING_PRODUCT_UPDATE_FIELDS, { confirmed: true }),
+    dryRun.payloadPreview
+  );
+  } finally {
+    if (previousImagesFlag === undefined) delete process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED;
+    else process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED = previousImagesFlag;
+  }
 });
 
 test("omits every remote field when no reviewed value changed", () => {
@@ -364,22 +382,28 @@ test("detects title and photos independently and keeps the official image shape"
   );
   assert.deepEqual(titlePayload, { nome: "Titulo revisado" });
 
+  const oneRemotePhoto = matchingRemoteProduct({
+    midia: {
+      video: remoteProduct.data.midia.video,
+      imagens: { externas: [{ link: localProduct.images[0] }], internas: [] }
+    }
+  });
   const photosOnly = normalizeBlingProductReview(
     { name: localProduct.name, images: [localProduct.images[1]] },
     localProduct
   );
-  assert.deepEqual(compareBlingProductValues(photosOnly, matchingRemoteProduct()), ["images"]);
-  const photosPayload = buildBlingProductPatchPayload(
-    photosOnly,
-    matchingRemoteProduct(),
-    ["images"],
-    { confirmed: true }
-  );
-  assert.deepEqual(Object.keys(photosPayload), ["midia"]);
-  assert.deepEqual(photosPayload.midia, {
-    video: { url: "https://www.youtube.com/watch?v=matrix" },
-    imagens: { imagensURL: [{ link: localProduct.images[1] }] }
+  assert.deepEqual(compareBlingProductValues(photosOnly, oneRemotePhoto), ["images"]);
+  const photosDryRun = createBlingProductUpdateDryRun({
+    externalProductId: "123456789",
+    remoteValue: oneRemotePhoto,
+    reviewed: photosOnly,
+    fields: ["images"]
   });
+  assert.deepEqual(photosDryRun.payloadPreview?.midia, {
+    video: { url: "https://www.youtube.com/watch?v=matrix" },
+    imagens: { imagensURL: localProduct.images.map((link) => ({ link })) }
+  });
+  assert.equal(photosDryRun.safeToExecute, false);
 
   const unchanged = normalizeBlingProductReview(
     { name: localProduct.name, images: localProduct.images },
@@ -389,7 +413,12 @@ test("detects title and photos independently and keeps the official image shape"
 });
 
 test("whitelists only nome and midia for every controlled partial change", () => {
-  const remote = matchingRemoteProduct();
+  const remote = matchingRemoteProduct({
+    midia: {
+      video: remoteProduct.data.midia.video,
+      imagens: { externas: [{ link: localProduct.images[0] }], internas: [] }
+    }
+  });
   const groups = [
     {
       fields: ["name"] as const,
@@ -398,18 +427,27 @@ test("whitelists only nome and midia for every controlled partial change", () =>
     },
     {
       fields: ["name", "images"] as const,
-      reviewed: { name: "Titulo revisado", images: localProduct.images },
+      reviewed: { name: "Titulo revisado", images: [localProduct.images[1]] },
       expectedKeys: ["midia", "nome"]
     },
     {
       fields: ["images"] as const,
-      reviewed: { images: localProduct.images },
+      reviewed: { images: [localProduct.images[1]] },
       expectedKeys: ["midia"]
     }
   ];
 
   for (const group of groups) {
-    const payload = buildBlingProductPatchPayload(group.reviewed, remote, group.fields, { confirmed: true });
+    const dryRun = createBlingProductUpdateDryRun({
+      externalProductId: "123456789",
+      remoteValue: remote,
+      reviewed: group.reviewed,
+      fields: group.fields
+    });
+    const includesImages = group.fields.some((field) => field === "images");
+    const payload = includesImages
+      ? dryRun.payloadPreview ?? {}
+      : buildBlingProductPatchPayload(group.reviewed, remote, group.fields, { confirmed: true });
     assert.deepEqual(Object.keys(payload).sort(), group.expectedKeys);
     for (const forbidden of [
       "codigo", "marca", "preco", "fornecedor", "estoque", "tipo", "situacao", "formato",
@@ -418,10 +456,20 @@ test("whitelists only nome and midia for every controlled partial change", () =>
     ]) {
       assert.equal(forbidden in payload, false, forbidden);
     }
+    if (includesImages) {
+      assert.equal(dryRun.safeToExecute, false);
+      assert.deepEqual(
+        buildBlingProductPatchPayload(group.reviewed, remote, group.fields, { confirmed: true }),
+        dryRun.payloadPreview
+      );
+    }
   }
 });
 
-test("returns a sanitized dry-run without exposing the partial payload", () => {
+test("returns a sanitized append-only dry-run while the image capability is disabled", () => {
+  const previousImagesFlag = process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED;
+  process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED = "false";
+  try {
   const reviewed = { name: "Titulo revisado", images: localProduct.images };
   const dryRun = createBlingProductUpdateDryRun({
     externalProductId: "123456789",
@@ -430,18 +478,63 @@ test("returns a sanitized dry-run without exposing the partial payload", () => {
     fields: ["name", "images"]
   });
 
-  assert.equal(dryRun.canUpdate, true);
-  assert.equal(dryRun.safeToExecute, true);
+  assert.equal(dryRun.appendPlanValid, true);
+  assert.equal(dryRun.canUpdate, false);
+  assert.equal(dryRun.safeToExecute, false);
   assert.deepEqual(dryRun.changedFields, ["name", "images"]);
   assert.equal(dryRun.remoteImageCount, 1);
-  assert.equal(dryRun.finalImageCount, 2);
+  assert.equal(dryRun.selectedImageCount, 2);
+  assert.equal(dryRun.newImageCount, 2);
+  assert.equal(dryRun.duplicateImageCount, 0);
+  assert.equal(dryRun.finalImageCount, 3);
   assert.equal(dryRun.externalProductIdMasked, "***6789");
-  assert.equal("payload" in dryRun, false);
+  assert.equal(dryRun.payload, undefined);
+  assert.ok(dryRun.payloadPreview?.midia);
   assert.deepEqual(dryRun.payloadKeys, ["midia", "nome"]);
+  assert.deepEqual(dryRun.ambiguousFields, []);
+  assert.equal(dryRun.imageWriteContract, "COMPLETE_GALLERY_PATCH");
+  assert.equal(dryRun.remoteGalleryComplete, true);
   assert.ok(dryRun.preservedFields.includes("preco"));
   assert.ok(dryRun.preservedFields.includes("fornecedor"));
   assert.ok(dryRun.preservedFields.includes("estoque"));
   assert.doesNotMatch(JSON.stringify(dryRun), /Produto antigo|Marca antiga|999\.99|777\.77/);
+  } finally {
+    if (previousImagesFlag === undefined) delete process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED;
+    else process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED = previousImagesFlag;
+  }
+});
+
+test("treats imagemURL as a principal alias without hiding real remote duplicates", () => {
+  const aliasedRemote = {
+    data: {
+      ...structuredClone(remoteProduct).data,
+      imagemURL: "https://cdn.example.com/antiga.jpg"
+    }
+  };
+  const aliasedDryRun = createBlingProductUpdateDryRun({
+    externalProductId: "123456789",
+    remoteValue: aliasedRemote,
+    reviewed: { images: [localProduct.images[0]] },
+    fields: ["images"]
+  });
+  assert.equal(aliasedDryRun.remoteImageCount, 1);
+  assert.equal(aliasedDryRun.appendPlanValid, true);
+
+  const duplicatedRemote = structuredClone(aliasedRemote);
+  duplicatedRemote.data.midia.imagens.externas.push({
+    link: "https://cdn.example.com/antiga.jpg"
+  });
+  const duplicatedDryRun = createBlingProductUpdateDryRun({
+    externalProductId: "123456789",
+    remoteValue: duplicatedRemote,
+    reviewed: { images: [localProduct.images[0]] },
+    fields: ["images"]
+  });
+  assert.equal(duplicatedDryRun.remoteImageCount, 2);
+  assert.equal(duplicatedDryRun.appendPlanValid, false);
+  assert.ok(duplicatedDryRun.missingFields.includes(
+    "midia.imagens.appendOnly.REMOTE_GALLERY_HAS_DUPLICATES"
+  ));
 });
 
 test("does not require or replay commercial state for a name-only patch", () => {
@@ -627,35 +720,72 @@ test("uses only remote state to complete the integral payload", () => {
   );
 });
 
-test("requires the remote video only when photos are included in the patch", () => {
-  const withoutVideo = matchingRemoteProduct({
-    midia: { imagens: { externas: [], internas: [] } }
+test("preserves a valid remote video and omits absent video from image-only payloads", () => {
+  const validVideo = matchingRemoteProduct({
+    midia: {
+      video: remoteProduct.data.midia.video,
+      imagens: { externas: [], internas: [] }
+    }
   });
   assert.deepEqual(
-    buildBlingProductPatchPayload({ name: "Titulo revisado" }, withoutVideo, ["name"], { confirmed: true }),
-    { nome: "Titulo revisado" }
+    buildBlingProductPatchPayload(
+      { images: localProduct.images },
+      validVideo,
+      ["images"],
+      { confirmed: true }
+    ),
+    {
+      midia: {
+        video: remoteProduct.data.midia.video,
+        imagens: {
+          imagensURL: localProduct.images.map((link) => ({ link }))
+        }
+      }
+    }
   );
-  assert.throws(
-    () => buildBlingProductPatchPayload(
+
+  for (const video of [{ url: "" }, { url: null }]) {
+    const withoutVideo = matchingRemoteProduct({
+      midia: {
+        video,
+        imagens: { externas: [], internas: [] }
+      }
+    });
+    const payload = buildBlingProductPatchPayload(
       { images: localProduct.images },
       withoutVideo,
       ["images"],
       { confirmed: true }
-    ),
-    /Revise os campos/
-  );
+    );
+    assert.deepEqual(payload, {
+      midia: {
+        imagens: {
+          imagensURL: localProduct.images.map((link) => ({ link }))
+        }
+      }
+    });
+    assert.deepEqual(Object.keys(payload), ["midia"]);
+    assert.deepEqual(Object.keys(payload.midia ?? {}), ["imagens"]);
+  }
 });
 
 test("does not require or resend the remote title when only photos change", () => {
-  const remoteWithoutName = matchingRemoteProduct({ nome: undefined });
-  const payload = buildBlingProductPatchPayload(
-    { images: localProduct.images },
-    remoteWithoutName,
-    ["images"],
-    { confirmed: true }
-  );
-  assert.deepEqual(Object.keys(payload), ["midia"]);
-  assert.equal("nome" in payload, false);
+  const remoteWithoutName = matchingRemoteProduct({
+    nome: undefined,
+    midia: {
+      video: remoteProduct.data.midia.video,
+      imagens: { externas: [], internas: [] }
+    }
+  });
+  const dryRun = createBlingProductUpdateDryRun({
+    externalProductId: "123456789",
+    remoteValue: remoteWithoutName,
+    reviewed: { images: localProduct.images },
+    fields: ["images"]
+  });
+  assert.deepEqual(Object.keys(dryRun.payloadPreview ?? {}), ["midia"]);
+  assert.equal("nome" in (dryRun.payloadPreview ?? {}), false);
+  assert.equal(dryRun.safeToExecute, false);
 });
 
 test("validates selected images before PATCH without following redirects", async () => {
@@ -711,7 +841,7 @@ test("preserves five remote photos when the user changes only the title", () => 
   assert.equal("midia" in payload, false);
 });
 
-test("accepts an explicit merged gallery and preserves all remote photos", () => {
+test("accepts only selected local additions and plans the complete remote-first gallery", () => {
   const localImage = "https://cdn.example.com/local-sensor.jpg";
   const remoteImages = Array.from(
     { length: 5 },
@@ -728,38 +858,52 @@ test("accepts an explicit merged gallery and preserves all remote photos", () =>
     }
   });
   const reviewed = normalizeBlingProductReview(
-    { images: [...remoteImages, localImage] },
+    { images: [localImage] },
     local,
     remote
   );
 
   assert.deepEqual(compareBlingProductValues(reviewed, remote), ["images"]);
-  const payload = buildBlingProductPatchPayload(reviewed, remote, ["images"], { confirmed: true });
+  const dryRun = createBlingProductUpdateDryRun({
+    externalProductId: "123456789",
+    remoteValue: remote,
+    reviewed,
+    fields: ["images"]
+  });
   assert.deepEqual(
-    (payload.midia as { imagens: { imagensURL: Array<{ link: string }> } }).imagens.imagensURL,
+    dryRun.payloadPreview?.midia?.imagens.imagensURL,
     [...remoteImages, localImage].map((link) => ({ link }))
   );
+  assert.equal(dryRun.remoteOrderPreserved, true);
+  assert.equal(dryRun.remotePrincipalPreserved, true);
+  assert.equal(dryRun.safeToExecute, false);
 });
 
-test("allows an explicit remote photo removal but rejects an unknown photo", () => {
-  const remote = matchingRemoteProduct();
+test("never offers remote photo removal and still rejects an unknown photo", () => {
+  const remote = matchingRemoteProduct({
+    midia: {
+      video: remoteProduct.data.midia.video,
+      imagens: { externas: [{ link: localProduct.images[0] }], internas: [] }
+    }
+  });
   const reviewed = normalizeBlingProductReview(
     { images: [localProduct.images[1]] },
     localProduct,
     remote
   );
   assert.deepEqual(compareBlingProductValues(reviewed, remote), ["images"]);
-  assert.throws(
-    () => buildBlingProductPatchPayload(reviewed, remote, ["images"], { confirmed: false }),
-    /Revise os campos/
-  );
-  const payload = buildBlingProductPatchPayload(reviewed, remote, ["images"], { confirmed: true });
-  assert.deepEqual(payload, {
-    midia: {
-      video: remoteProduct.data.midia.video,
-      imagens: { imagensURL: [{ link: localProduct.images[1] }] }
-    }
+  const dryRun = createBlingProductUpdateDryRun({
+    externalProductId: "123456789",
+    remoteValue: remote,
+    reviewed,
+    fields: ["images"]
   });
+  assert.deepEqual(dryRun.finalImages, localProduct.images);
+  assert.equal(dryRun.finalImageCount >= dryRun.remoteImageCount, true);
+  assert.deepEqual(
+    buildBlingProductPatchPayload(reviewed, remote, ["images"], { confirmed: true }),
+    dryRun.payloadPreview
+  );
   assert.throws(
     () => normalizeBlingProductReview(
       { images: ["https://cdn.example.com/not-reviewed.jpg"] },
@@ -951,9 +1095,9 @@ test("rejects every request key outside the strict single-product contract", () 
     connectionId: "connection-1",
     productId: "product-1",
     confirmed: true,
-    operation: "NAME_AND_IMAGES" as const,
+    operation: "NAME_ONLY" as const,
     idempotencyKey: "request_1234567890",
-    fields: { name: "Produto", images: [localProduct.images[0]] }
+    fields: { name: "Produto" }
   };
   assert.equal(blingProductUpdateRequestSchema.safeParse(baseRequest).success, true);
 
@@ -1027,6 +1171,64 @@ test("requires reviewed fields and idempotency only for a confirmed update", () 
       fields: { name: "Produto revisado" }
     }).success,
     true
+  );
+  assert.equal(
+    blingProductUpdateRequestSchema.safeParse({
+      connectionId: "connection-1",
+      productId: "product-1",
+      operation: "IMAGES_ONLY_APPEND",
+      fields: { images: [localProduct.images[0]] },
+      confirmed: false,
+      dryRun: true
+    }).success,
+    false
+  );
+  assert.equal(
+    blingProductUpdateRequestSchema.safeParse({
+      connectionId: "connection-1",
+      productId: "product-1",
+      operation: "IMAGES_ONLY_APPEND",
+      fields: { images: [localProduct.images[0]] },
+      confirmed: false,
+      dryRun: true,
+      idempotencyKey: "preview_1234567890"
+    }).success,
+    true
+  );
+  assert.equal(
+    blingProductUpdateRequestSchema.safeParse({
+      connectionId: "connection-1",
+      productId: "product-1",
+      operation: "IMAGES_ONLY_APPEND",
+      fields: { name: "Produto", images: [localProduct.images[0]] },
+      confirmed: false,
+      dryRun: true,
+      idempotencyKey: "preview_1234567890"
+    }).success,
+    false
+  );
+  assert.equal(
+    blingProductUpdateRequestSchema.safeParse({
+      connectionId: "connection-1",
+      productId: "product-1",
+      operation: "IMAGES_ONLY_APPEND",
+      fields: { images: [localProduct.images[0]] },
+      confirmed: true,
+      dryRun: true,
+      idempotencyKey: "request_1234567890"
+    }).success,
+    false
+  );
+  assert.equal(
+    blingProductUpdateRequestSchema.safeParse({
+      connectionId: "connection-1",
+      productId: "product-1",
+      operation: "IMAGES_ONLY_APPEND",
+      fields: { images: [localProduct.images[0]] },
+      confirmed: true,
+      idempotencyKey: "request_1234567890"
+    }).success,
+    false
   );
 });
 
@@ -1130,7 +1332,7 @@ test("accepts incident review only as a separate NAME_ONLY confirmation stage", 
   assert.equal(blingProductUpdateRequestSchema.safeParse({
     ...base,
     confirmed: true,
-    operation: "IMAGES_ONLY",
+    operation: "IMAGES_ONLY_APPEND",
     idempotencyKey,
     incidentReviewConfirmation,
     fields: { images: ["https://cdn.example.com/photo.jpg"] }
@@ -1186,6 +1388,114 @@ test("binds an incident review grant to NAME_ONLY, one user and a ten-minute win
     if (previousKey === undefined) delete process.env.APP_ENCRYPTION_KEY;
     else process.env.APP_ENCRYPTION_KEY = previousKey;
   }
+});
+
+test("binds an image append preview to one scope, idempotency key and ordered selection", () => {
+  const previousKey = process.env.APP_ENCRYPTION_KEY;
+  process.env.APP_ENCRYPTION_KEY = "cd".repeat(32);
+  try {
+    const now = new Date("2026-07-23T12:00:00.000Z");
+    const selectedImages = [
+      "https://cdn.example.com/photo-b.jpg",
+      "https://cdn.example.com/photo-c.jpg"
+    ];
+    const scope = {
+      userId: "user-1",
+      organizationId: "organization-1",
+      connectionId: "connection-1",
+      productId: "product-1",
+      externalProductId: "123456789",
+      idempotencyKey: "append_request_1234567890",
+      selectedImages,
+      protectedFieldsFingerprint: createBlingProductProtectedFieldsFingerprint(remoteProduct),
+      remoteGalleryFingerprint: createBlingProductRemoteGalleryFingerprint(remoteProduct)
+    };
+    const confirmation = createBlingProductImageAppendConfirmation(scope, now);
+    const verified = verifyBlingProductImageAppendConfirmation(
+      confirmation,
+      {
+        userId: scope.userId,
+        organizationId: scope.organizationId,
+        connectionId: scope.connectionId,
+        productId: scope.productId,
+        idempotencyKey: scope.idempotencyKey,
+        selectedImages
+      },
+      new Date(now.getTime() + 60_000)
+    );
+
+    assert.equal(verified.operation, "IMAGES_ONLY_APPEND");
+    assert.equal(verified.externalProductId, scope.externalProductId);
+    assert.deepEqual(verified.selectedImages, selectedImages);
+    assert.throws(
+      () => verifyBlingProductImageAppendConfirmation(
+        confirmation,
+        {
+          userId: scope.userId,
+          organizationId: scope.organizationId,
+          connectionId: scope.connectionId,
+          productId: scope.productId,
+          idempotencyKey: scope.idempotencyKey,
+          selectedImages: [...selectedImages].reverse()
+        },
+        new Date(now.getTime() + 60_000)
+      ),
+      /galeria do Bling mudou/
+    );
+    assert.throws(
+      () => verifyBlingProductImageAppendConfirmation(
+        confirmation,
+        {
+          userId: "another-user",
+          organizationId: scope.organizationId,
+          connectionId: scope.connectionId,
+          productId: scope.productId,
+          idempotencyKey: scope.idempotencyKey,
+          selectedImages
+        },
+        new Date(now.getTime() + 60_000)
+      ),
+      /galeria do Bling mudou/
+    );
+    assert.throws(
+      () => verifyBlingProductImageAppendConfirmation(
+        confirmation,
+        {
+          userId: scope.userId,
+          organizationId: scope.organizationId,
+          connectionId: scope.connectionId,
+          productId: scope.productId,
+          idempotencyKey: scope.idempotencyKey,
+          selectedImages
+        },
+        new Date(now.getTime() + 10 * 60_000 + 1)
+      ),
+      /galeria do Bling mudou/
+    );
+  } finally {
+    if (previousKey === undefined) delete process.env.APP_ENCRYPTION_KEY;
+    else process.env.APP_ENCRYPTION_KEY = previousKey;
+  }
+});
+
+test("separates the protected-field fingerprint from the remote gallery fingerprint", () => {
+  const imageChanged = structuredClone(remoteProduct);
+  imageChanged.data.midia.imagens.externas.push({ link: "https://cdn.example.com/new.jpg" });
+  const protectedChanged = structuredClone(remoteProduct);
+  protectedChanged.data.preco = 1_234.56;
+
+  assert.equal(
+    createBlingProductProtectedFieldsFingerprint(remoteProduct),
+    createBlingProductProtectedFieldsFingerprint(imageChanged)
+  );
+  assert.notEqual(
+    createBlingProductRemoteGalleryFingerprint(remoteProduct),
+    createBlingProductRemoteGalleryFingerprint(imageChanged)
+  );
+  assert.notEqual(
+    createBlingProductProtectedFieldsFingerprint(remoteProduct),
+    createBlingProductProtectedFieldsFingerprint(protectedChanged)
+  );
 });
 
 test("binds a link mismatch confirmation to one user and operation", () => {
@@ -1271,12 +1581,15 @@ test("accepts a GET after PATCH when only the requested fields changed", () => {
   ];
 
   for (const scenario of scenarios) {
-    const payload = buildBlingProductPatchPayload(
-      scenario.reviewed,
-      remoteProduct,
-      scenario.fields,
-      { confirmed: true }
-    );
+    const dryRun = createBlingProductUpdateDryRun({
+      externalProductId: "123456789",
+      remoteValue: remoteProduct,
+      reviewed: scenario.reviewed,
+      fields: scenario.fields
+    });
+    const payload = scenario.fields.some((field) => field === "images")
+      ? dryRun.payloadPreview ?? {}
+      : buildBlingProductPatchPayload(scenario.reviewed, remoteProduct, scenario.fields, { confirmed: true });
     const responseMedia = scenario.fields.some((field) => field === "images")
       ? {
           video: remoteProduct.data.midia.video,
@@ -1303,12 +1616,12 @@ test("accepts a GET after PATCH when only the requested fields changed", () => {
 });
 
 test("detects integrity loss after PATCH even when the reviewed photos match", () => {
-  const payload = buildBlingProductPatchPayload(
-    { images: localProduct.images },
-    remoteProduct,
-    ["images"],
-    { confirmed: true }
-  );
+  const payload = createBlingProductUpdateDryRun({
+    externalProductId: "123456789",
+    remoteValue: remoteProduct,
+    reviewed: { images: localProduct.images },
+    fields: ["images"]
+  }).payloadPreview ?? {};
   const after = {
     data: {
       ...remoteProduct.data,
@@ -1756,7 +2069,7 @@ test("keeps preview read-only and performs one PATCH followed by one verificatio
   assert.match(source, /prepared\.replay[\s\S]*replayed: true/);
   assert.match(source, /stage = "VERIFY_GET"[\s\S]*verificationGetExecuted = true/);
   assert.match(source, /Nome atualizado no Bling com sucesso\./);
-  assert.match(source, /Fotos atualizadas no Bling com sucesso\./);
+  assert.match(source, /Fotos adicionadas ao Bling com sucesso\./);
   assert.match(source, /Produto atualizado no Bling com sucesso\./);
   assert.doesNotMatch(source, /MarketplaceCategoryMapping/);
 });
@@ -1771,6 +2084,39 @@ test("never retries a mutating Bling request automatically after authorization f
     /response\.status === 401[\s\S]*allowRefresh && options\.method === "GET"/
   );
   assert.doesNotMatch(source, /allowRefresh\) \{[\s\S]*return this\.performRequest<T>\(options, true/);
+});
+
+test("rechecks the approved gallery and records a sanitized snapshot before the single image PATCH", () => {
+  const serviceSource = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-product-update-service.ts"),
+    "utf8"
+  );
+  const clientSource = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-api-client.ts"),
+    "utf8"
+  );
+  const updateStart = serviceSource.indexOf("  async updateOne(input:");
+  const updateSource = serviceSource.slice(updateStart);
+  const imageConfirmation = updateSource.indexOf("verifyBlingProductImageAppendConfirmation");
+  const jobCreation = updateSource.indexOf("createUpdateJob(input)");
+  const preconditionGet = updateSource.indexOf("const freshPayload = await blingApiClient.requestReadOnly");
+  const snapshot = updateSource.indexOf("recordImageAppendJobSnapshot");
+  const patch = updateSource.indexOf("blingApiClient.requestWithoutRefresh");
+  const verification = updateSource.indexOf("verifyUpdatedBlingProduct");
+
+  assert.ok(imageConfirmation >= 0 && imageConfirmation < jobCreation);
+  assert.ok(preconditionGet > jobCreation && snapshot > preconditionGet && patch > snapshot);
+  assert.ok(verification > patch);
+  assert.equal((updateSource.match(/blingApiClient\.requestWithoutRefresh/g) ?? []).length, 1);
+  assert.equal((updateSource.match(/method: "PATCH"/g) ?? []).length, 1);
+  assert.equal((updateSource.match(/method: "PUT"/g) ?? []).length, 0);
+  assert.match(updateSource, /protectedFieldsFingerprint/);
+  assert.match(updateSource, /remoteGalleryFingerprint/);
+  assert.doesNotMatch(updateSource, /MercadoLivre|Amazon/);
+  assert.match(
+    clientSource,
+    /requestWithoutRefresh<T>[\s\S]*performRequest<T>\(options, false, false\)/
+  );
 });
 
 test("releases name updates while blocking image operations before a job or PATCH", async () => {
@@ -1819,14 +2165,18 @@ test("releases name updates while blocking image operations before a job or PATC
       imagesPatchEnabled: false
     });
     assert.equal(getBlingProductPatchBlock("NAME_ONLY"), null);
-    assert.deepEqual(getBlingProductPatchBlock("IMAGES_ONLY"), {
+    assert.deepEqual(getBlingProductPatchBlock("IMAGES_ONLY_APPEND"), {
       code: "IMAGES_PATCH_BLOCKED",
       message: BLING_PRODUCT_IMAGES_PATCH_BLOCK_MESSAGE
     });
-    assert.deepEqual(getBlingProductPatchBlock("NAME_AND_IMAGES"), {
-      code: "IMAGES_PATCH_BLOCKED",
-      message: BLING_PRODUCT_IMAGES_PATCH_BLOCK_MESSAGE
+
+    process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED = "true";
+    assert.deepEqual(getBlingProductPatchCapabilities(), {
+      namePatchEnabled: true,
+      imagesPatchEnabled: true
     });
+    assert.equal(getBlingProductPatchBlock("IMAGES_ONLY_APPEND"), null);
+    process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED = "false";
 
     const blocked = await blingProductUpdateService.updateOne({
       userId: "user-never-loaded",
@@ -1834,7 +2184,7 @@ test("releases name updates while blocking image operations before a job or PATC
       connectionId: "connection-never-loaded",
       productId: "product-never-loaded",
       fields: { images: ["https://cdn.example.com/photo.jpg"] },
-      operation: "IMAGES_ONLY",
+      operation: "IMAGES_ONLY_APPEND",
       idempotencyKey: "blocked_request_123456"
     });
     assert.equal(blocked.code, "IMAGES_PATCH_BLOCKED");
@@ -1862,13 +2212,37 @@ test("fails closed when selective patch flags are absent", () => {
       imagesPatchEnabled: false
     });
     assert.equal(getBlingProductPatchBlock("NAME_ONLY")?.code, "NAME_PATCH_BLOCKED");
-    assert.equal(getBlingProductPatchBlock("IMAGES_ONLY")?.code, "IMAGES_PATCH_BLOCKED");
+    assert.equal(getBlingProductPatchBlock("IMAGES_ONLY_APPEND")?.code, "IMAGES_PATCH_BLOCKED");
   } finally {
     if (previousNameFlag === undefined) delete process.env.BLING_PRODUCT_NAME_PATCH_ENABLED;
     else process.env.BLING_PRODUCT_NAME_PATCH_ENABLED = previousNameFlag;
     if (previousImagesFlag === undefined) delete process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED;
     else process.env.BLING_PRODUCT_IMAGES_PATCH_ENABLED = previousImagesFlag;
   }
+});
+
+test("keeps the append-only preview read-only and outside the job and audit paths", () => {
+  const routeSource = readFileSync(
+    path.join(process.cwd(), "app/api/products/bling/update/route.ts"),
+    "utf8"
+  );
+  const serviceSource = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-product-update-service.ts"),
+    "utf8"
+  );
+  const dryRunStart = routeSource.indexOf("if (parsed.data.dryRun)");
+  const correlationStart = routeSource.indexOf("const correlationId");
+  const dryRunRoute = routeSource.slice(dryRunStart, correlationStart);
+  const previewStart = serviceSource.indexOf("  async previewImageAppendOnly(input:");
+  const previewEnd = serviceSource.indexOf("  async confirmIncidentReview", previewStart);
+  const previewService = serviceSource.slice(previewStart, previewEnd);
+
+  assert.ok(dryRunStart >= 0 && dryRunStart < correlationStart);
+  assert.match(dryRunRoute, /previewImageAppendOnly/);
+  assert.doesNotMatch(dryRunRoute, /createAuditLog|logDangerousAction|updateOne/);
+  assert.match(previewService, /readOnly: true/);
+  assert.match(previewService, /validateBlingProductImageAccessibility/);
+  assert.doesNotMatch(previewService, /createUpdateJob|method: "PATCH"|method: "PUT"|prisma\.[A-Za-z]+\.(create|update|delete)/);
 });
 
 test("binds the declared patch operation to the exact reviewed fields", () => {
@@ -1885,14 +2259,15 @@ test("binds the declared patch operation to the exact reviewed fields", () => {
   }).success, true);
   assert.equal(blingProductUpdateRequestSchema.safeParse({
     ...base,
-    operation: "IMAGES_ONLY",
-    fields: { images: ["https://cdn.example.com/photo.jpg"] }
+    operation: "IMAGES_ONLY_APPEND",
+    fields: { images: ["https://cdn.example.com/photo.jpg"] },
+    imageAppendConfirmation: "x".repeat(32)
   }).success, true);
   assert.equal(blingProductUpdateRequestSchema.safeParse({
     ...base,
-    operation: "NAME_AND_IMAGES",
+    operation: "IMAGES_ONLY_APPEND",
     fields: { name: "Produto revisado", images: ["https://cdn.example.com/photo.jpg"] }
-  }).success, true);
+  }).success, false);
   assert.equal(blingProductUpdateRequestSchema.safeParse({
     ...base,
     operation: "NAME_ONLY",
@@ -1900,7 +2275,7 @@ test("binds the declared patch operation to the exact reviewed fields", () => {
   }).success, false);
   assert.equal(blingProductUpdateRequestSchema.safeParse({
     ...base,
-    operation: "NAME_AND_IMAGES",
+    operation: "IMAGES_ONLY_APPEND",
     fields: { name: "Produto revisado" }
   }).success, false);
 });
@@ -2037,14 +2412,19 @@ test("renders only the simplified single-product modal contract", () => {
   assert.match(pageSource, /blingUpdateBusy,?\s*\|\|\s*blingUpdateRequestInFlight\.current/);
   assert.equal((pageSource.match(/method: "POST"/g) ?? []).filter(Boolean).length > 0, true);
   assert.match(modalSource, /Atualizar produto no Bling/);
-  assert.match(modalSource, /Atualizar no Bling/);
-  assert.match(modalSource, /Atualizar nome no Bling/);
+  assert.match(modalSource, /Adicionar fotos ao Bling/);
+  assert.match(modalSource, /Confirmar e adicionar fotos/);
+  assert.match(
+    modalSource,
+    /Este produto ultrapassaria o limite de 13 imagens\./,
+  );
+  assert.match(modalSource, /Atualizar somente nome/);
   assert.match(modalSource, /Somente o nome será atualizado\./);
   assert.match(modalSource, /As fotos já estão atualizadas no Bling\./);
   assert.match(modalSource, /As fotos não serão enviadas nesta atualização\./);
-  assert.match(modalSource, /Atualizando produto\.\.\./);
-  assert.match(modalSource, /Definir como foto principal/);
-  assert.match(modalSource, /Remover foto/);
+  assert.match(modalSource, /Atualizando nome\.\.\./);
+  assert.match(modalSource, /Adicionando fotos\.\.\./);
+  assert.doesNotMatch(modalSource, /makeSelectedImagePrimary|removeSelectedImage|galleryReductionRequiresConfirmation/);
   assert.match(modalSource, /item\?\.status === "VINCULO_PRECISA_REVISAO"/);
   assert.match(modalSource, /linkNeedsReview \? \(/);
   assert.match(modalSource, /Revisar vínculo/);
@@ -2056,7 +2436,6 @@ test("renders only the simplified single-product modal contract", () => {
   assert.match(modalSource, /Confirmo que revisei este produto e desejo liberar somente a atualização do nome\./);
   assert.match(modalSource, /Liberar atualização do nome/);
   assert.match(modalSource, /Somente o nome será atualizado\. Fotos e dados comerciais permanecerão inalterados\./);
-  assert.match(modalSource, /!incidentNameOnly && imagesPatchEnabled/);
   assert.match(modalSource, /!incidentNameOnly \? \(/);
   assert.match(modalSource, /linkNeedsReview[\s\S]*"Fechar"[\s\S]*"Cancelar"/);
   assert.match(modalSource, /setShowLinkReview/);
@@ -2076,15 +2455,16 @@ test("renders only the simplified single-product modal contract", () => {
   assert.match(modalSource, /setImages\(item\?\.remote\?\.images \?\? \[\]\)/);
   assert.match(modalSource, /Fotos atuais no Bling/);
   assert.match(modalSource, /Fotos disponíveis no W Ecommerce/);
-  assert.match(modalSource, /Usar estas fotos no Bling/);
+  assert.match(modalSource, /onPreviewImages\(selectedLocalImages\)/);
+  assert.match(modalSource, /item\.dryRun\.finalImages/);
+  assert.match(modalSource, /item\.dryRun\.duplicateImageCount/);
   assert.match(modalSource, /nameChanged/);
-  assert.match(modalSource, /imagesChanged/);
-  assert.match(modalSource, /if \(!incidentNameOnly && imagesChanged && imagesPatchEnabled\) fields\.images = images/);
+  assert.doesNotMatch(modalSource, /fields\.images =/);
   assert.match(modalSource, /preview\?\.capabilities\.namePatchEnabled/);
   assert.match(modalSource, /preview\?\.capabilities\.imagesPatchEnabled/);
-  assert.match(modalSource, /galleryReductionRequiresConfirmation/);
-  assert.match(modalSource, /imageReductionAcknowledged/);
-  assert.match(modalSource, /Confirmo que revisei a remo/);
+  assert.doesNotMatch(modalSource, /imageReductionAcknowledged|removedRemoteImages/);
+  assert.match(pageSource, /dryRun: true/);
+  assert.match(pageSource, /operation: "IMAGES_ONLY_APPEND"/);
   assert.doesNotMatch(modalSource, /brandChanged|brandTouched|Usar marca do W Ecommerce/);
   assert.doesNotMatch(modalSource, />\s*Marca\s*</i);
   assert.doesNotMatch(pageSource, /fields\.images\.length/);
@@ -2097,7 +2477,7 @@ test("renders only the simplified single-product modal contract", () => {
     "Atualizados",
     "Precisam de revisao"
   ]) {
-    assert.doesNotMatch(modalSource, new RegExp(hiddenLabel, "i"));
+    assert.doesNotMatch(modalSource, new RegExp(`>\\s*${hiddenLabel}\\s*<`, "i"));
   }
   assert.doesNotMatch(modalSource, />\s*SKU\s*</i);
   assert.doesNotMatch(modalSource, />\s*GTIN\s*</i);

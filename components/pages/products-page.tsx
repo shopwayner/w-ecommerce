@@ -525,6 +525,7 @@ export function ProductsPage() {
   const [blingUpdatePreview, setBlingUpdatePreview] = useState<BlingProductUpdatePreview | null>(null);
   const [blingUpdateResult, setBlingUpdateResult] = useState<BlingProductUpdateResult | null>(null);
   const blingUpdateIdempotencyKey = useRef<string | null>(null);
+  const blingImageAppendIdempotencyKey = useRef<string | null>(null);
   const blingUpdateRequestInFlight = useRef(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
@@ -776,6 +777,7 @@ export function ProductsPage() {
     setBlingUpdatePreview(null);
     setBlingUpdateResult(null);
     blingUpdateIdempotencyKey.current = null;
+    blingImageAppendIdempotencyKey.current = null;
     blingUpdateRequestInFlight.current = false;
   }
 
@@ -785,6 +787,7 @@ export function ProductsPage() {
     setBlingUpdateResult(null);
     setBlingUpdateMessage("");
     blingUpdateIdempotencyKey.current = null;
+    blingImageAppendIdempotencyKey.current = null;
     blingUpdateRequestInFlight.current = false;
 
     if (!selectedBlingConnectionId) {
@@ -842,11 +845,8 @@ export function ProductsPage() {
     ) return;
     const hadIdempotencyKey = Boolean(blingUpdateIdempotencyKey.current);
     const idempotencyKey = blingUpdateIdempotencyKey.current ?? crypto.randomUUID();
-    const operation = fields.name !== undefined && fields.images !== undefined
-      ? "NAME_AND_IMAGES"
-      : fields.images !== undefined
-        ? "IMAGES_ONLY"
-        : "NAME_ONLY";
+    if (fields.images !== undefined || fields.name === undefined) return;
+    const operation = "NAME_ONLY";
     blingUpdateIdempotencyKey.current = idempotencyKey;
     blingUpdateRequestInFlight.current = true;
     setBlingUpdateBusy(true);
@@ -923,6 +923,112 @@ export function ProductsPage() {
         code: "VERIFICATION_REQUIRED",
         message: "A atualizacao pode ter sido concluida. Verifique novamente antes de tentar.",
         fields: []
+      });
+      setBlingUpdateMessage("A atualizacao pode ter sido concluida. Verifique novamente antes de tentar.");
+    } finally {
+      blingUpdateRequestInFlight.current = false;
+      setBlingUpdateBusy(false);
+    }
+  }
+
+  async function previewBlingProductImages(images: string[]) {
+    if (
+      !selectedBlingConnectionId
+      || !blingUpdatePreview
+      || !images.length
+      || blingUpdateBusy
+      || blingUpdateRequestInFlight.current
+    ) return;
+
+    const idempotencyKey = crypto.randomUUID();
+    blingImageAppendIdempotencyKey.current = idempotencyKey;
+    blingUpdateRequestInFlight.current = true;
+    setBlingUpdateBusy(true);
+    setBlingUpdateMessage("Validando a galeria append-only sem enviar fotos...");
+    try {
+      const response = await fetch("/api/products/bling/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          connectionId: selectedBlingConnectionId,
+          productId: blingUpdatePreview.item.productId,
+          operation: "IMAGES_ONLY_APPEND",
+          fields: { images },
+          confirmed: false,
+          dryRun: true,
+          idempotencyKey
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.data) {
+        blingImageAppendIdempotencyKey.current = null;
+        setBlingUpdateMessage(payload.error ?? "Nao foi possivel validar a galeria agora.");
+        return;
+      }
+      setBlingUpdatePreview(payload.data as BlingProductUpdatePreview);
+      setBlingUpdateMessage("Previa concluida. Nenhuma foto foi enviada ao Bling.");
+    } catch {
+      blingImageAppendIdempotencyKey.current = null;
+      setBlingUpdateMessage("Nao foi possivel validar a galeria agora.");
+    } finally {
+      blingUpdateRequestInFlight.current = false;
+      setBlingUpdateBusy(false);
+    }
+  }
+
+  async function confirmBlingProductImages(images: string[], imageAppendConfirmation: string) {
+    const idempotencyKey = blingImageAppendIdempotencyKey.current;
+    if (
+      !selectedBlingConnectionId
+      || !blingUpdatePreview
+      || !blingUpdatePreview.capabilities.imagesPatchEnabled
+      || !idempotencyKey
+      || !images.length
+      || blingUpdateBusy
+      || blingUpdateRequestInFlight.current
+      || blingUpdateResult?.status === "UPDATED"
+    ) return;
+
+    blingUpdateRequestInFlight.current = true;
+    setBlingUpdateBusy(true);
+    setBlingUpdateMessage("Adicionando somente as novas fotos ao Bling...");
+    try {
+      const response = await fetch("/api/products/bling/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          connectionId: selectedBlingConnectionId,
+          productId: blingUpdatePreview.item.productId,
+          operation: "IMAGES_ONLY_APPEND",
+          fields: { images },
+          confirmed: true,
+          idempotencyKey,
+          imageAppendConfirmation
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      const result = payload.data?.item as BlingProductUpdateResult | undefined;
+      if (!response.ok || !result) {
+        setBlingUpdateMessage(payload.error ?? "Nao foi possivel adicionar as fotos no Bling agora.");
+        return;
+      }
+      setBlingUpdateResult(result);
+      setBlingUpdateMessage(result.message);
+      if (result.status === "FAILED" && result.code !== "VERIFICATION_REQUIRED") {
+        blingImageAppendIdempotencyKey.current = null;
+      }
+      if (result.status !== "FAILED") {
+        setSelectedProductIds((current) => new Set([...current].filter((id) => id !== result.productId)));
+        await loadProducts();
+      }
+    } catch {
+      setBlingUpdateResult({
+        productId: blingUpdatePreview.item.productId,
+        externalProductIdMasked: null,
+        status: "FAILED",
+        code: "VERIFICATION_REQUIRED",
+        message: "A atualizacao pode ter sido concluida. Verifique novamente antes de tentar.",
+        fields: ["images"]
       });
       setBlingUpdateMessage("A atualizacao pode ter sido concluida. Verifique novamente antes de tentar.");
     } finally {
@@ -1495,6 +1601,8 @@ export function ProductsPage() {
           message={blingUpdateMessage}
           onClose={closeBlingUpdateModal}
           onConfirm={(fields) => void confirmBlingProductUpdate(fields)}
+          onConfirmImages={(images, confirmation) => void confirmBlingProductImages(images, confirmation)}
+          onPreviewImages={(images) => void previewBlingProductImages(images)}
           onConfirmIncidentReview={() => void confirmBlingProductIncidentReview()}
           onConfirmLinkMismatch={() => void confirmBlingProductLinkMismatch()}
           preview={blingUpdatePreview}

@@ -4,12 +4,11 @@ import { useEffect, useState } from "react";
 import Image from "next/image";
 import {
   AlertTriangle,
+  Check,
   ChevronLeft,
   ChevronRight,
   ImageIcon,
   RefreshCw,
-  Star,
-  Trash2,
   X
 } from "lucide-react";
 import { Button } from "@/components/ui";
@@ -41,6 +40,7 @@ export type BlingProductUpdatePreview = {
     remote: BlingProductEditableValues | null;
     imageComparison?: "IMAGES_ALREADY_SYNCED" | "IMAGES_DIFFERENT" | "IMAGES_UNKNOWN";
     dryRun?: {
+      appendPlanValid: boolean;
       canUpdate: boolean;
       safeToExecute: boolean;
       changedFields: Array<"name" | "images">;
@@ -48,9 +48,31 @@ export type BlingProductUpdatePreview = {
       missingFields: string[];
       ambiguousFields: string[];
       remoteImageCount: number;
+      selectedImageCount: number;
+      newImageCount: number;
+      duplicateImageCount: number;
       finalImageCount: number;
+      remoteImages: string[];
+      selectedImages: string[];
+      newImages: string[];
+      duplicateImages: string[];
+      finalImages: string[];
+      appendOnly: boolean;
+      remoteOrderPreserved: boolean;
+      remotePrincipalPreserved: boolean;
+      remoteGalleryComplete: boolean;
+      imageWriteContract: "COMPLETE_GALLERY_PATCH";
+      protectedFieldsFingerprint: string;
+      remoteGalleryFingerprint: string;
+      imageAppendConfirmation?: string;
       payloadKeys: string[];
       externalProductIdMasked: string | null;
+      payloadPreview?: {
+        midia?: {
+          video: { url: string };
+          imagens: { imagensURL: Array<{ link: string }> };
+        };
+      };
       payload?: null;
     };
     linkReview?: {
@@ -91,6 +113,7 @@ export type BlingProductUpdateResult = {
     | "TEMPORARILY_BLOCKED"
     | "NAME_PATCH_BLOCKED"
     | "IMAGES_PATCH_BLOCKED"
+    | "ABORTED_PRECONDITION_REMOTE_GALLERY_CHANGED"
     | "PRODUCT_INCIDENT_BLOCKED"
     | "EXTERNAL_UPDATE_INTEGRITY_FAILED"
     | "LOCAL_MAPPING_CONCURRENT_UPDATE"
@@ -104,6 +127,8 @@ type BlingProductUpdateModalProps = {
   message: string;
   onClose: () => void;
   onConfirm: (fields: BlingProductReviewChanges) => void;
+  onConfirmImages: (images: string[], confirmation: string) => void;
+  onPreviewImages: (images: string[]) => void;
   onConfirmIncidentReview: () => void;
   onConfirmLinkMismatch: () => void;
   preview: BlingProductUpdatePreview | null;
@@ -114,10 +139,6 @@ function normalizeReviewText(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function sameImages(left: string[], right: string[]) {
-  return left.length === right.length && left.every((image, index) => image === right[index]);
-}
-
 function normalizePresentationText(value: string) {
   return normalizeReviewText(value)
     .normalize("NFD")
@@ -125,10 +146,6 @@ function normalizePresentationText(value: string) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
-}
-
-function mergeImages(current: string[], available: string[]) {
-  return [...new Set([...current, ...available])].slice(0, 13);
 }
 
 const linkMismatchReasonLabels: Record<
@@ -148,6 +165,8 @@ export function BlingProductUpdateModal({
   message,
   onClose,
   onConfirm,
+  onConfirmImages,
+  onPreviewImages,
   onConfirmIncidentReview,
   onConfirmLinkMismatch,
   preview,
@@ -156,29 +175,27 @@ export function BlingProductUpdateModal({
   const item = preview?.item ?? null;
   const [title, setTitle] = useState("");
   const [images, setImages] = useState<string[]>([]);
+  const [selectedLocalImages, setSelectedLocalImages] = useState<string[]>([]);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [showLinkReview, setShowLinkReview] = useState(false);
   const [linkMismatchAcknowledged, setLinkMismatchAcknowledged] = useState(false);
   const [showIncidentReview, setShowIncidentReview] = useState(false);
   const [incidentReviewAcknowledged, setIncidentReviewAcknowledged] = useState(false);
   const [nameTouched, setNameTouched] = useState(false);
-  const [imagesEditingEnabled, setImagesEditingEnabled] = useState(false);
-  const [removedRemoteImages, setRemovedRemoteImages] = useState<string[]>([]);
-  const [imageReductionAcknowledged, setImageReductionAcknowledged] = useState(false);
 
   useEffect(() => {
     setTitle(item?.remote?.name ?? item?.local?.name ?? "");
     setImages(item?.remote?.images ?? []);
+    setSelectedLocalImages([]);
     setSelectedImageIndex(0);
     setShowLinkReview(false);
     setLinkMismatchAcknowledged(false);
     setShowIncidentReview(false);
     setIncidentReviewAcknowledged(false);
     setNameTouched(false);
-    setImagesEditingEnabled(false);
-    setRemovedRemoteImages([]);
-    setImageReductionAcknowledged(false);
-  }, [item?.productId, item?.local, item?.remote]);
+    // Keep the selected local photos when this product receives a refreshed dry-run preview.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item?.productId]);
 
   useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) {
@@ -196,6 +213,21 @@ export function BlingProductUpdateModal({
   const imagesPatchEnabled = preview?.capabilities.imagesPatchEnabled === true;
   const imagesAlreadySynced = item?.imageComparison === "IMAGES_ALREADY_SYNCED";
   const imagesDifferent = item?.imageComparison === "IMAGES_DIFFERENT";
+  const imagePreviewMatchesSelection = Boolean(
+    item?.dryRun
+    && item.dryRun.selectedImages.length === selectedLocalImages.length
+    && item.dryRun.selectedImages.every((image, index) => image === selectedLocalImages[index])
+  );
+  const imageLimitExceeded =
+    item?.dryRun?.missingFields.some((field) =>
+      field.endsWith("IMAGE_LIMIT_EXCEEDED"),
+    ) ?? false;
+  const canConfirmImages = Boolean(
+    imagePreviewMatchesSelection
+    && item?.dryRun?.appendPlanValid
+    && item.dryRun.imageAppendConfirmation
+    && imagesPatchEnabled
+  );
   const incidentNeedsReview = item?.status === "INCIDENT_REVIEW_REQUIRED";
   const incidentNameOnly = preview?.confirmedIncidentReview === true;
   const linkNeedsReview = item?.status === "VINCULO_PRECISA_REVISAO";
@@ -203,20 +235,8 @@ export function BlingProductUpdateModal({
     item?.local && remote && !["INCIDENT_REVIEW_REQUIRED", "VINCULO_PRECISA_REVISAO", "NOT_LINKED", "UNSUPPORTED", "ERROR"].includes(item.status)
   );
   const nameChanged = Boolean(nameTouched && remote && normalizedTitle !== normalizeReviewText(remote.name));
-  const imagesChanged = Boolean(
-    !incidentNameOnly && imagesPatchEnabled && imagesEditingEnabled && remote && !sameImages(images, remoteImages)
-  );
-  const removedRemoteCount = remoteImages.filter((image) => !images.includes(image)).length;
-  const imageRemovalNotExplicit = Boolean(
-    imagesChanged && images.length < remoteImages.length && removedRemoteImages.length < removedRemoteCount
-  );
-  const galleryReductionRequiresConfirmation = Boolean(imagesChanged && images.length < remoteImages.length);
-  const imageReductionUnconfirmed = galleryReductionRequiresConfirmation && !imageReductionAcknowledged;
-  const hasDifferences = nameChanged || imagesChanged;
-  const formInvalid = (nameTouched && !normalizedTitle)
-    || (imagesEditingEnabled && !images.length)
-    || imageRemovalNotExplicit
-    || imageReductionUnconfirmed;
+  const hasDifferences = nameChanged;
+  const formInvalid = nameTouched && !normalizedTitle;
   const presentationOnlyTitleDifference = Boolean(
     item?.local?.name
       && remote?.name
@@ -233,36 +253,22 @@ export function BlingProductUpdateModal({
     && ["LOCAL_MAPPING_CONCURRENT_UPDATE", "LOCAL_MAPPING_RECORD_FAILED", "LOCAL_AUDIT_RECORD_FAILED"].includes(result.code)
   );
 
-  function makeSelectedImagePrimary() {
-    if (!imagesPatchEnabled || !imagesEditingEnabled || selectedImageIndex <= 0) return;
-    setImages((current) => {
-      const selected = current[selectedImageIndex];
-      if (!selected) return current;
-      return [selected, ...current.filter((_, index) => index !== selectedImageIndex)];
+  function toggleLocalImage(image: string) {
+    if (busy || completed) return;
+    setSelectedLocalImages((current) => current.includes(image)
+      ? current.filter((candidate) => candidate !== image)
+      : [...current, image]
+    );
+  }
+
+  function moveSelectedLocalImage(index: number, direction: -1 | 1) {
+    setSelectedLocalImages((current) => {
+      const target = index + direction;
+      if (target < 0 || target >= current.length) return current;
+      const next = [...current];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
     });
-    setSelectedImageIndex(0);
-  }
-
-  function removeSelectedImage() {
-    if (!imagesPatchEnabled || !imagesEditingEnabled) return;
-    const selected = images[selectedImageIndex];
-    if (selected && remoteImages.includes(selected)) {
-      setRemovedRemoteImages((current) => current.includes(selected) ? current : [...current, selected]);
-    }
-    setImageReductionAcknowledged(false);
-    setImages((current) => current.filter((_, index) => index !== selectedImageIndex));
-    setSelectedImageIndex((current) => Math.max(0, Math.min(current, images.length - 2)));
-  }
-
-  function useLocalImages() {
-    if (!imagesPatchEnabled) return;
-    const merged = mergeImages(remoteImages, localImages);
-    setImages(merged);
-    setImagesEditingEnabled(true);
-    setRemovedRemoteImages([]);
-    setImageReductionAcknowledged(false);
-    const firstLocalIndex = merged.findIndex((image) => localImages.includes(image));
-    setSelectedImageIndex(firstLocalIndex >= 0 ? firstLocalIndex : 0);
   }
 
   function useLocalTitle() {
@@ -275,7 +281,6 @@ export function BlingProductUpdateModal({
     if (!canReview || !hasDifferences || formInvalid || busy || completed) return;
     const fields: BlingProductReviewChanges = {};
     if (nameChanged && namePatchEnabled) fields.name = normalizedTitle;
-    if (!incidentNameOnly && imagesChanged && imagesPatchEnabled) fields.images = images;
     onConfirm(fields);
   }
 
@@ -476,30 +481,6 @@ export function BlingProductUpdateModal({
                       <p className="mt-2 text-sm">Nenhuma foto selecionada</p>
                     </div>
                   )}
-                  {selectedImage && !incidentNameOnly ? (
-                    <div className="absolute right-3 top-3 flex gap-2">
-                      <button
-                        aria-label="Definir como foto principal"
-                        className="grid h-10 w-10 place-items-center rounded-md border border-matrix-border bg-matrix-panel/90 text-matrix-goldDark disabled:opacity-45"
-                        disabled={!imagesPatchEnabled || !imagesEditingEnabled || selectedImageIndex === 0 || busy || completed}
-                        onClick={makeSelectedImagePrimary}
-                        title="Definir como foto principal"
-                        type="button"
-                      >
-                        <Star className="h-4 w-4" />
-                      </button>
-                      <button
-                        aria-label="Remover foto"
-                        className="grid h-10 w-10 place-items-center rounded-md border border-red-500/35 bg-matrix-panel/90 text-red-400 disabled:opacity-45"
-                        disabled={!imagesPatchEnabled || !imagesEditingEnabled || busy || completed}
-                        onClick={removeSelectedImage}
-                        title="Remover foto"
-                        type="button"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
-                  ) : null}
                 </div>
 
                 <div className="mt-3 flex items-center gap-2">
@@ -541,42 +522,79 @@ export function BlingProductUpdateModal({
                 </div>
                 {!incidentNameOnly ? (
                 <div className="mt-5 rounded-md border border-matrix-border bg-matrix-panel2 p-3">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <p className="text-sm font-semibold text-matrix-fg">Fotos disponíveis no W Ecommerce</p>
-                      <p className="mt-1 text-xs text-matrix-muted">
-                        Use estas fotos somente quando quiser incluí-las na galeria do Bling.
-                      </p>
-                    </div>
-                    <Button
-                      className="shrink-0"
-                      disabled={!imagesPatchEnabled || !localImages.length || imagesEditingEnabled || busy || completed}
-                      onClick={useLocalImages}
-                      type="button"
-                      variant="secondary"
-                    >
-                      Usar estas fotos no Bling
-                    </Button>
+                  <div>
+                    <p className="text-sm font-semibold text-matrix-fg">Novas fotos selecionadas</p>
+                    <p className="mt-1 text-xs text-matrix-muted">
+                      Selecione somente as fotos que deseja acrescentar ao final da galeria atual.
+                    </p>
                   </div>
                   {localImages.length ? (
                     <div aria-label="Fotos disponíveis no W Ecommerce" className="mt-3 flex gap-2 overflow-x-auto py-1">
                       {localImages.map((image, index) => (
-                        <div
+                        <button
                           key={image}
-                          className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-matrix-border bg-white"
-                          title={`Foto disponível ${index + 1}`}
+                          aria-pressed={selectedLocalImages.includes(image)}
+                          className={`relative h-16 w-16 shrink-0 overflow-hidden rounded-md border bg-white ${
+                            selectedLocalImages.includes(image)
+                              ? "border-matrix-gold ring-2 ring-matrix-gold/30"
+                              : "border-matrix-border"
+                          }`}
+                          disabled={busy || completed}
+                          onClick={() => toggleLocalImage(image)}
+                          title={`Selecionar foto ${index + 1}`}
+                          type="button"
                         >
-                          <Image alt="" className="object-cover" fill sizes="56px" src={image} unoptimized />
-                        </div>
+                          <Image alt="" className="object-cover" fill sizes="64px" src={image} unoptimized />
+                          {selectedLocalImages.includes(image) ? (
+                            <span className="absolute right-1 top-1 grid h-5 min-w-5 place-items-center rounded-full bg-matrix-gold px-1 text-[10px] font-bold text-black">
+                              {selectedLocalImages.indexOf(image) + 1}
+                            </span>
+                          ) : null}
+                        </button>
                       ))}
                     </div>
                   ) : (
                     <p className="mt-3 text-xs text-matrix-muted">Nenhuma foto local disponível para incluir.</p>
                   )}
-                  {imagesEditingEnabled ? (
-                    <p className="mt-3 text-xs text-green-300">
-                      As fotos locais foram adicionadas à seleção. Revise antes de atualizar.
-                    </p>
+                  <div className="mt-3 flex items-center justify-between gap-3 text-xs text-matrix-muted">
+                    <span>{selectedLocalImages.length} foto(s) selecionada(s)</span>
+                    <span>Ordem somente das novas fotos</span>
+                  </div>
+                  {selectedLocalImages.length ? (
+                    <div aria-label="Ordem das novas fotos" className="mt-2 flex gap-2 overflow-x-auto py-1">
+                      {selectedLocalImages.map((image, index) => (
+                        <div key={image} className="w-20 shrink-0 rounded-md border border-matrix-border bg-matrix-panel p-1.5">
+                          <div className="relative h-14 overflow-hidden rounded bg-white">
+                            <Image alt="" className="object-cover" fill sizes="56px" src={image} unoptimized />
+                            <span className="absolute left-1 top-1 grid h-5 min-w-5 place-items-center rounded-full bg-matrix-gold px-1 text-[10px] font-bold text-black">
+                              {index + 1}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex justify-between gap-1">
+                            <button
+                              aria-label={`Mover nova foto ${index + 1} para a esquerda`}
+                              className="grid h-7 w-7 place-items-center rounded border border-matrix-border text-matrix-muted disabled:opacity-35"
+                              disabled={index === 0 || busy || completed}
+                              onClick={() => moveSelectedLocalImage(index, -1)}
+                              title="Mover para a esquerda"
+                              type="button"
+                            >
+                              <ChevronLeft className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              aria-label={`Mover nova foto ${index + 1} para a direita`}
+                              className="grid h-7 w-7 place-items-center rounded border border-matrix-border text-matrix-muted disabled:opacity-35"
+                              disabled={index === selectedLocalImages.length - 1 || busy || completed}
+                              onClick={() => moveSelectedLocalImage(index, 1)}
+                              title="Mover para a direita"
+                              type="button"
+                            >
+                              <ChevronRight className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   ) : null}
                   {imagesAlreadySynced ? (
                     <p className="mt-3 text-xs text-green-300">
@@ -588,17 +606,61 @@ export function BlingProductUpdateModal({
                       As fotos não serão enviadas nesta atualização.
                     </p>
                   ) : null}
-                  {galleryReductionRequiresConfirmation ? (
-                    <label className="mt-3 flex cursor-pointer items-start gap-3 rounded-md border border-amber-500/35 bg-amber-500/10 p-3 text-sm text-amber-100">
-                      <input
-                        checked={imageReductionAcknowledged}
-                        className="mt-0.5 h-4 w-4 accent-matrix-gold"
-                        disabled={busy || completed}
-                        onChange={(event) => setImageReductionAcknowledged(event.target.checked)}
-                        type="checkbox"
-                      />
-                      <span>Confirmo que revisei a remoção de fotos desta galeria.</span>
-                    </label>
+                  <Button
+                    className="mt-3 w-full sm:w-auto"
+                    disabled={!selectedLocalImages.length || busy || completed}
+                    onClick={() => onPreviewImages(selectedLocalImages)}
+                    type="button"
+                    variant="secondary"
+                  >
+                    Adicionar fotos ao Bling
+                  </Button>
+                  <p className="mt-2 text-xs text-matrix-muted">
+                    Este primeiro passo apenas gera a prévia. Nenhuma foto é enviada sem a confirmação seguinte.
+                  </p>
+
+                  {item.dryRun && imagePreviewMatchesSelection ? (
+                    <div className="mt-4 rounded-md border border-matrix-gold/30 bg-matrix-panel p-3 text-sm">
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <p>Atuais no Bling: <strong>{item.dryRun.remoteImageCount}</strong></p>
+                        <p>Novas selecionadas: <strong>{item.dryRun.selectedImageCount}</strong></p>
+                        <p>Duplicadas ignoradas: <strong>{item.dryRun.duplicateImageCount}</strong></p>
+                        <p>Total após atualização: <strong>{item.dryRun.finalImageCount}</strong></p>
+                      </div>
+                      {!imagesPatchEnabled ? (
+                        <p className="mt-3 text-xs text-amber-200">
+                          A atualização de fotos permanece bloqueada durante a validação controlada.
+                        </p>
+                      ) : null}
+                      {imageLimitExceeded ? (
+                        <p className="mt-3 text-xs text-rose-300">
+                          Este produto ultrapassaria o limite de 13 imagens.
+                        </p>
+                      ) : null}
+                      <div className="mt-3">
+                        <p className="text-xs font-semibold uppercase text-matrix-muted">Resultado final previsto</p>
+                        <div className="mt-2 flex gap-2 overflow-x-auto py-1">
+                          {item.dryRun.finalImages.map((image, index) => (
+                            <div
+                              key={`${image}-${index}`}
+                              className="relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-matrix-border bg-white"
+                              title={index < item.dryRun!.remoteImageCount ? `Foto atual ${index + 1}` : `Nova foto ${index + 1}`}
+                            >
+                              <Image alt="" className="object-cover" fill sizes="56px" src={image} unoptimized />
+                              {index === 0 ? (
+                                <span className="absolute bottom-0 left-0 right-0 bg-black/75 py-0.5 text-center text-[9px] text-white">Principal</span>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      {item.dryRun.appendPlanValid ? (
+                        <p className="mt-3 flex items-center gap-2 text-xs text-green-300">
+                          <Check className="h-4 w-4" />
+                          Todas as fotos remotas permanecem na mesma ordem; as novas entram somente no final.
+                        </p>
+                      ) : null}
+                    </div>
                   ) : null}
                 </div>
                 ) : null}
@@ -670,13 +732,7 @@ export function BlingProductUpdateModal({
           ) : null}
           {formInvalid ? (
             <p className="mt-3 text-sm text-red-300">
-              {imagesEditingEnabled && !images.length
-                ? "Mantenha ao menos uma foto para atualizar a galeria."
-                : imageRemovalNotExplicit
-                  ? "Revise as fotos removidas antes de continuar."
-                  : imageReductionUnconfirmed
-                    ? "Confirme a redução da galeria antes de continuar."
-                    : "Preencha os campos exibidos antes de continuar."}
+              Preencha os campos exibidos antes de continuar.
             </p>
           ) : null}
         </div>
@@ -741,20 +797,29 @@ export function BlingProductUpdateModal({
                   : "Revisar vínculo"}
             </Button>
           ) : (
-            <Button
-              className="w-full sm:w-auto"
-              disabled={!canReview || !hasDifferences || formInvalid || busy || completed || retryBlocked}
-              onClick={submit}
-              type="button"
-            >
-              {busy
-                ? nameChanged && !imagesChanged
-                  ? "Atualizando nome..."
-                  : "Atualizando produto..."
-                : nameChanged && !imagesChanged
-                  ? "Atualizar nome no Bling"
-                  : "Atualizar no Bling"}
-            </Button>
+            <>
+              {item?.dryRun && imagePreviewMatchesSelection ? (
+                <Button
+                  className="w-full sm:w-auto"
+                  disabled={!canConfirmImages || busy || completed || retryBlocked}
+                  onClick={() => {
+                    const confirmation = item.dryRun?.imageAppendConfirmation;
+                    if (confirmation) onConfirmImages(selectedLocalImages, confirmation);
+                  }}
+                  type="button"
+                >
+                  {busy ? "Adicionando fotos..." : "Confirmar e adicionar fotos"}
+                </Button>
+              ) : null}
+              <Button
+                className="w-full sm:w-auto"
+                disabled={!canReview || !hasDifferences || formInvalid || busy || completed || retryBlocked}
+                onClick={submit}
+                type="button"
+              >
+                {busy ? "Atualizando nome..." : "Atualizar somente nome"}
+              </Button>
+            </>
           )}
         </footer>
       </section>

@@ -217,6 +217,12 @@ export class BlingApiClient {
     );
   }
 
+  async requestWithoutRefresh<T>(options: BlingRequestOptions): Promise<T> {
+    return scheduleBlingRequest(options.connectionId, async () =>
+      this.performRequest<T>(options, false, false)
+    );
+  }
+
   async testConnection(organizationId: string, connectionId: string) {
     const connection = await prisma.blingConnection.findFirst({
       where: { id: connectionId, organizationId },

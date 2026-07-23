@@ -1,4 +1,5 @@
 import { lookup } from "node:dns/promises";
+import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { ERPProvider, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -9,6 +10,13 @@ import {
   type BlingProductPatchOperation,
   type BlingProductReviewInput
 } from "@/lib/bling-product-update-schema";
+import {
+  BLING_PRODUCT_IMAGE_LIMIT,
+  createBlingProductImageAppendPlan,
+  verifyBlingProductImageAppendResult,
+  type BlingProductImageAppendPlan,
+  type BlingProductImageDescriptor
+} from "@/lib/bling-product-image-append";
 import { decryptSecret, encryptSecret } from "@/lib/security/encryption";
 import { BlingApiError, blingApiClient } from "@/lib/services/bling-api-client";
 
@@ -49,6 +57,7 @@ export type BlingProductImageComparisonStatus =
   | "IMAGES_UNKNOWN";
 
 export type BlingProductUpdateDryRun = {
+  appendPlanValid: boolean;
   canUpdate: boolean;
   safeToExecute: boolean;
   changedFields: BlingProductUpdateField[];
@@ -56,9 +65,26 @@ export type BlingProductUpdateDryRun = {
   missingFields: string[];
   ambiguousFields: string[];
   remoteImageCount: number;
+  selectedImageCount: number;
+  newImageCount: number;
+  duplicateImageCount: number;
   finalImageCount: number;
+  remoteImages: string[];
+  selectedImages: string[];
+  newImages: string[];
+  duplicateImages: string[];
+  finalImages: string[];
+  appendOnly: boolean;
+  remoteOrderPreserved: boolean;
+  remotePrincipalPreserved: boolean;
+  remoteGalleryComplete: boolean;
+  imageWriteContract: "COMPLETE_GALLERY_PATCH";
+  protectedFieldsFingerprint: string;
+  remoteGalleryFingerprint: string;
+  imageAppendConfirmation?: string;
   payloadKeys: string[];
   externalProductIdMasked: string | null;
+  payloadPreview?: BlingProductPatchPayload;
   payload?: null;
 };
 
@@ -126,6 +152,7 @@ export type BlingProductUpdateResult = {
     | "TEMPORARILY_BLOCKED"
     | "NAME_PATCH_BLOCKED"
     | "IMAGES_PATCH_BLOCKED"
+    | "ABORTED_PRECONDITION_REMOTE_GALLERY_CHANGED"
     | "PRODUCT_INCIDENT_BLOCKED"
     | "EXTERNAL_UPDATE_INTEGRITY_FAILED"
     | "LOCAL_MAPPING_CONCURRENT_UPDATE"
@@ -194,9 +221,10 @@ type AdvisoryLockTransaction = Pick<Prisma.TransactionClient, "$queryRaw">;
 
 const updateJobType = "BLING_PRODUCT_UPDATE";
 const staleJobLeaseMs = 5 * 60 * 1_000;
-const maximumImages = 13;
+const maximumImages = BLING_PRODUCT_IMAGE_LIMIT;
 const linkMismatchConfirmationMaxAgeMs = 10 * 60 * 1_000;
 const incidentReviewConfirmationMaxAgeMs = 10 * 60 * 1_000;
+const imageAppendConfirmationMaxAgeMs = 10 * 60 * 1_000;
 
 export class BlingProductImageValidationError extends Error {
   constructor() {
@@ -253,6 +281,27 @@ type BlingProductIncidentReviewConfirmation = {
 type BlingProductIncidentReviewConfirmationScope = Omit<
   BlingProductIncidentReviewConfirmation,
   "version" | "reason" | "operation" | "issuedAt" | "expiresAt"
+>;
+
+type BlingProductImageAppendConfirmation = {
+  version: 1;
+  operation: "IMAGES_ONLY_APPEND";
+  userId: string;
+  organizationId: string;
+  connectionId: string;
+  productId: string;
+  externalProductId: string;
+  idempotencyKey: string;
+  selectedImages: string[];
+  protectedFieldsFingerprint: string;
+  remoteGalleryFingerprint: string;
+  issuedAt: string;
+  expiresAt: string;
+};
+
+type BlingProductImageAppendConfirmationScope = Omit<
+  BlingProductImageAppendConfirmation,
+  "version" | "operation" | "issuedAt" | "expiresAt"
 >;
 
 export function createBlingProductLinkMismatchConfirmation(
@@ -541,15 +590,169 @@ function readParentExternalProductId(attributes: unknown) {
 }
 
 function remoteImages(remote: JsonRecord) {
+  return remoteImageDescriptors(remote)
+    .map((image) => normalizeBlingProductImageUrl(image.url))
+    .filter((image): image is string => Boolean(image));
+}
+
+export class BlingProductImagePreconditionError extends Error {
+  constructor() {
+    super("A galeria do Bling mudou. Gere uma nova previa antes de continuar.");
+    this.name = "BlingProductImagePreconditionError";
+  }
+}
+
+export function createBlingProductImageAppendConfirmation(
+  scope: BlingProductImageAppendConfirmationScope,
+  now = new Date()
+) {
+  const confirmation: BlingProductImageAppendConfirmation = {
+    version: 1,
+    operation: "IMAGES_ONLY_APPEND",
+    ...scope,
+    selectedImages: normalizeBlingProductImages(scope.selectedImages),
+    issuedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + imageAppendConfirmationMaxAgeMs).toISOString()
+  };
+  return encryptSecret(JSON.stringify(confirmation));
+}
+
+export function verifyBlingProductImageAppendConfirmation(
+  value: string,
+  expected: Pick<
+    BlingProductImageAppendConfirmation,
+    "userId" | "organizationId" | "connectionId" | "productId" | "idempotencyKey" | "selectedImages"
+  >,
+  now = new Date()
+) {
+  try {
+    const confirmation = JSON.parse(decryptSecret(value)) as Partial<BlingProductImageAppendConfirmation>;
+    const expiresAt = typeof confirmation.expiresAt === "string" ? Date.parse(confirmation.expiresAt) : Number.NaN;
+    const issuedAt = typeof confirmation.issuedAt === "string" ? Date.parse(confirmation.issuedAt) : Number.NaN;
+    const selectedImages = Array.isArray(confirmation.selectedImages)
+      ? normalizeBlingProductImages(confirmation.selectedImages)
+      : [];
+    const expectedImages = normalizeBlingProductImages(expected.selectedImages);
+    if (
+      confirmation.version !== 1
+      || confirmation.operation !== "IMAGES_ONLY_APPEND"
+      || confirmation.userId !== expected.userId
+      || confirmation.organizationId !== expected.organizationId
+      || confirmation.connectionId !== expected.connectionId
+      || confirmation.productId !== expected.productId
+      || confirmation.idempotencyKey !== expected.idempotencyKey
+      || typeof confirmation.externalProductId !== "string"
+      || !/^\d+$/.test(confirmation.externalProductId)
+      || typeof confirmation.protectedFieldsFingerprint !== "string"
+      || !/^[a-f0-9]{64}$/.test(confirmation.protectedFieldsFingerprint)
+      || typeof confirmation.remoteGalleryFingerprint !== "string"
+      || !/^[a-f0-9]{64}$/.test(confirmation.remoteGalleryFingerprint)
+      || selectedImages.length !== expectedImages.length
+      || selectedImages.some((image, index) => image !== expectedImages[index])
+      || !Number.isFinite(issuedAt)
+      || !Number.isFinite(expiresAt)
+      || issuedAt > now.getTime() + 30_000
+      || expiresAt <= now.getTime()
+      || expiresAt - issuedAt !== imageAppendConfirmationMaxAgeMs
+    ) {
+      throw new Error("invalid confirmation");
+    }
+    return {
+      ...confirmation,
+      selectedImages
+    } as BlingProductImageAppendConfirmation;
+  } catch {
+    throw new BlingProductImagePreconditionError();
+  }
+}
+
+function readRemoteImageGallery(remote: JsonRecord): {
+  images: BlingProductImageDescriptor[];
+  complete: boolean;
+} {
   const media = record(remote.midia);
   const images = record(media.imagens);
   const external = Array.isArray(images.externas) ? images.externas : [];
   const internal = Array.isArray(images.internas) ? images.internas : [];
-  return normalizeBlingProductImages([
-    remote.imagemURL,
-    ...external.map((item) => record(item).link),
-    ...internal.map((item) => record(item).link)
-  ]);
+  const arraysPresent = Array.isArray(images.externas) && Array.isArray(images.internas);
+  const descriptors: BlingProductImageDescriptor[] = [];
+
+  function add(value: unknown, source?: JsonRecord) {
+    if (value === undefined || value === null || value === "") return;
+    const rawUrl = text(value);
+    const normalizedUrl = normalizeBlingProductImageUrl(rawUrl);
+    const attachment = record(source?.anexo);
+    const attachmentLink = record(source?.anexoVinculo);
+    const remoteId = firstText(source?.id, attachment.id, attachmentLink.id);
+    const officialName = firstText(
+      source?.nome,
+      attachment.nome,
+      attachmentLink.nome
+    );
+    descriptors.push({
+      url: normalizedUrl ?? rawUrl,
+      ...(remoteId ? { remoteId } : {}),
+      ...(officialName ? { officialName } : {})
+    });
+  }
+
+  external.forEach((item) => add(record(item).link, record(item)));
+  internal.forEach((item) => add(record(item).link, record(item)));
+
+  // imagemURL is a principal-image alias in the GET. Keep it only when it is
+  // not already represented by the gallery arrays, and put its match first.
+  const primaryUrl = normalizeBlingProductImageUrl(remote.imagemURL);
+  let primaryRepresented = !text(remote.imagemURL);
+  if (primaryUrl) {
+    const matches = descriptors
+      .map((image, index) => normalizeBlingProductImageUrl(image.url) === primaryUrl ? index : -1)
+      .filter((index) => index >= 0);
+    primaryRepresented = matches.length > 0;
+    if (matches.length === 1 && matches[0] !== 0) {
+      const [primary] = descriptors.splice(matches[0], 1);
+      descriptors.unshift(primary);
+    } else if (!matches.length) {
+      descriptors.unshift({ url: primaryUrl });
+    }
+  }
+  return {
+    images: descriptors,
+    complete: arraysPresent && primaryRepresented
+  };
+}
+
+function remoteImageDescriptors(remote: JsonRecord): BlingProductImageDescriptor[] {
+  return readRemoteImageGallery(remote).images;
+}
+
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as JsonRecord)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalJson(entry)])
+  );
+}
+
+function fingerprint(value: unknown) {
+  return createHash("sha256").update(JSON.stringify(canonicalJson(value))).digest("hex");
+}
+
+export function createBlingProductProtectedFieldsFingerprint(remoteValue: unknown) {
+  return fingerprint(createBlingProductIntegritySnapshot(remoteValue, ["images"]));
+}
+
+export function createBlingProductRemoteGalleryFingerprint(remoteValue: unknown) {
+  const gallery = readRemoteImageGallery(remoteData(remoteValue));
+  return fingerprint({
+    complete: gallery.complete,
+    images: gallery.images.map((image) => ({
+      url: normalizeBlingProductImageUrl(image.url),
+      remoteId: image.remoteId ?? null,
+      officialName: image.officialName ?? null
+    }))
+  });
 }
 
 function remoteImagesForIntegralPut(remote: JsonRecord) {
@@ -720,7 +923,7 @@ export function normalizeBlingProductReview(
   local: LocalProductValues,
   remoteValue?: unknown
 ): BlingReviewedProductValues {
-  const remote = toRemoteValues(remoteData(remoteValue));
+  void remoteValue;
   const reviewed: BlingReviewedProductValues = {};
 
   if (input.name !== undefined) {
@@ -735,8 +938,8 @@ export function normalizeBlingProductReview(
       throw new BlingProductImageValidationError();
     }
     const images = normalizeBlingProductImages(input.images);
-    if (!images.length) throw new Error("Mantenha ao menos uma foto para atualizar a galeria.");
-    const allowedImages = new Set([...local.images, ...remote.images]);
+    if (!images.length) throw new Error("Selecione ao menos uma foto nova para adicionar.");
+    const allowedImages = new Set(local.images);
     if (images.some((image) => !allowedImages.has(image))) {
       throw new Error("Revise as fotos selecionadas e tente novamente.");
     }
@@ -753,8 +956,16 @@ export function compareBlingProductValues(
   const remote = toRemoteValues(remoteData(remoteValue));
   const differences: BlingProductUpdateField[] = [];
   if (reviewed.name !== undefined && reviewed.name !== remote.name) differences.push("name");
-  if (reviewed.images !== undefined && !sameImages(reviewed.images, remote.images)) {
-    differences.push("images");
+  if (reviewed.images !== undefined) {
+    const remote = remoteData(remoteValue);
+    const gallery = readRemoteImageGallery(remote);
+    const plan = createBlingProductImageAppendPlan({
+      remoteImages: gallery.images,
+      selectedImages: reviewed.images.map((url) => ({ url })),
+      remoteGalleryComplete: gallery.complete,
+      maximumImages
+    });
+    if (plan.newImageCount > 0 || plan.status === "BLOCKED") differences.push("images");
   }
   return differences;
 }
@@ -779,7 +990,7 @@ export class BlingProductPatchDataError extends Error {
 export type BlingProductPatchPayload = {
   nome?: string;
   midia?: {
-    video: { url: string };
+    video?: { url: string };
     imagens: { imagensURL: Array<{ link: string }> };
   };
 };
@@ -1125,19 +1336,43 @@ function analyzeBlingIntegralPayload(
 type BlingPatchPayloadAnalysis = {
   payload: BlingProductPatchPayload | null;
   missingFields: string[];
+  ambiguousFields: string[];
   preservedFields: string[];
+  imagePlan?: BlingProductImageAppendPlan;
 };
+
+export function buildBlingProductImageAppendPayloadPreview(
+  plan: BlingProductImageAppendPlan,
+  remoteValue: unknown
+): BlingProductPatchPayload {
+  const video = record(record(remoteData(remoteValue).midia).video);
+  if (plan.status !== "READY") {
+    throw new BlingProductPatchDataError([
+      "midia.imagens.appendOnly"
+    ]);
+  }
+  const videoUrl = exactString(video.url);
+  return {
+    midia: {
+      ...(videoUrl.trim() ? { video: { url: videoUrl } } : {}),
+      imagens: {
+        imagensURL: plan.finalImages.map((image) => ({ link: image.url }))
+      }
+    }
+  };
+}
 
 function analyzeBlingPatchPayload(
   remoteValue: unknown,
   reviewed: BlingReviewedProductValues,
-  fields: readonly BlingProductUpdateField[],
-  confirmed: boolean
+  fields: readonly BlingProductUpdateField[]
 ): BlingPatchPayloadAnalysis {
   const remote = remoteData(remoteValue);
   const selected = new Set(fields);
   const missing = new Set<string>();
+  const ambiguous = new Set<string>();
   const payload: BlingProductPatchPayload = {};
+  let imagePlan: BlingProductImageAppendPlan | undefined;
 
   if (selected.has("name")) {
     if (!reviewed.name) missing.add("nome");
@@ -1145,23 +1380,35 @@ function analyzeBlingPatchPayload(
   }
 
   if (selected.has("images")) {
-    const images = reviewed.images ?? [];
-    const video = record(record(remote.midia).video);
-    if (!images.length) missing.add("midia.imagens.imagensURL");
-    if (typeof video.url !== "string") missing.add("midia.video.url");
-    if (images.length < remoteImages(remote).length && !confirmed) {
-      missing.add("confirmacaoReducaoGaleria");
-    }
-    if (!missing.size) {
-      payload.midia = {
-        video: { url: exactString(video.url) },
-        imagens: { imagensURL: images.map((link) => ({ link })) }
-      };
-    }
+    const gallery = readRemoteImageGallery(remote);
+    imagePlan = createBlingProductImageAppendPlan({
+      remoteImages: gallery.images,
+      selectedImages: (reviewed.images ?? []).map((url) => ({ url })),
+      remoteGalleryComplete: gallery.complete,
+      maximumImages
+    });
+    if (!reviewed.images?.length) missing.add("midia.imagens.imagensURL");
+    imagePlan.violations
+      .filter((violation) => violation !== "NO_NEW_IMAGES")
+      .forEach((violation) => missing.add(`midia.imagens.appendOnly.${violation}`));
+    if (imagePlan.status === "UNCHANGED") missing.add("midia.imagens.semNovasFotos");
   }
 
-  if (missing.size) {
-    return { payload: null, missingFields: [...missing].sort(), preservedFields: [] };
+  if (missing.size || ambiguous.size) {
+    return {
+      payload: null,
+      missingFields: [...missing].sort(),
+      ambiguousFields: [...ambiguous].sort(),
+      preservedFields: Object.keys(remote)
+        .filter((key) => !selected.has("name") || key !== "nome")
+        .filter((key) => !selected.has("images") || !["midia", "imagemURL"].includes(key))
+        .sort(),
+      ...(imagePlan ? { imagePlan } : {})
+    };
+  }
+
+  if (selected.has("images") && imagePlan) {
+    payload.midia = buildBlingProductImageAppendPayloadPreview(imagePlan, remote).midia;
   }
 
   const changedRemoteKeys = new Set([
@@ -1171,7 +1418,9 @@ function analyzeBlingPatchPayload(
   return {
     payload,
     missingFields: [],
-    preservedFields: Object.keys(remote).filter((key) => !changedRemoteKeys.has(key)).sort()
+    ambiguousFields: [],
+    preservedFields: Object.keys(remote).filter((key) => !changedRemoteKeys.has(key)).sort(),
+    ...(imagePlan ? { imagePlan } : {})
   };
 }
 
@@ -1181,8 +1430,11 @@ export function buildBlingProductPatchPayload(
   fields: readonly BlingProductUpdateField[],
   options: { confirmed: boolean }
 ) {
-  const analysis = analyzeBlingPatchPayload(remoteValue, reviewed, fields, options.confirmed);
-  if (!analysis.payload) throw new BlingProductPatchDataError(analysis.missingFields);
+  void options.confirmed;
+  const analysis = analyzeBlingPatchPayload(remoteValue, reviewed, fields);
+  if (!analysis.payload) {
+    throw new BlingProductPatchDataError([...analysis.missingFields, ...analysis.ambiguousFields]);
+  }
   return analysis.payload;
 }
 
@@ -1195,21 +1447,55 @@ export function createBlingProductUpdateDryRun(input: {
 }): BlingProductUpdateDryRun {
   const reviewed = input.reviewed ?? {};
   const fields = [...(input.fields ?? [])];
-  const analysis = analyzeBlingPatchPayload(input.remoteValue, reviewed, fields, input.confirmed ?? false);
+  const analysis = analyzeBlingPatchPayload(input.remoteValue, reviewed, fields);
   const currentImages = remoteImages(remoteData(input.remoteValue));
-  const finalImages = fields.includes("images") ? reviewed.images ?? [] : currentImages;
+  const imagePlan = analysis.imagePlan;
+  let payloadPreview: BlingProductPatchPayload | undefined;
+  if (fields.includes("images") && imagePlan?.status === "READY") {
+    try {
+      payloadPreview = buildBlingProductImageAppendPayloadPreview(imagePlan, input.remoteValue);
+      if (fields.includes("name") && reviewed.name) payloadPreview.nome = reviewed.name;
+    } catch {
+      payloadPreview = undefined;
+    }
+  }
+  const imageCapabilityEnabled = getBlingProductPatchCapabilities().imagesPatchEnabled;
+  const remoteGallery = readRemoteImageGallery(remoteData(input.remoteValue));
   return {
-    canUpdate: Boolean(analysis.payload),
-    safeToExecute: Boolean(analysis.payload),
+    appendPlanValid: fields.includes("images")
+      ? imagePlan?.status === "READY" && Boolean(payloadPreview)
+      : false,
+    canUpdate: Boolean(analysis.payload) && (!fields.includes("images") || imageCapabilityEnabled),
+    safeToExecute: Boolean(analysis.payload) && (!fields.includes("images") || imageCapabilityEnabled),
     changedFields: fields,
     preservedFields: analysis.preservedFields,
     missingFields: analysis.missingFields,
-    ambiguousFields: [],
-    remoteImageCount: currentImages.length,
-    finalImageCount: finalImages.length,
-    payloadKeys: analysis.payload ? Object.keys(analysis.payload).sort() : [],
+    ambiguousFields: analysis.ambiguousFields,
+    remoteImageCount: imagePlan?.remoteImageCount ?? currentImages.length,
+    selectedImageCount: imagePlan?.selectedImageCount ?? 0,
+    newImageCount: imagePlan?.newImageCount ?? 0,
+    duplicateImageCount: imagePlan?.duplicateImageCount ?? 0,
+    finalImageCount: imagePlan?.finalImageCount ?? currentImages.length,
+    remoteImages: imagePlan?.remoteImages.map((image) => image.url) ?? currentImages,
+    selectedImages: imagePlan?.selectedImages.map((image) => image.url) ?? [],
+    newImages: imagePlan?.newImages.map((image) => image.url) ?? [],
+    duplicateImages: imagePlan?.duplicateImages.map((image) => image.url) ?? [],
+    finalImages: imagePlan?.finalImages.map((image) => image.url) ?? currentImages,
+    appendOnly: imagePlan?.appendOnly ?? true,
+    remoteOrderPreserved: imagePlan?.remoteOrderPreserved ?? true,
+    remotePrincipalPreserved: imagePlan?.remotePrincipalPreserved ?? true,
+    remoteGalleryComplete: remoteGallery.complete,
+    imageWriteContract: "COMPLETE_GALLERY_PATCH",
+    protectedFieldsFingerprint: createBlingProductProtectedFieldsFingerprint(input.remoteValue),
+    remoteGalleryFingerprint: createBlingProductRemoteGalleryFingerprint(input.remoteValue),
+    payloadKeys: payloadPreview
+      ? Object.keys(payloadPreview).sort()
+      : analysis.payload
+        ? Object.keys(analysis.payload).sort()
+        : [],
     externalProductIdMasked: maskBlingProductId(input.externalProductId),
-    ...(analysis.payload ? {} : { payload: null })
+    ...(payloadPreview ? { payloadPreview } : {}),
+    ...(!analysis.payload ? { payload: null } : {})
   };
 }
 
@@ -1537,6 +1823,7 @@ export function describeBlingProductUpdateFailure(input: {
     || apiError?.details?.upstreamCode === "MISSING_REQUIRED_FIELD_ERROR";
   const linkConfirmationRequired = error instanceof Error && /Revise o vinculo novamente/i.test(error.message);
   const incidentBlocked = error instanceof BlingProductIncidentError;
+  const imagePreconditionChanged = error instanceof BlingProductImagePreconditionError;
   const rejected = Boolean(apiError && [400, 409, 422].includes(apiError.status));
   const soleAttemptedField = input.fields?.length === 1 ? input.fields[0] : null;
   const imageFailure = error instanceof BlingProductImageValidationError
@@ -1552,6 +1839,9 @@ export function describeBlingProductUpdateFailure(input: {
   if (verificationFailure) {
     code = "VERIFICATION_REQUIRED";
     message = "A atualização pode ter sido concluída. Verifique novamente antes de tentar.";
+  } else if (imagePreconditionChanged) {
+    code = "ABORTED_PRECONDITION_REMOTE_GALLERY_CHANGED";
+    message = error.message;
   } else if (incidentBlocked) {
     code = "PRODUCT_INCIDENT_BLOCKED";
     message = error.message;
@@ -1851,12 +2141,33 @@ async function verifyUpdatedBlingProduct(input: {
   fields: BlingProductUpdateField[];
   beforeRemote: unknown;
 }) {
-  const payload = await blingApiClient.request<unknown>({ organizationId: input.organizationId, connectionId: input.connectionId, method: "GET", path: `/produtos/${input.externalProductId}` });
+  const payload = await blingApiClient.requestReadOnly<unknown>({
+    organizationId: input.organizationId,
+    connectionId: input.connectionId,
+    path: `/produtos/${input.externalProductId}`
+  });
   const afterRemote = remoteData(payload);
   const remaining = compareBlingProductValues(input.reviewed, afterRemote);
+  const expectedImagePlan = input.fields.includes("images")
+    ? createBlingProductImageAppendPlan({
+        remoteImages: readRemoteImageGallery(remoteData(input.beforeRemote)).images,
+        selectedImages: (input.reviewed.images ?? []).map((url) => ({ url })),
+        remoteGalleryComplete: readRemoteImageGallery(remoteData(input.beforeRemote)).complete,
+        maximumImages
+      })
+    : null;
+  const imageVerification = expectedImagePlan
+    ? verifyBlingProductImageAppendResult({
+        expected: expectedImagePlan,
+        actualImages: remoteImageDescriptors(afterRemote)
+      })
+    : null;
   return {
-    updatedFieldsMatch: input.fields.every((field) => !remaining.includes(field)),
-    integrityMismatches: compareBlingProductIntegrity(input.beforeRemote, afterRemote, input.fields)
+    updatedFieldsMatch: input.fields.every((field) =>
+      field === "images" ? imageVerification?.matches === true : !remaining.includes(field)
+    ),
+    integrityMismatches: compareBlingProductIntegrity(input.beforeRemote, afterRemote, input.fields),
+    imageVerification
   };
 }
 
@@ -1864,11 +2175,45 @@ function parseJobCursor(value: string | null) {
   if (!value) return null;
   try {
     const parsed = JSON.parse(value) as { idempotencyKey?: unknown; result?: unknown };
-    if (typeof parsed.idempotencyKey !== "string" || !parsed.result || typeof parsed.result !== "object") return null;
-    return { idempotencyKey: parsed.idempotencyKey, result: parsed.result as BlingProductUpdateResult };
+    if (typeof parsed.idempotencyKey !== "string") return null;
+    return {
+      idempotencyKey: parsed.idempotencyKey,
+      result: parsed.result && typeof parsed.result === "object"
+        ? parsed.result as BlingProductUpdateResult
+        : null
+    };
   } catch {
     return null;
   }
+}
+
+async function recordImageAppendJobSnapshot(input: {
+  jobId: string;
+  idempotencyKey: string;
+  externalProductIdMasked: string | null;
+  protectedFieldsFingerprint: string;
+  remoteGalleryFingerprint: string;
+  remoteImageCount: number;
+  newImageCount: number;
+  finalImageCount: number;
+}) {
+  await prisma.erpSyncJob.update({
+    where: { id: input.jobId },
+    data: {
+      lastCursor: JSON.stringify({
+        idempotencyKey: input.idempotencyKey,
+        snapshot: {
+          operation: "IMAGES_ONLY_APPEND",
+          externalProductIdMasked: input.externalProductIdMasked,
+          protectedFieldsFingerprint: input.protectedFieldsFingerprint,
+          remoteGalleryFingerprint: input.remoteGalleryFingerprint,
+          remoteImageCount: input.remoteImageCount,
+          newImageCount: input.newImageCount,
+          finalImageCount: input.finalImageCount
+        }
+      })
+    }
+  });
 }
 
 async function createUpdateJob(input: { organizationId: string; connectionId: string; idempotencyKey: string }) {
@@ -1932,7 +2277,7 @@ async function finishJob(jobId: string, idempotencyKey: string, result: BlingPro
 
 function successfulBlingProductUpdateMessage(fields: readonly BlingProductUpdateField[]) {
   if (fields.length === 1 && fields[0] === "name") return "Nome atualizado no Bling com sucesso.";
-  if (fields.length === 1 && fields[0] === "images") return "Fotos atualizadas no Bling com sucesso.";
+  if (fields.length === 1 && fields[0] === "images") return "Fotos adicionadas ao Bling com sucesso.";
   return "Produto atualizado no Bling com sucesso.";
 }
 
@@ -1956,6 +2301,74 @@ export class BlingProductUpdateService {
       : inspection.publicItem;
     return {
       item,
+      capabilities: getBlingProductPatchCapabilities()
+    };
+  }
+
+  async previewImageAppendOnly(input: {
+    userId: string;
+    organizationId: string;
+    connectionId: string;
+    productId: string;
+    images: string[];
+    idempotencyKey: string;
+  }) {
+    await validateConnection(input.organizationId, input.connectionId);
+    if (await productHasBlockingBlingIncident(input.organizationId, input.productId)) {
+      throw new BlingProductIncidentError();
+    }
+    const inspection = await inspectProduct({
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      productId: input.productId,
+      readOnly: true
+    });
+    if (
+      !inspection.localValues
+      || !inspection.remoteProduct
+      || !inspection.externalProductId
+      || !inspection.mappingSnapshot
+      || inspection.publicItem.status === "VINCULO_PRECISA_REVISAO"
+      || ["NOT_LINKED", "UNSUPPORTED", "ERROR"].includes(inspection.publicItem.status)
+    ) {
+      throw new Error(inspection.publicItem.message);
+    }
+
+    const reviewed = normalizeBlingProductReview(
+      { images: input.images },
+      inspection.localValues,
+      inspection.remoteProduct
+    );
+    await validateBlingProductImageAccessibility(reviewed.images ?? []);
+    const dryRun = createBlingProductUpdateDryRun({
+      externalProductId: inspection.externalProductId,
+      remoteValue: inspection.remoteProduct,
+      reviewed,
+      fields: ["images"],
+      confirmed: false
+    });
+    if (dryRun.appendPlanValid && reviewed.images) {
+      dryRun.imageAppendConfirmation = createBlingProductImageAppendConfirmation({
+        userId: input.userId,
+        organizationId: input.organizationId,
+        connectionId: input.connectionId,
+        productId: input.productId,
+        externalProductId: inspection.externalProductId,
+        idempotencyKey: input.idempotencyKey,
+        selectedImages: reviewed.images,
+        protectedFieldsFingerprint: dryRun.protectedFieldsFingerprint,
+        remoteGalleryFingerprint: dryRun.remoteGalleryFingerprint
+      });
+    }
+
+    return {
+      item: {
+        ...inspection.publicItem,
+        message: dryRun.appendPlanValid
+          ? "Previa append-only concluida. Nenhuma foto foi enviada ao Bling."
+          : "Nao foi possivel garantir uma inclusao de fotos sem alterar a galeria atual.",
+        dryRun
+      },
       capabilities: getBlingProductPatchCapabilities()
     };
   }
@@ -2108,9 +2521,10 @@ export class BlingProductUpdateService {
     incidentReviewConfirmation?: string;
     confirmedLinkMismatch?: boolean;
     linkMismatchConfirmation?: string;
+    imageAppendConfirmation?: string;
   }): Promise<BlingProductUpdateResult> {
     const expectedOperation = getBlingProductPatchOperation(input.fields);
-    if (input.operation !== expectedOperation) {
+    if (!expectedOperation || input.operation !== expectedOperation) {
       return {
         productId: input.productId,
         externalProductIdMasked: null,
@@ -2150,7 +2564,26 @@ export class BlingProductUpdateService {
     let prepared: Awaited<ReturnType<typeof createUpdateJob>>;
     let confirmedLinkMismatchExternalProductId: string | undefined;
     let incidentReviewExternalProductId: string | undefined;
+    let imageAppendConfirmation: BlingProductImageAppendConfirmation | undefined;
     try {
+      if (input.operation === "IMAGES_ONLY_APPEND") {
+        if (!input.imageAppendConfirmation || !input.fields.images) {
+          throw new BlingProductImagePreconditionError();
+        }
+        imageAppendConfirmation = verifyBlingProductImageAppendConfirmation(
+          input.imageAppendConfirmation,
+          {
+            userId: input.userId,
+            organizationId: input.organizationId,
+            connectionId: input.connectionId,
+            productId: input.productId,
+            idempotencyKey: input.idempotencyKey,
+            selectedImages: input.fields.images
+          }
+        );
+      } else if (input.imageAppendConfirmation) {
+        throw new BlingProductImagePreconditionError();
+      }
       await validateConnection(input.organizationId, input.connectionId);
       const incidentBlocked = await productHasBlockingBlingIncident(input.organizationId, input.productId);
       if (incidentBlocked) {
@@ -2232,7 +2665,7 @@ export class BlingProductUpdateService {
         organizationId: input.organizationId,
         connectionId: input.connectionId,
         productId: input.productId,
-        readOnly: false,
+        readOnly: input.operation === "IMAGES_ONLY_APPEND",
         confirmedLinkMismatchExternalProductId:
           confirmedLinkMismatchExternalProductId ?? incidentReviewExternalProductId
       });
@@ -2241,6 +2674,12 @@ export class BlingProductUpdateService {
         && inspection.externalProductId !== incidentReviewExternalProductId
       ) {
         throw new BlingProductIncidentError();
+      }
+      if (
+        imageAppendConfirmation
+        && inspection.externalProductId !== imageAppendConfirmation.externalProductId
+      ) {
+        throw new BlingProductImagePreconditionError();
       }
       externalProductIdMasked = maskBlingProductId(inspection.externalProductId);
       const item = inspection.publicItem;
@@ -2273,9 +2712,57 @@ export class BlingProductUpdateService {
           ...failure
         };
       } else {
-        const reviewed = normalizeBlingProductReview(input.fields, inspection.localValues, inspection.remoteProduct);
-        const changedFields = compareBlingProductValues(reviewed, inspection.remoteProduct);
+        let remoteBeforePatch = inspection.remoteProduct;
+        let reviewed = normalizeBlingProductReview(input.fields, inspection.localValues, remoteBeforePatch);
+        let changedFields = compareBlingProductValues(reviewed, remoteBeforePatch);
         attemptedFields = changedFields;
+        if (input.operation === "IMAGES_ONLY_APPEND" && reviewed.images) {
+          stage = "IMAGE_VALIDATION";
+          await validateBlingProductImageAccessibility(reviewed.images);
+          const freshPayload = await blingApiClient.requestReadOnly<unknown>({
+            organizationId: input.organizationId,
+            connectionId: input.connectionId,
+            path: `/produtos/${inspection.externalProductId}`
+          });
+          remoteBeforePatch = remoteData(freshPayload);
+          if (
+            !imageAppendConfirmation
+            || createBlingProductProtectedFieldsFingerprint(remoteBeforePatch)
+              !== imageAppendConfirmation.protectedFieldsFingerprint
+            || createBlingProductRemoteGalleryFingerprint(remoteBeforePatch)
+              !== imageAppendConfirmation.remoteGalleryFingerprint
+          ) {
+            throw new BlingProductImagePreconditionError();
+          }
+          reviewed = normalizeBlingProductReview(input.fields, inspection.localValues, remoteBeforePatch);
+          changedFields = compareBlingProductValues(reviewed, remoteBeforePatch);
+          attemptedFields = changedFields;
+          if (changedFields.includes("images")) {
+            const dryRun = createBlingProductUpdateDryRun({
+              externalProductId: inspection.externalProductId,
+              remoteValue: remoteBeforePatch,
+              reviewed,
+              fields: ["images"],
+              confirmed: true
+            });
+            if (!dryRun.appendPlanValid) {
+              throw new BlingProductPatchDataError([
+                ...dryRun.missingFields,
+                ...dryRun.ambiguousFields
+              ]);
+            }
+            await recordImageAppendJobSnapshot({
+              jobId: prepared.jobId,
+              idempotencyKey: input.idempotencyKey,
+              externalProductIdMasked,
+              protectedFieldsFingerprint: dryRun.protectedFieldsFingerprint,
+              remoteGalleryFingerprint: dryRun.remoteGalleryFingerprint,
+              remoteImageCount: dryRun.remoteImageCount,
+              newImageCount: dryRun.newImageCount,
+              finalImageCount: dryRun.finalImageCount
+            });
+          }
+        }
         if (!changedFields.length) {
           result = {
             productId: input.productId,
@@ -2292,23 +2779,48 @@ export class BlingProductUpdateService {
             }
           };
         } else {
-          if (changedFields.includes("images") && reviewed.images) {
-            stage = "IMAGE_VALIDATION";
-            await validateBlingProductImageAccessibility(reviewed.images);
-          }
           const body = buildBlingProductPatchPayload(
             reviewed,
-            inspection.remoteProduct,
+            remoteBeforePatch,
             changedFields,
             { confirmed: true }
           );
           stage = "PATCH";
           patchRequests = 1;
-          await blingApiClient.request<unknown>({ organizationId: input.organizationId, connectionId: input.connectionId, method: "PATCH", path: `/produtos/${inspection.externalProductId}`, body });
+          const patchRequest = {
+            organizationId: input.organizationId,
+            connectionId: input.connectionId,
+            method: "PATCH" as const,
+            path: `/produtos/${inspection.externalProductId}`,
+            body
+          };
+          if (input.operation === "IMAGES_ONLY_APPEND") {
+            await blingApiClient.requestWithoutRefresh<unknown>(patchRequest);
+          } else {
+            await blingApiClient.request<unknown>(patchRequest);
+          }
           stage = "VERIFY_GET";
           verificationGetExecuted = true;
-          const verification = await verifyUpdatedBlingProduct({ organizationId: input.organizationId, connectionId: input.connectionId, externalProductId: inspection.externalProductId, reviewed, fields: changedFields, beforeRemote: inspection.remoteProduct });
-          if (!verification.updatedFieldsMatch) {
+          const verification = await verifyUpdatedBlingProduct({ organizationId: input.organizationId, connectionId: input.connectionId, externalProductId: inspection.externalProductId, reviewed, fields: changedFields, beforeRemote: remoteBeforePatch });
+          const imageIntegrityFailed = changedFields.includes("images")
+            && verification.imageVerification?.matches !== true;
+          if (imageIntegrityFailed || verification.integrityMismatches.length) {
+            result = {
+              productId: input.productId,
+              externalProductIdMasked: maskBlingProductId(inspection.externalProductId),
+              status: "FAILED",
+              code: "EXTERNAL_UPDATE_INTEGRITY_FAILED",
+              message: "O Bling alterou a galeria de forma diferente da previa. Novas operacoes foram bloqueadas.",
+              fields: changedFields,
+              audit: {
+                stage: "VERIFY_GET",
+                patchRequests,
+                patchRequestState: "SENT",
+                verificationGetExecuted,
+                localTimestampUpdated: false
+              }
+            };
+          } else if (!verification.updatedFieldsMatch) {
             const failure = describeBlingProductUpdateFailure({
               error: new Error("Bling verification mismatch"),
               stage,
@@ -2322,22 +2834,6 @@ export class BlingProductUpdateService {
               status: "FAILED",
               fields: changedFields,
               ...failure
-            };
-          } else if (verification.integrityMismatches.length) {
-            result = {
-              productId: input.productId,
-              externalProductIdMasked: maskBlingProductId(inspection.externalProductId),
-              status: "FAILED",
-              code: "EXTERNAL_UPDATE_INTEGRITY_FAILED",
-              message: "O Bling atualizou o produto, mas outros dados precisam ser revisados antes de continuar.",
-              fields: changedFields,
-              audit: {
-                stage: "VERIFY_GET",
-                patchRequests,
-                patchRequestState: "SENT",
-                verificationGetExecuted,
-                localTimestampUpdated: false
-              }
             };
           } else {
             stage = "LOCAL_CONFIRMATION";
