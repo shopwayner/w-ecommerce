@@ -1233,7 +1233,12 @@ export function ProductsPage() {
 
   return (
     <AppShell denseDesktopShell>
-      <div className="relative flex min-w-0 items-stretch lg:h-[calc(100dvh-5.375rem)] lg:min-h-0 lg:gap-3 lg:overflow-hidden" data-testid="products-layout">
+      <div
+        className={`relative flex min-w-0 items-stretch ${
+          blingUpdateOpen ? "max-w-full overflow-x-clip" : ""
+        } lg:h-[calc(100dvh-5.375rem)] lg:min-h-0 lg:gap-3 lg:overflow-hidden`}
+        data-testid="products-layout"
+      >
         <div className="min-w-0 flex-1 lg:flex lg:min-h-0 lg:flex-col lg:overflow-hidden" data-testid="products-list-area">
           <div className="shrink-0 [&>div]:!mb-3 [&>div]:!flex-wrap [&>div]:!py-2 [&_h2]:!text-2xl">
           <PageHeader
