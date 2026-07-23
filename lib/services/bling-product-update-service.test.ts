@@ -2412,8 +2412,9 @@ test("renders only the simplified single-product modal contract", () => {
   assert.match(pageSource, /blingUpdateBusy,?\s*\|\|\s*blingUpdateRequestInFlight\.current/);
   assert.equal((pageSource.match(/method: "POST"/g) ?? []).filter(Boolean).length > 0, true);
   assert.match(modalSource, /Atualizar produto no Bling/);
+  assert.match(modalSource, /Gerar prévia das fotos/);
   assert.match(modalSource, /Adicionar fotos ao Bling/);
-  assert.match(modalSource, /Confirmar e adicionar fotos/);
+  assert.doesNotMatch(modalSource, /Confirmar e adicionar fotos/);
   assert.match(
     modalSource,
     /Este produto ultrapassaria o limite de 13 imagens\./,
@@ -2423,7 +2424,7 @@ test("renders only the simplified single-product modal contract", () => {
   assert.match(modalSource, /As fotos já estão atualizadas no Bling\./);
   assert.match(modalSource, /As fotos não serão enviadas nesta atualização\./);
   assert.match(modalSource, /Atualizando nome\.\.\./);
-  assert.match(modalSource, /Adicionando fotos\.\.\./);
+  assert.match(modalSource, /Enviando fotos ao Bling\.\.\./);
   assert.doesNotMatch(modalSource, /makeSelectedImagePrimary|removeSelectedImage|galleryReductionRequiresConfirmation/);
   assert.match(modalSource, /item\?\.status === "VINCULO_PRECISA_REVISAO"/);
   assert.match(modalSource, /linkNeedsReview \? \(/);

@@ -12,6 +12,10 @@ import {
   X
 } from "lucide-react";
 import { Button } from "@/components/ui";
+import {
+  BLING_IMAGE_APPEND_DISABLED_MESSAGE,
+  getBlingImageAppendButtonState
+} from "@/lib/bling-product-image-append-client";
 
 export type BlingProductEditableValues = {
   name: string;
@@ -213,6 +217,8 @@ export function BlingProductUpdateModal({
   const imagesPatchEnabled = preview?.capabilities.imagesPatchEnabled === true;
   const imagesAlreadySynced = item?.imageComparison === "IMAGES_ALREADY_SYNCED";
   const imagesDifferent = item?.imageComparison === "IMAGES_DIFFERENT";
+  const completed = result?.status === "UPDATED" || result?.status === "UNCHANGED";
+  const retryBlocked = result?.code === "VERIFICATION_REQUIRED";
   const imagePreviewMatchesSelection = Boolean(
     item?.dryRun
     && item.dryRun.selectedImages.length === selectedLocalImages.length
@@ -222,12 +228,19 @@ export function BlingProductUpdateModal({
     item?.dryRun?.missingFields.some((field) =>
       field.endsWith("IMAGE_LIMIT_EXCEEDED"),
     ) ?? false;
-  const canConfirmImages = Boolean(
-    imagePreviewMatchesSelection
-    && item?.dryRun?.appendPlanValid
-    && item.dryRun.imageAppendConfirmation
-    && imagesPatchEnabled
-  );
+  const imageAppendButtonState = getBlingImageAppendButtonState({
+    appendPlanValid: item?.dryRun?.appendPlanValid === true,
+    busy,
+    canUpdate: item?.dryRun?.canUpdate === true,
+    completed,
+    confirmationToken: item?.dryRun?.imageAppendConfirmation,
+    imagesPatchEnabled,
+    previewMatchesSelection: imagePreviewMatchesSelection,
+    retryBlocked,
+    safeToExecute: item?.dryRun?.safeToExecute === true,
+    selectedImageCount: selectedLocalImages.length
+  });
+  const canConfirmImages = imageAppendButtonState.enabled;
   const incidentNeedsReview = item?.status === "INCIDENT_REVIEW_REQUIRED";
   const incidentNameOnly = preview?.confirmedIncidentReview === true;
   const linkNeedsReview = item?.status === "VINCULO_PRECISA_REVISAO";
@@ -243,8 +256,6 @@ export function BlingProductUpdateModal({
       && item.local.name !== remote.name
       && normalizePresentationText(item.local.name) === normalizePresentationText(remote.name)
   );
-  const completed = result?.status === "UPDATED" || result?.status === "UNCHANGED";
-  const retryBlocked = result?.code === "VERIFICATION_REQUIRED";
   const selectedImage = images[selectedImageIndex] ?? null;
   const friendlyMessage = message || (!canReview ? item?.message ?? "" : "");
   const localRecordWarning = Boolean(
@@ -603,17 +614,18 @@ export function BlingProductUpdateModal({
                   ) : null}
                   {imagesDifferent && !imagesPatchEnabled ? (
                     <p className="mt-3 text-xs text-amber-200">
-                      As fotos não serão enviadas nesta atualização.
+                      {BLING_IMAGE_APPEND_DISABLED_MESSAGE}
                     </p>
                   ) : null}
                   <Button
+                    aria-label="Gerar prévia das fotos sem enviar ao Bling"
                     className="mt-3 w-full sm:w-auto"
                     disabled={!selectedLocalImages.length || busy || completed}
                     onClick={() => onPreviewImages(selectedLocalImages)}
                     type="button"
                     variant="secondary"
                   >
-                    Adicionar fotos ao Bling
+                    Gerar prévia das fotos
                   </Button>
                   <p className="mt-2 text-xs text-matrix-muted">
                     Este primeiro passo apenas gera a prévia. Nenhuma foto é enviada sem a confirmação seguinte.
@@ -629,7 +641,7 @@ export function BlingProductUpdateModal({
                       </div>
                       {!imagesPatchEnabled ? (
                         <p className="mt-3 text-xs text-amber-200">
-                          A atualização de fotos permanece bloqueada durante a validação controlada.
+                          {BLING_IMAGE_APPEND_DISABLED_MESSAGE}
                         </p>
                       ) : null}
                       {imageLimitExceeded ? (
@@ -660,6 +672,9 @@ export function BlingProductUpdateModal({
                           Todas as fotos remotas permanecem na mesma ordem; as novas entram somente no final.
                         </p>
                       ) : null}
+                      <p className="mt-3 rounded border border-amber-400/30 bg-amber-400/10 px-2.5 py-2 text-xs text-amber-100">
+                        A próxima ação, Adicionar fotos ao Bling, realizará uma atualização real quando estiver habilitada.
+                      </p>
                     </div>
                   ) : null}
                 </div>
@@ -800,6 +815,7 @@ export function BlingProductUpdateModal({
             <>
               {item?.dryRun && imagePreviewMatchesSelection ? (
                 <Button
+                  aria-label="Confirmar e enviar as fotos selecionadas ao Bling"
                   className="w-full sm:w-auto"
                   disabled={!canConfirmImages || busy || completed || retryBlocked}
                   onClick={() => {
@@ -808,7 +824,7 @@ export function BlingProductUpdateModal({
                   }}
                   type="button"
                 >
-                  {busy ? "Adicionando fotos..." : "Confirmar e adicionar fotos"}
+                  {busy ? "Enviando fotos ao Bling..." : "Adicionar fotos ao Bling"}
                 </Button>
               ) : null}
               <Button

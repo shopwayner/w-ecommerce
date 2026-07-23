@@ -56,6 +56,10 @@ import {
   type ProductListFilterOptions,
   type ProductListFilters
 } from "@/lib/product-list-filters";
+import {
+  BLING_IMAGE_APPEND_SENDING_MESSAGE,
+  confirmBlingImageAppend
+} from "@/lib/bling-product-image-append-client";
 
 const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre-oval.png";
 
@@ -978,40 +982,46 @@ export function ProductsPage() {
 
   async function confirmBlingProductImages(images: string[], imageAppendConfirmation: string) {
     const idempotencyKey = blingImageAppendIdempotencyKey.current;
-    if (
-      !selectedBlingConnectionId
-      || !blingUpdatePreview
-      || !blingUpdatePreview.capabilities.imagesPatchEnabled
-      || !idempotencyKey
-      || !images.length
-      || blingUpdateBusy
-      || blingUpdateRequestInFlight.current
-      || blingUpdateResult?.status === "UPDATED"
-    ) return;
+    const outcome = await confirmBlingImageAppend<BlingProductUpdateResult>({
+      busy: blingUpdateBusy,
+      completed: blingUpdateResult?.status === "UPDATED",
+      confirmationToken: imageAppendConfirmation,
+      connectionId: selectedBlingConnectionId,
+      idempotencyKey,
+      images,
+      imagesPatchEnabled: blingUpdatePreview?.capabilities.imagesPatchEnabled === true,
+      productId: blingUpdatePreview?.item.productId ?? null,
+      requestState: blingUpdateRequestInFlight,
+      onRequestStart: () => {
+        setBlingUpdateBusy(true);
+        setBlingUpdateMessage(BLING_IMAGE_APPEND_SENDING_MESSAGE);
+      }
+    });
 
-    blingUpdateRequestInFlight.current = true;
-    setBlingUpdateBusy(true);
-    setBlingUpdateMessage("Adicionando somente as novas fotos ao Bling...");
+    if (outcome.kind === "BLOCKED") {
+      if (outcome.code !== "IN_FLIGHT") setBlingUpdateMessage(outcome.message);
+      return;
+    }
+
     try {
-      const response = await fetch("/api/products/bling/update", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          connectionId: selectedBlingConnectionId,
-          productId: blingUpdatePreview.item.productId,
-          operation: "IMAGES_ONLY_APPEND",
-          fields: { images },
-          confirmed: true,
-          idempotencyKey,
-          imageAppendConfirmation
-        })
-      });
-      const payload = await response.json().catch(() => ({}));
-      const result = payload.data?.item as BlingProductUpdateResult | undefined;
-      if (!response.ok || !result) {
-        setBlingUpdateMessage(payload.error ?? "Nao foi possivel adicionar as fotos no Bling agora.");
+      if (outcome.kind === "REJECTED") {
+        setBlingUpdateMessage(outcome.message);
         return;
       }
+      if (outcome.kind === "VERIFICATION_REQUIRED") {
+        setBlingUpdateResult({
+          productId: blingUpdatePreview?.item.productId ?? "",
+          externalProductIdMasked: null,
+          status: "FAILED",
+          code: "VERIFICATION_REQUIRED",
+          message: outcome.message,
+          fields: ["images"]
+        });
+        setBlingUpdateMessage(outcome.message);
+        return;
+      }
+
+      const result = outcome.result;
       setBlingUpdateResult(result);
       setBlingUpdateMessage(result.message);
       if (result.status === "FAILED" && result.code !== "VERIFICATION_REQUIRED") {
@@ -1021,18 +1031,7 @@ export function ProductsPage() {
         setSelectedProductIds((current) => new Set([...current].filter((id) => id !== result.productId)));
         await loadProducts();
       }
-    } catch {
-      setBlingUpdateResult({
-        productId: blingUpdatePreview.item.productId,
-        externalProductIdMasked: null,
-        status: "FAILED",
-        code: "VERIFICATION_REQUIRED",
-        message: "A atualizacao pode ter sido concluida. Verifique novamente antes de tentar.",
-        fields: ["images"]
-      });
-      setBlingUpdateMessage("A atualizacao pode ter sido concluida. Verifique novamente antes de tentar.");
     } finally {
-      blingUpdateRequestInFlight.current = false;
       setBlingUpdateBusy(false);
     }
   }
