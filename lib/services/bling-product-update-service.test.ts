@@ -2406,7 +2406,7 @@ test("renders only the simplified single-product modal contract", () => {
     "utf8"
   );
 
-  assert.match(pageSource, /productId: selectedBlingProduct\.id/);
+  assert.match(pageSource, /fetchBlingUpdatePreview\(selectedBlingProduct\.id\)/);
   assert.doesNotMatch(pageSource, /productIds: selectedProducts\.map/);
   assert.match(pageSource, /blingUpdateRequestInFlight\.current/);
   assert.match(pageSource, /blingUpdateBusy,?\s*\|\|\s*blingUpdateRequestInFlight\.current/);
@@ -2450,7 +2450,10 @@ test("renders only the simplified single-product modal contract", () => {
   );
   assert.doesNotMatch(previewFunction, /crypto\.randomUUID/);
   assert.match(pageSource, /blingUpdateIdempotencyKey\.current \?\? crypto\.randomUUID\(\)/);
-  assert.match(pageSource, /result\.status === "FAILED" && result\.code !== "VERIFICATION_REQUIRED"/);
+  assert.match(
+    pageSource,
+    /if \(result\.status === "FAILED"\) \{[\s\S]*if \(result\.code !== "VERIFICATION_REQUIRED"\) \{/
+  );
   assert.match(pageSource, /blingUpdateIdempotencyKey\.current = null/);
   assert.match(modalSource, /retryBlocked/);
   assert.match(modalSource, /setImages\(item\?\.remote\?\.images \?\? \[\]\)/);
@@ -2469,7 +2472,7 @@ test("renders only the simplified single-product modal contract", () => {
   assert.doesNotMatch(modalSource, /brandChanged|brandTouched|Usar marca do W Ecommerce/);
   assert.doesNotMatch(modalSource, />\s*Marca\s*</i);
   assert.doesNotMatch(pageSource, /fields\.images\.length/);
-  assert.match(pageSource, /productId: selectedBlingProduct\.id/);
+  assert.match(pageSource, /fetchBlingUpdatePreview\(selectedBlingProduct\.id\)/);
   for (const hiddenLabel of [
     "Descricao",
     "Categoria",

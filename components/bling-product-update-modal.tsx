@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import {
   AlertTriangle,
@@ -16,6 +16,10 @@ import {
   BLING_IMAGE_APPEND_DISABLED_MESSAGE,
   getBlingImageAppendButtonState
 } from "@/lib/bling-product-image-append-client";
+import {
+  applyBlingProductUpdateCompletion,
+  type BlingProductUpdateCompletion
+} from "@/lib/bling-product-update-continuation";
 
 export type BlingProductEditableValues = {
   name: string;
@@ -135,6 +139,7 @@ type BlingProductUpdateModalProps = {
   onPreviewImages: (images: string[]) => void;
   onConfirmIncidentReview: () => void;
   onConfirmLinkMismatch: () => void;
+  operationCompletion: BlingProductUpdateCompletion | null;
   preview: BlingProductUpdatePreview | null;
   result: BlingProductUpdateResult | null;
 };
@@ -173,6 +178,7 @@ export function BlingProductUpdateModal({
   onPreviewImages,
   onConfirmIncidentReview,
   onConfirmLinkMismatch,
+  operationCompletion,
   preview,
   result
 }: BlingProductUpdateModalProps) {
@@ -186,6 +192,7 @@ export function BlingProductUpdateModal({
   const [showIncidentReview, setShowIncidentReview] = useState(false);
   const [incidentReviewAcknowledged, setIncidentReviewAcknowledged] = useState(false);
   const [nameTouched, setNameTouched] = useState(false);
+  const appliedCompletionSequence = useRef(0);
 
   useEffect(() => {
     setTitle(item?.remote?.name ?? item?.local?.name ?? "");
@@ -200,6 +207,40 @@ export function BlingProductUpdateModal({
     // Keep the selected local photos when this product receives a refreshed dry-run preview.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [item?.productId]);
+
+  useEffect(() => {
+    if (
+      !operationCompletion
+      || operationCompletion.sequence <= appliedCompletionSequence.current
+    ) {
+      return;
+    }
+    const next = applyBlingProductUpdateCompletion(
+      {
+        title,
+        nameTouched,
+        remoteImages: images,
+        selectedImageIndex,
+        selectedLocalImages
+      },
+      operationCompletion,
+      item?.remote?.images ?? []
+    );
+    setTitle(next.title);
+    setNameTouched(next.nameTouched);
+    setImages(next.remoteImages);
+    setSelectedImageIndex(next.selectedImageIndex);
+    setSelectedLocalImages(next.selectedLocalImages);
+    appliedCompletionSequence.current = operationCompletion.sequence;
+  }, [
+    images,
+    item?.remote?.images,
+    nameTouched,
+    operationCompletion,
+    selectedImageIndex,
+    selectedLocalImages,
+    title
+  ]);
 
   useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) {
@@ -719,7 +760,7 @@ export function BlingProductUpdateModal({
           {friendlyMessage && !incidentNeedsReview && !linkNeedsReview ? (
             <p
               className={`mt-4 rounded-md border px-3 py-2 text-sm ${
-                result?.status === "UPDATED" && !localRecordWarning
+                (result?.status === "UPDATED" || operationCompletion) && !localRecordWarning
                   ? "border-green-500/30 bg-green-500/10 text-green-300"
                   : localRecordWarning
                     ? "border-amber-500/30 bg-amber-500/10 text-amber-200"
