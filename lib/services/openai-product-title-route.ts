@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireApiAuth } from "@/lib/auth/api";
@@ -7,6 +8,8 @@ import { consumeSettingsRateLimit, type RateLimitResult } from "@/lib/security/s
 import {
   generateOpenAIProductTitleSuggestions,
   OpenAIProductTitleError,
+  type OpenAIProductTitleLogEvent,
+  type OpenAIProductTitleLogger,
   type ProductTitleSuggestion
 } from "@/lib/services/openai-product-title-service";
 
@@ -34,12 +37,24 @@ type ProductTitleRouteDependencies = {
     key: string,
     options: { limit: number; windowMs: number }
   ) => RateLimitResult;
-  generateSuggestions: (input: {
-    currentTitle: string;
-    brand: string | null;
-    category: string | null;
-  }) => Promise<ProductTitleSuggestion[]>;
+  generateSuggestions: (
+    input: {
+      currentTitle: string;
+      brand: string | null;
+      category: string | null;
+    },
+    context: {
+      correlationId: string;
+      logger: OpenAIProductTitleLogger;
+    }
+  ) => Promise<ProductTitleSuggestion[]>;
+  createCorrelationId: () => string;
+  logger: OpenAIProductTitleLogger;
 };
+
+function logProductTitleAiEvent(event: OpenAIProductTitleLogEvent) {
+  console.info("[openai.product-title]", event);
+}
 
 const defaultDependencies: ProductTitleRouteDependencies = {
   authenticate: async () => requireApiAuth("products:write") as Promise<RouteAuthResult>,
@@ -48,7 +63,15 @@ const defaultDependencies: ProductTitleRouteDependencies = {
     select: { id: true, name: true, brand: true, category: true }
   }),
   consumeRateLimit: consumeSettingsRateLimit,
-  generateSuggestions: generateOpenAIProductTitleSuggestions
+  generateSuggestions: (input, context) => generateOpenAIProductTitleSuggestions(
+    input,
+    {
+      correlationId: context.correlationId,
+      logger: context.logger
+    }
+  ),
+  createCorrelationId: randomUUID,
+  logger: logProductTitleAiEvent
 };
 
 const emptyRequestSchema = z.object({}).strict();
@@ -134,11 +157,17 @@ export function createProductTitleAiPost(
     }
 
     try {
-      const suggestions = await dependencies.generateSuggestions({
-        currentTitle: product.name,
-        brand: normalizeProductBrand(product.brand),
-        category: product.category
-      });
+      const suggestions = await dependencies.generateSuggestions(
+        {
+          currentTitle: product.name,
+          brand: normalizeProductBrand(product.brand),
+          category: product.category
+        },
+        {
+          correlationId: dependencies.createCorrelationId(),
+          logger: dependencies.logger
+        }
+      );
       return NextResponse.json({ suggestions });
     } catch (error) {
       if (error instanceof OpenAIProductTitleError) {
