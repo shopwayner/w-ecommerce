@@ -281,6 +281,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   const saveInFlight = useRef(false);
   const pointerDragImageId = useRef<string | null>(null);
   const titleAiRequest = useRef<AbortController | null>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const cancelTitleAi = useCallback(() => {
     titleAiRequest.current?.abort();
     titleAiRequest.current = null;
@@ -583,6 +584,37 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     setError(null);
   }
 
+  function openTitleAiExperience() {
+    if (!editing) beginEditing();
+    requestAnimationFrame(() => nameInputRef.current?.focus());
+    void generateTitleSuggestions();
+  }
+
+  function renderTitleAiTrigger() {
+    return (
+      <span className="group/title-ai relative inline-flex shrink-0">
+        <button
+          aria-describedby="product-title-ai-tooltip"
+          aria-label="Melhorar título com IA"
+          className="inline-flex h-8 min-w-[3.5rem] shrink-0 items-center justify-center rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/25 px-2.5 text-xs font-bold text-matrix-goldDark transition hover:border-matrix-gold/70 hover:bg-matrix-goldSoft/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold disabled:cursor-not-allowed disabled:opacity-55"
+          disabled={saving || titleAiLoading || !canEditProduct || !detailsLoaded || detailsLoading}
+          onClick={openTitleAiExperience}
+          title="Melhorar título com IA"
+          type="button"
+        >
+          {titleAiLoading ? "✦ IA..." : "✦ IA"}
+        </button>
+        <span
+          className="pointer-events-none invisible absolute right-0 top-full z-30 mt-2 w-max max-w-[min(15rem,calc(100vw-2rem))] rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-medium text-matrix-fg opacity-0 shadow-glow transition group-hover/title-ai:visible group-hover/title-ai:opacity-100 group-focus-within/title-ai:visible group-focus-within/title-ai:opacity-100"
+          id="product-title-ai-tooltip"
+          role="tooltip"
+        >
+          Melhorar título com IA
+        </span>
+      </span>
+    );
+  }
+
   function cancelEdit() {
     const nextImages = orderedImages(currentProduct);
     setForm(formFromProduct(currentProduct));
@@ -796,7 +828,10 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
                 const inputId = `product-details-${field.id}`;
                 return (
                   <div key={field.id} className={cardClass}>
-                    <label className="flex items-center gap-2 text-xs text-matrix-muted" htmlFor={inputId}><Icon className="h-4 w-4 text-matrix-goldDark" />{field.label}</label>
+                    <div className="flex min-w-0 items-center justify-between gap-2">
+                      <label className="flex min-w-0 items-center gap-2 text-xs text-matrix-muted" htmlFor={inputId}><Icon className="h-4 w-4 shrink-0 text-matrix-goldDark" />{field.label}</label>
+                      {field.id === "name" ? renderTitleAiTrigger() : null}
+                    </div>
                     {field.id === "condition" ? (
                       <select className={inputClass} id={inputId} onChange={(event) => updateField("condition", event.target.value)} value={form.condition}>
                         <option value="">Nao informado</option>
@@ -812,28 +847,26 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
                         maxLength={field.id === "name" ? PRODUCT_DETAILS_NAME_MAX_LENGTH : field.id === "brand" ? 120 : undefined}
                         onChange={(event) => updateField(formKey, event.target.value)}
                         placeholder={field.placeholder}
+                        ref={field.id === "name" ? nameInputRef : undefined}
                         value={form[formKey]}
                       />
                     )}
                     {field.id === "name" ? <span className={`mt-1 block text-right text-xs ${form.name.length >= 55 ? "text-matrix-goldDark" : "text-matrix-muted"}`}>{form.name.length}/{PRODUCT_DETAILS_NAME_MAX_LENGTH}</span> : null}
-                    {field.id === "name" ? (
-                      <Button
-                        className="mt-2 w-full justify-center"
-                        disabled={saving || titleAiLoading}
-                        onClick={() => void generateTitleSuggestions()}
-                        type="button"
-                        variant="secondary"
-                      >
-                        <Sparkles className="h-4 w-4" />
-                        {titleAiLoading ? "Gerando sugestões..." : "Melhorar título com IA"}
-                      </Button>
-                    ) : null}
                   </div>
                 );
               }
               return (
                 <div key={field.id} className={cardClass}>
-                  <div className="flex gap-3"><Icon className="mt-0.5 h-4 w-4 shrink-0 text-matrix-goldDark" /><div className="min-w-0"><p className="text-xs text-matrix-muted">{field.label}</p><p className="mt-1 break-words text-sm font-semibold">{displayText(detailValues[field.id], field.placeholder)}</p></div></div>
+                  <div className="flex gap-3">
+                    <Icon className="mt-0.5 h-4 w-4 shrink-0 text-matrix-goldDark" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-start justify-between gap-2">
+                        <p className="min-w-0 text-xs text-matrix-muted">{field.label}</p>
+                        {field.id === "name" && canEditProduct ? renderTitleAiTrigger() : null}
+                      </div>
+                      <p className="mt-1 break-words text-sm font-semibold">{displayText(detailValues[field.id], field.placeholder)}</p>
+                    </div>
+                  </div>
                 </div>
               );
             })}

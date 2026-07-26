@@ -8,12 +8,34 @@ const modalSource = readFileSync(
 );
 const envExample = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
 
-test("AI title action is available only while editing and uses the authenticated route", () => {
+test("AI title action uses a compact accessible trigger and the authenticated route", () => {
   assert.match(modalSource, /Melhorar título com IA/);
+  assert.match(modalSource, /aria-label="Melhorar título com IA"/);
+  assert.match(modalSource, /title="Melhorar título com IA"/);
+  assert.match(modalSource, /role="tooltip"/);
+  assert.match(modalSource, /"✦ IA"/);
+  assert.match(modalSource, /"✦ IA\.\.\."/);
   assert.match(modalSource, /Gerando sugestões\.\.\./);
   assert.match(modalSource, /Usar este título/);
   assert.match(modalSource, /Gerar novas sugestões/);
   assert.match(modalSource, /\/api\/products\/\$\{currentProduct\.id\}\/ai\/title/);
+});
+
+test("view trigger enters edit mode, focuses the name and opens the same AI flow", () => {
+  const start = modalSource.indexOf("function openTitleAiExperience");
+  const end = modalSource.indexOf("function renderTitleAiTrigger", start);
+  const triggerBlock = modalSource.slice(start, end);
+  assert.match(triggerBlock, /if \(!editing\) beginEditing\(\)/);
+  assert.match(triggerBlock, /nameInputRef\.current\?\.focus\(\)/);
+  assert.match(triggerBlock, /generateTitleSuggestions\(\)/);
+  assert.match(modalSource, /field\.id === "name" && canEditProduct \? renderTitleAiTrigger\(\)/);
+});
+
+test("compact trigger never saves locally or calls Bling", () => {
+  const start = modalSource.indexOf("function openTitleAiExperience");
+  const end = modalSource.indexOf("function cancelEdit", start);
+  const triggerAndMarkup = modalSource.slice(start, end);
+  assert.doesNotMatch(triggerAndMarkup, /saveProduct|confirmSave|\/api\/products\/bling|method: "PATCH"/);
 });
 
 test("choosing a suggestion changes only the local form and performs no request", () => {
