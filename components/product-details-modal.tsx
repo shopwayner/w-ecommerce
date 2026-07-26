@@ -27,6 +27,7 @@ import {
   Save,
   Scale,
   ShieldCheck,
+  Sparkles,
   Tag,
   Trash2,
   X
@@ -36,6 +37,7 @@ import { Button } from "@/components/ui";
 import { INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES } from "@/lib/intelligent-product-preview";
 import { normalizeMercadoLivreReferenceImageUrl } from "@/lib/mercado-livre-reference-images";
 import {
+  applyProductTitleSuggestion,
   buildProductDetailsPatch,
   createProductDetailsEditForm,
   PRODUCT_DETAILS_NAME_MAX_LENGTH,
@@ -49,6 +51,10 @@ type ProductDetailsImage = {
   url: string;
   position: number;
   pending?: boolean;
+};
+
+type ProductTitleSuggestion = {
+  title: string;
 };
 
 export type ProductDetailsProduct = {
@@ -266,10 +272,23 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const [saving, setSaving] = useState(false);
   const [searchingMercadoLivrePhotos, setSearchingMercadoLivrePhotos] = useState(false);
+  const [titleAiOpen, setTitleAiOpen] = useState(false);
+  const [titleAiLoading, setTitleAiLoading] = useState(false);
+  const [titleAiSuggestions, setTitleAiSuggestions] = useState<ProductTitleSuggestion[]>([]);
+  const [titleAiError, setTitleAiError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const saveInFlight = useRef(false);
   const pointerDragImageId = useRef<string | null>(null);
+  const titleAiRequest = useRef<AbortController | null>(null);
+  const cancelTitleAi = useCallback(() => {
+    titleAiRequest.current?.abort();
+    titleAiRequest.current = null;
+    setTitleAiOpen(false);
+    setTitleAiLoading(false);
+    setTitleAiSuggestions([]);
+    setTitleAiError(null);
+  }, []);
 
   const baselineForm = useMemo(() => formFromProduct(currentProduct), [currentProduct]);
   const currentImageKeys = useMemo(() => images.map(imageStateKey), [images]);
@@ -311,6 +330,12 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
         setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
         setBaselineImageKeys(nextImages.map(imageStateKey));
         setSelectedImageId(nextImages[0]?.id ?? null);
+        titleAiRequest.current?.abort();
+        titleAiRequest.current = null;
+        setTitleAiOpen(false);
+        setTitleAiLoading(false);
+        setTitleAiSuggestions([]);
+        setTitleAiError(null);
         setDetailsLoaded(true);
       } catch (loadError) {
         if (active) setError(loadError instanceof Error ? loadError.message : "Nao foi possivel carregar o produto.");
@@ -349,16 +374,21 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   }, [checkPermission]);
 
   useEffect(() => {
+    return () => titleAiRequest.current?.abort();
+  }, []);
+
+  useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       if (searchingMercadoLivrePhotos) return setSearchingMercadoLivrePhotos(false);
+      if (titleAiOpen) return cancelTitleAi();
       if (confirmingSave) return setConfirmingSave(false);
       if (confirmingDiscard) return setConfirmingDiscard(false);
       requestClose();
     }
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [confirmingDiscard, confirmingSave, requestClose, searchingMercadoLivrePhotos]);
+  }, [cancelTitleAi, confirmingDiscard, confirmingSave, requestClose, searchingMercadoLivrePhotos, titleAiOpen]);
 
   const statusText = statusLabels[currentProduct.status] ?? displayText(currentProduct.status);
   const originText = displayText(currentProduct.origin ?? currentProduct.source ?? (getBlingName(currentProduct) ? "BLING" : null));
@@ -413,6 +443,66 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     setForm((current) => ({ ...current, [key]: value }));
     setError(null);
     setFeedback(null);
+  }
+
+  async function generateTitleSuggestions() {
+    if (titleAiLoading) return;
+    titleAiRequest.current?.abort();
+    const controller = new AbortController();
+    titleAiRequest.current = controller;
+    setTitleAiOpen(true);
+    setTitleAiLoading(true);
+    setTitleAiSuggestions([]);
+    setTitleAiError(null);
+    setError(null);
+    setFeedback(null);
+
+    try {
+      const response = await fetch(`/api/products/${currentProduct.id}/ai/title`, {
+        method: "POST",
+        signal: controller.signal
+      });
+      const payload = (await response.json()) as {
+        suggestions?: ProductTitleSuggestion[];
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Nao foi possivel gerar sugestoes de titulo.");
+      }
+      if (
+        payload.suggestions?.length !== 3 ||
+        payload.suggestions.some(({ title }) => !title.trim() || title.trim().length > PRODUCT_DETAILS_NAME_MAX_LENGTH)
+      ) {
+        throw new Error("A IA nao retornou tres sugestoes validas.");
+      }
+      setTitleAiSuggestions(payload.suggestions);
+    } catch (requestError) {
+      if (controller.signal.aborted) return;
+      setTitleAiError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Nao foi possivel gerar sugestoes de titulo."
+      );
+    } finally {
+      if (titleAiRequest.current === controller) {
+        titleAiRequest.current = null;
+        setTitleAiLoading(false);
+      }
+    }
+  }
+
+  function applyTitleSuggestion(title: string) {
+    const result = applyProductTitleSuggestion(form, title);
+    if ("error" in result) {
+      setTitleAiError(result.error);
+      return;
+    }
+    setForm(result.form);
+    setTitleAiOpen(false);
+    setTitleAiSuggestions([]);
+    setTitleAiError(null);
+    setError(null);
+    setFeedback("Titulo aplicado ao formulario. Revise e salve as alteracoes quando estiver pronto.");
   }
 
   function reorderImage(fromId: string, toId: string) {
@@ -487,6 +577,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
     setBaselineImageKeys(nextImages.map(imageStateKey));
     setSelectedImageId(nextImages[0]?.id ?? null);
+    cancelTitleAi();
     setEditing(true);
     setFeedback(null);
     setError(null);
@@ -499,6 +590,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
     setBaselineImageKeys(nextImages.map(imageStateKey));
     setSelectedImageId(nextImages[0]?.id ?? null);
+    cancelTitleAi();
     setEditing(false);
     setConfirmingSave(false);
     setError(null);
@@ -578,6 +670,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
       setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
       setBaselineImageKeys(nextImages.map(imageStateKey));
       setSelectedImageId(nextImages[0]?.id ?? null);
+      cancelTitleAi();
       onProductUpdated(nextProduct);
       setEditing(false);
       setConfirmingSave(false);
@@ -700,11 +793,12 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
               const Icon = detailIcons[field.id];
               if (editing && field.editable) {
                 const formKey = field.id as keyof ProductDetailsEditForm;
+                const inputId = `product-details-${field.id}`;
                 return (
-                  <label key={field.id} className={cardClass}>
-                    <span className="flex items-center gap-2 text-xs text-matrix-muted"><Icon className="h-4 w-4 text-matrix-goldDark" />{field.label}</span>
+                  <div key={field.id} className={cardClass}>
+                    <label className="flex items-center gap-2 text-xs text-matrix-muted" htmlFor={inputId}><Icon className="h-4 w-4 text-matrix-goldDark" />{field.label}</label>
                     {field.id === "condition" ? (
-                      <select className={inputClass} onChange={(event) => updateField("condition", event.target.value)} value={form.condition}>
+                      <select className={inputClass} id={inputId} onChange={(event) => updateField("condition", event.target.value)} value={form.condition}>
                         <option value="">Nao informado</option>
                         <option value="NEW">Novo</option>
                         <option value="USED">Usado</option>
@@ -713,6 +807,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
                     ) : (
                       <input
                         className={inputClass}
+                        id={inputId}
                         inputMode={field.inputMode}
                         maxLength={field.id === "name" ? PRODUCT_DETAILS_NAME_MAX_LENGTH : field.id === "brand" ? 120 : undefined}
                         onChange={(event) => updateField(formKey, event.target.value)}
@@ -721,7 +816,19 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
                       />
                     )}
                     {field.id === "name" ? <span className={`mt-1 block text-right text-xs ${form.name.length >= 55 ? "text-matrix-goldDark" : "text-matrix-muted"}`}>{form.name.length}/{PRODUCT_DETAILS_NAME_MAX_LENGTH}</span> : null}
-                  </label>
+                    {field.id === "name" ? (
+                      <Button
+                        className="mt-2 w-full justify-center"
+                        disabled={saving || titleAiLoading}
+                        onClick={() => void generateTitleSuggestions()}
+                        type="button"
+                        variant="secondary"
+                      >
+                        <Sparkles className="h-4 w-4" />
+                        {titleAiLoading ? "Gerando sugestões..." : "Melhorar título com IA"}
+                      </Button>
+                    ) : null}
+                  </div>
                 );
               }
               return (
@@ -731,6 +838,68 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
               );
             })}
           </div>
+
+          {editing && titleAiOpen ? (
+            <section className="mt-3 rounded-lg border border-matrix-gold/35 bg-matrix-panel2/65 p-4" aria-label="Sugestões de título com IA">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-sm font-semibold">
+                    <Sparkles className="h-4 w-4 shrink-0 text-matrix-goldDark" />
+                    Sugestões de título
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-matrix-muted">
+                    Escolher uma sugestao preenche somente o campo Nome. Nada sera salvo ou enviado ao Bling automaticamente.
+                  </p>
+                </div>
+                <button
+                  aria-label="Cancelar sugestoes de titulo"
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-matrix-border text-matrix-muted transition hover:border-matrix-gold/60 hover:text-matrix-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold"
+                  onClick={cancelTitleAi}
+                  title="Cancelar"
+                  type="button"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {titleAiLoading ? (
+                <div className="mt-4 rounded-md border border-matrix-border bg-matrix-panel px-3 py-4 text-sm text-matrix-muted">
+                  Gerando sugestões...
+                </div>
+              ) : null}
+              {titleAiError ? (
+                <div className="mt-4 flex items-start gap-2 rounded-md border border-red-500/25 bg-red-500/10 px-3 py-3 text-sm text-red-700">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>{titleAiError}</span>
+                </div>
+              ) : null}
+              {titleAiSuggestions.length ? (
+                <div className="mt-4 grid gap-3 lg:grid-cols-3">
+                  {titleAiSuggestions.map(({ title }) => (
+                    <article key={title} className="flex min-w-0 flex-col rounded-md border border-matrix-border bg-matrix-panel p-3">
+                      <p className="break-words text-sm font-semibold leading-6">{title}</p>
+                      <p className={`mt-1 text-right text-xs ${title.length >= 55 ? "text-matrix-goldDark" : "text-matrix-muted"}`}>
+                        {title.length}/{PRODUCT_DETAILS_NAME_MAX_LENGTH}
+                      </p>
+                      <Button className="mt-3 w-full justify-center" onClick={() => applyTitleSuggestion(title)} type="button" variant="secondary">
+                        Usar este título
+                      </Button>
+                    </article>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                <Button disabled={titleAiLoading} onClick={cancelTitleAi} type="button" variant="secondary">
+                  Cancelar
+                </Button>
+                <Button disabled={titleAiLoading} onClick={() => void generateTitleSuggestions()} type="button">
+                  <Sparkles className="h-4 w-4" />
+                  {titleAiLoading ? "Gerando sugestões..." : "Gerar novas sugestões"}
+                </Button>
+              </div>
+            </section>
+          ) : null}
 
           <section className="mt-3 rounded-lg border border-matrix-border bg-matrix-panel2/65 p-4">
             <div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2 text-sm font-semibold"><FileText className="h-4 w-4 text-matrix-goldDark" />Descricao</div>{canToggleDescription ? <button aria-expanded={descriptionExpanded} className="inline-flex items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-semibold text-matrix-goldDark" onClick={() => setDescriptionExpanded((current) => !current)} type="button">{descriptionExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}{descriptionExpanded ? "Recolher" : "Expandir"}</button> : null}</div>

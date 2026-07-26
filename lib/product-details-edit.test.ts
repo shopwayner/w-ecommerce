@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyProductTitleSuggestion,
   buildProductDetailsPatch,
   createProductDetailsEditForm,
   PRODUCT_DETAILS_NAME_MAX_LENGTH,
@@ -134,6 +135,31 @@ test("accepts 60 title characters and rejects 61", () => {
 test("normalizes repeated title spaces before the limit and diff", () => {
   const baseline = createProductDetailsEditForm({ name: "Produto completo" });
   assert.deepEqual(buildProductDetailsPatch(baseline, { ...baseline, name: "  Produto   completo  " }), { payload: {} });
+});
+
+test("applying an AI suggestion changes only the local name field", () => {
+  const form = createProductDetailsEditForm(completeSource);
+  const result = applyProductTitleSuggestion(form, "  Retentor   Fazer 250 Smartfox  ");
+  assert.deepEqual(result, {
+    form: {
+      ...form,
+      name: "Retentor Fazer 250 Smartfox"
+    }
+  });
+  assert.deepEqual(form, createProductDetailsEditForm(completeSource));
+});
+
+test("an AI suggestion cannot bypass the 60 character title limit", () => {
+  const form = createProductDetailsEditForm(completeSource);
+  assert.deepEqual(applyProductTitleSuggestion(form, "a".repeat(60)), {
+    form: { ...form, name: "a".repeat(60) }
+  });
+  assert.deepEqual(applyProductTitleSuggestion(form, "a".repeat(61)), {
+    error: "O titulo deve ter no maximo 60 caracteres."
+  });
+  assert.deepEqual(applyProductTitleSuggestion(form, "   "), {
+    error: "Escolha um titulo valido."
+  });
 });
 
 test("backend accepts a partial brand patch without requiring name", () => {

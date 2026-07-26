@@ -128,6 +128,18 @@ function normalizedName(value: string) {
   return value.trim().replace(/\s+/g, " ");
 }
 
+export function applyProductTitleSuggestion(
+  form: ProductDetailsEditForm,
+  suggestion: string
+): { form: ProductDetailsEditForm } | { error: string } {
+  const name = normalizedName(suggestion);
+  if (!name) return { error: "Escolha um titulo valido." };
+  if (name.length > PRODUCT_DETAILS_NAME_MAX_LENGTH) {
+    return { error: "O titulo deve ter no maximo 60 caracteres." };
+  }
+  return { form: { ...form, name } };
+}
+
 function normalizedNullableText(value: string) {
   const normalized = value.trim();
   return normalized || null;
