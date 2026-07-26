@@ -2,15 +2,19 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { NextResponse } from "next/server";
+import OpenAI from "openai";
 import { z } from "zod";
 import { createProductTitleAiPost } from "@/lib/services/openai-product-title-route";
 import {
+  buildOpenAIProductTitleTextFormat,
+  classifyOpenAIProductTitleSdkError,
   createOfficialOpenAIResponse,
   generateOpenAIProductTitleSuggestions,
   inspectOpenAIProductTitleSuggestions,
   OpenAIProductTitleError,
   OPENAI_PRODUCT_TITLE_DEFAULT_MAX_OUTPUT_TOKENS,
   OPENAI_PRODUCT_TITLE_MAX_LENGTH,
+  OPENAI_PRODUCT_TITLE_SCHEMA_NAME,
   readOpenAIProductTitleConfig,
   validateOpenAIProductTitleSuggestions,
   type OpenAIProductTitleCreate,
@@ -151,6 +155,59 @@ test("uses a bounded output budget sufficient for JSON and reasoning tokens", ()
   );
 });
 
+test("zodTextFormat builds the strict object schema locally without incompatible constructs", () => {
+  const format = buildOpenAIProductTitleTextFormat();
+  const schema = format.schema as {
+    type?: string;
+    required?: string[];
+    additionalProperties?: boolean;
+    properties?: {
+      suggestions?: {
+        type?: string;
+        minItems?: number;
+        maxItems?: number;
+        items?: {
+          type?: string;
+          required?: string[];
+          additionalProperties?: boolean;
+          properties?: {
+            title?: {
+              type?: string;
+              minLength?: number;
+              maxLength?: number;
+            };
+          };
+        };
+      };
+    };
+  };
+  const suggestions = schema.properties?.suggestions;
+  const item = suggestions?.items;
+  const title = item?.properties?.title;
+
+  assert.equal(format.type, "json_schema");
+  assert.equal(format.name, OPENAI_PRODUCT_TITLE_SCHEMA_NAME);
+  assert.equal(format.strict, true);
+  assert.equal(schema.type, "object");
+  assert.deepEqual(schema.required, ["suggestions"]);
+  assert.equal(schema.additionalProperties, false);
+  assert.equal(suggestions?.type, "array");
+  assert.equal(suggestions?.minItems, 3);
+  assert.equal(suggestions?.maxItems, 3);
+  assert.equal(item?.type, "object");
+  assert.deepEqual(item?.required, ["title"]);
+  assert.equal(item?.additionalProperties, false);
+  assert.deepEqual(title, {
+    type: "string",
+    minLength: 1,
+    maxLength: OPENAI_PRODUCT_TITLE_MAX_LENGTH
+  });
+  assert.doesNotMatch(
+    JSON.stringify(schema),
+    /"anyOf"|"oneOf"|"allOf"|"transform"|"refine"/
+  );
+});
+
 test("responses.parse reads valid output_parsed and sends strict JSON Schema in text.format", async () => {
   let parseCalls = 0;
   const officialResponse = createOfficialOpenAIResponse(
@@ -169,7 +226,12 @@ test("responses.parse reads valid output_parsed and sends strict JSON Schema in 
         OPENAI_PRODUCT_TITLE_DEFAULT_MAX_OUTPUT_TOKENS
       );
       assert.equal(body.text.format.type, "json_schema");
+      assert.equal(body.text.format.name, OPENAI_PRODUCT_TITLE_SCHEMA_NAME);
       assert.equal(body.text.format.strict, true);
+      assert.deepEqual(
+        Object.keys(body.text.format.schema).sort(),
+        ["$schema", "additionalProperties", "properties", "required", "type"]
+      );
       assert.deepEqual(Object.keys(body).sort(), [
         "input",
         "max_output_tokens",
@@ -265,7 +327,13 @@ test("completed response logs only sanitized metadata and token usage", async ()
       outputTokens: 70,
       reasoningTokens: 20,
       totalTokens: 110
-    }
+    },
+    errorClass: null,
+    errorType: null,
+    errorCode: null,
+    requestIdMasked: null,
+    errorStage: null,
+    retryCount: 0
   });
 });
 
@@ -523,32 +591,225 @@ test("empty product title is rejected before the mocked provider is called", asy
   assert.equal(calls, 0);
 });
 
-test("provider HTTP 401, 403 and 429 are sanitized and never retried", async () => {
-  for (const status of [401, 403, 429]) {
-    let calls = 0;
-    const logs = captureLogs();
-    await expectTitleError(
-      () => generateOpenAIProductTitleSuggestions(
-        sourceInput,
-        {
-          env: enabledEnv,
-          createResponse: async () => {
-            calls += 1;
-            throw Object.assign(
-              new Error(`provider secret ${enabledEnv.OPENAI_API_KEY}`),
-              { status }
-            );
-          },
-          correlationId: `correlation-${status}`,
-          logger: logs.logger
-        }
+test("SDK errors are classified, sanitized and never retried", async (t) => {
+  const requestId = "req_123456789abcdef";
+  const apiHeaders = () => new Headers({ "x-request-id": requestId });
+  const cases = [
+    {
+      name: "BadRequestError",
+      error: new OpenAI.BadRequestError(
+        400,
+        { type: "invalid_request_error", code: "invalid_json_schema" },
+        `secret ${enabledEnv.OPENAI_API_KEY}`,
+        apiHeaders()
       ),
-      "OPENAI_REQUEST_FAILED"
-    );
-    assert.equal(calls, 1);
-    assert.equal(logs.events.at(-1)?.httpStatus, status);
-    const serializedLogs = JSON.stringify(logs.events);
-    assert.doesNotMatch(serializedLogs, /test-key-never-sent|provider secret/i);
+      expected: {
+        errorClass: "BadRequestError",
+        httpStatus: 400,
+        errorType: "invalid_request_error",
+        errorCode: "invalid_json_schema",
+        requestIdMasked: "req_***cdef"
+      }
+    },
+    {
+      name: "AuthenticationError",
+      error: new OpenAI.AuthenticationError(
+        401,
+        { type: "invalid_request_error", code: "invalid_api_key" },
+        `secret ${enabledEnv.OPENAI_API_KEY}`,
+        apiHeaders()
+      ),
+      expected: {
+        errorClass: "AuthenticationError",
+        httpStatus: 401,
+        errorType: "invalid_request_error",
+        errorCode: "invalid_api_key",
+        requestIdMasked: "req_***cdef"
+      }
+    },
+    {
+      name: "PermissionDeniedError",
+      error: new OpenAI.PermissionDeniedError(
+        403,
+        { type: "permission_error", code: "insufficient_permissions" },
+        `secret ${enabledEnv.OPENAI_API_KEY}`,
+        apiHeaders()
+      ),
+      expected: {
+        errorClass: "PermissionDeniedError",
+        httpStatus: 403,
+        errorType: "permission_error",
+        errorCode: "insufficient_permissions",
+        requestIdMasked: "req_***cdef"
+      }
+    },
+    {
+      name: "NotFoundError",
+      error: new OpenAI.NotFoundError(
+        404,
+        { type: "invalid_request_error", code: "model_not_found" },
+        `secret ${enabledEnv.OPENAI_API_KEY}`,
+        apiHeaders()
+      ),
+      expected: {
+        errorClass: "NotFoundError",
+        httpStatus: 404,
+        errorType: "invalid_request_error",
+        errorCode: "model_not_found",
+        requestIdMasked: "req_***cdef"
+      }
+    },
+    {
+      name: "RateLimitError",
+      error: new OpenAI.RateLimitError(
+        429,
+        { type: "rate_limit_error", code: "rate_limit_exceeded" },
+        `secret ${enabledEnv.OPENAI_API_KEY}`,
+        apiHeaders()
+      ),
+      expected: {
+        errorClass: "RateLimitError",
+        httpStatus: 429,
+        errorType: "rate_limit_error",
+        errorCode: "rate_limit_exceeded",
+        requestIdMasked: "req_***cdef"
+      }
+    },
+    {
+      name: "insufficient_quota",
+      error: new OpenAI.RateLimitError(
+        429,
+        { type: "insufficient_quota", code: "insufficient_quota" },
+        `secret ${enabledEnv.OPENAI_API_KEY}`,
+        apiHeaders()
+      ),
+      expected: {
+        errorClass: "InsufficientQuotaError",
+        httpStatus: 429,
+        errorType: "insufficient_quota",
+        errorCode: "insufficient_quota",
+        requestIdMasked: "req_***cdef"
+      }
+    },
+    {
+      name: "APIConnectionError",
+      error: new OpenAI.APIConnectionError({
+        message: `secret ${enabledEnv.OPENAI_API_KEY}`
+      }),
+      expected: {
+        errorClass: "APIConnectionError",
+        httpStatus: null,
+        errorType: null,
+        errorCode: null,
+        requestIdMasked: null
+      }
+    },
+    {
+      name: "APIConnectionTimeoutError",
+      error: new OpenAI.APIConnectionTimeoutError({
+        message: `secret ${enabledEnv.OPENAI_API_KEY}`
+      }),
+      expected: {
+        errorClass: "APIConnectionTimeoutError",
+        httpStatus: null,
+        errorType: null,
+        errorCode: null,
+        requestIdMasked: null
+      }
+    },
+    {
+      name: "InternalServerError",
+      error: new OpenAI.InternalServerError(
+        500,
+        { type: "server_error", code: "internal_error" },
+        `secret ${enabledEnv.OPENAI_API_KEY}`,
+        apiHeaders()
+      ),
+      expected: {
+        errorClass: "InternalServerError",
+        httpStatus: 500,
+        errorType: "server_error",
+        errorCode: "internal_error",
+        requestIdMasked: "req_***cdef"
+      }
+    },
+    {
+      name: "ZodTextFormatError",
+      error: new z.ZodError([]),
+      expected: {
+        errorClass: "ZodTextFormatError",
+        httpStatus: null,
+        errorType: null,
+        errorCode: null,
+        requestIdMasked: null
+      }
+    },
+    {
+      name: "UnknownError",
+      error: Object.assign(
+        new Error(`secret ${enabledEnv.OPENAI_API_KEY}`),
+        { type: "unsafe type with spaces", code: "<unsafe>" }
+      ),
+      expected: {
+        errorClass: "UnknownError",
+        httpStatus: null,
+        errorType: null,
+        errorCode: null,
+        requestIdMasked: null
+      }
+    }
+  ] as const;
+
+  for (const current of cases) {
+    await t.test(current.name, async () => {
+      const classified = classifyOpenAIProductTitleSdkError(current.error);
+      assert.deepEqual(classified, {
+        ...current.expected,
+        retryCount: 0
+      });
+
+      let calls = 0;
+      const logs = captureLogs();
+      await expectTitleError(
+        () => generateOpenAIProductTitleSuggestions(
+          sourceInput,
+          {
+            env: enabledEnv,
+            createResponse: async () => {
+              calls += 1;
+              throw current.error;
+            },
+            correlationId: `correlation-${current.name}`,
+            logger: logs.logger
+          }
+        ),
+        current.name === "ZodTextFormatError"
+          ? "OPENAI_OUTPUT_PARSE_FAILED"
+          : "OPENAI_REQUEST_FAILED"
+      );
+
+      const terminal = logs.events.at(-1);
+      assert.equal(calls, 1);
+      assert.equal(terminal?.stage, "request_failed");
+      assert.equal(terminal?.errorClass, current.expected.errorClass);
+      assert.equal(terminal?.httpStatus, current.expected.httpStatus);
+      assert.equal(terminal?.errorType, current.expected.errorType);
+      assert.equal(terminal?.errorCode, current.expected.errorCode);
+      assert.equal(terminal?.requestIdMasked, current.expected.requestIdMasked);
+      assert.equal(terminal?.retryCount, 0);
+      assert.equal(
+        terminal?.errorStage,
+        current.name === "ZodTextFormatError"
+          ? "response_parse"
+          : "provider_request"
+      );
+
+      const serializedLogs = JSON.stringify(logs.events);
+      assert.doesNotMatch(
+        serializedLogs,
+        /test-key-never-sent|provider secret|secret test-key|req_123456789abcdef/i
+      );
+    });
   }
 });
 

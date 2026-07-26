@@ -6,6 +6,7 @@ import { normalizeProductBrand } from "@/lib/product-brand";
 export const OPENAI_PRODUCT_TITLE_MAX_LENGTH = 60;
 export const OPENAI_PRODUCT_TITLE_TIMEOUT_MS = 12_000;
 export const OPENAI_PRODUCT_TITLE_DEFAULT_MAX_OUTPUT_TOKENS = 1_024;
+export const OPENAI_PRODUCT_TITLE_SCHEMA_NAME = "product_title_suggestions";
 
 export type ProductTitleSuggestion = {
   title: string;
@@ -47,12 +48,41 @@ type OpenAIProductTitleErrorCode =
   | "MISSING_MODEL"
   | "INVALID_INPUT"
   | "TIMEOUT"
+  | "OPENAI_SCHEMA_BUILD_FAILED"
   | "OPENAI_REQUEST_FAILED"
   | "OPENAI_RESPONSE_INCOMPLETE"
   | "OPENAI_RESPONSE_REFUSED"
   | "OPENAI_OUTPUT_MISSING"
   | "OPENAI_OUTPUT_PARSE_FAILED"
   | "OPENAI_NO_VALID_SUGGESTIONS";
+
+export type OpenAIProductTitleSdkErrorClass =
+  | "BadRequestError"
+  | "AuthenticationError"
+  | "PermissionDeniedError"
+  | "NotFoundError"
+  | "RateLimitError"
+  | "InsufficientQuotaError"
+  | "APIConnectionError"
+  | "APIConnectionTimeoutError"
+  | "InternalServerError"
+  | "ZodTextFormatError"
+  | "UnknownError";
+
+export type OpenAIProductTitleErrorStage =
+  | "schema_construction"
+  | "provider_request"
+  | "response_parse"
+  | "response_validation";
+
+export type OpenAIProductTitleSdkErrorDiagnostics = {
+  errorClass: OpenAIProductTitleSdkErrorClass;
+  httpStatus: number | null;
+  errorType: string | null;
+  errorCode: string | null;
+  requestIdMasked: string | null;
+  retryCount: 0;
+};
 
 type OpenAIProductTitleErrorDiagnostics = {
   httpStatus?: number | null;
@@ -63,6 +93,8 @@ type OpenAIProductTitleErrorDiagnostics = {
   receivedCount?: number;
   acceptedCount?: number;
   rejectionCodes?: OpenAIProductTitleRejectionCode[];
+  errorStage?: OpenAIProductTitleErrorStage | null;
+  sdkError?: OpenAIProductTitleSdkErrorDiagnostics | null;
 };
 
 export class OpenAIProductTitleError extends Error {
@@ -119,6 +151,12 @@ export type OpenAIProductTitleLogEvent = {
   rejectionCodes: string[];
   durationMs: number;
   usage: OpenAIProductTitleUsage | null;
+  errorClass: OpenAIProductTitleSdkErrorClass | null;
+  errorType: string | null;
+  errorCode: string | null;
+  requestIdMasked: string | null;
+  errorStage: OpenAIProductTitleErrorStage | null;
+  retryCount: 0;
 };
 
 export type OpenAIProductTitleLogger = (event: OpenAIProductTitleLogEvent) => void;
@@ -130,6 +168,13 @@ const structuredResponseSchema = z.object({
     }).strict()
   ).length(3)
 }).strict();
+
+class OpenAIProductTitleSchemaBuildError extends Error {
+  constructor() {
+    super("Nao foi possivel construir o schema estruturado.");
+    this.name = "OpenAIProductTitleSchemaBuildError";
+  }
+}
 
 const forbiddenCommercialTerms = /\b(pre[cç]o|promo[cç][aã]o|frete\s+gr[aá]tis)\b/i;
 const emojiPattern = /\p{Extended_Pictographic}/u;
@@ -349,6 +394,17 @@ export function validateOpenAIProductTitleSuggestions(
   return result.suggestions;
 }
 
+export function buildOpenAIProductTitleTextFormat() {
+  try {
+    return zodTextFormat(
+      structuredResponseSchema,
+      OPENAI_PRODUCT_TITLE_SCHEMA_NAME
+    );
+  } catch {
+    throw new OpenAIProductTitleSchemaBuildError();
+  }
+}
+
 function buildResponseRequest(
   input: OpenAIProductTitleInput,
   config: OpenAIProductTitleConfig
@@ -384,10 +440,7 @@ function buildResponseRequest(
       }
     ],
     text: {
-      format: zodTextFormat(
-        structuredResponseSchema,
-        "product_title_suggestions"
-      )
+      format: buildOpenAIProductTitleTextFormat()
     }
   };
 }
@@ -482,6 +535,100 @@ function statusFromUnknownError(error: unknown) {
   return typeof error.status === "number" ? error.status : null;
 }
 
+function sanitizedErrorToken(value: unknown) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  if (
+    !normalized ||
+    normalized.length > 80 ||
+    !/^[a-z0-9_.:-]+$/i.test(normalized)
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+function errorField(error: unknown, key: string) {
+  if (!isPlainRecord(error)) return null;
+  const direct = sanitizedErrorToken(error[key]);
+  if (direct) return direct;
+  return isPlainRecord(error.error)
+    ? sanitizedErrorToken(error.error[key])
+    : null;
+}
+
+function maskOpenAIRequestId(value: unknown) {
+  const requestId = sanitizedErrorToken(value);
+  if (!requestId) return null;
+  if (requestId.length <= 8) return `${requestId.slice(0, 2)}***`;
+  const prefixLength = requestId.startsWith("req_") ? 4 : 3;
+  return `${requestId.slice(0, prefixLength)}***${requestId.slice(-4)}`;
+}
+
+function requestIdFromUnknownError(error: unknown) {
+  if (!isPlainRecord(error)) return null;
+  return maskOpenAIRequestId(
+    error.requestID ??
+    error.requestId ??
+    error.request_id ??
+    error._request_id
+  );
+}
+
+export function classifyOpenAIProductTitleSdkError(
+  error: unknown
+): OpenAIProductTitleSdkErrorDiagnostics {
+  const httpStatus = statusFromUnknownError(error);
+  const errorType = errorField(error, "type");
+  const errorCode = errorField(error, "code");
+  const requestIdMasked = requestIdFromUnknownError(error);
+  const base = {
+    httpStatus,
+    errorType,
+    errorCode,
+    requestIdMasked,
+    retryCount: 0 as const
+  };
+
+  if (
+    error instanceof OpenAIProductTitleSchemaBuildError ||
+    error instanceof z.ZodError
+  ) {
+    return { ...base, errorClass: "ZodTextFormatError" };
+  }
+  if (errorCode === "insufficient_quota") {
+    return { ...base, errorClass: "InsufficientQuotaError" };
+  }
+  if (error instanceof OpenAI.APIConnectionTimeoutError) {
+    return { ...base, errorClass: "APIConnectionTimeoutError" };
+  }
+  if (error instanceof OpenAI.APIConnectionError) {
+    return { ...base, errorClass: "APIConnectionError" };
+  }
+  if (error instanceof OpenAI.BadRequestError || httpStatus === 400) {
+    return { ...base, errorClass: "BadRequestError" };
+  }
+  if (error instanceof OpenAI.AuthenticationError || httpStatus === 401) {
+    return { ...base, errorClass: "AuthenticationError" };
+  }
+  if (error instanceof OpenAI.PermissionDeniedError || httpStatus === 403) {
+    return { ...base, errorClass: "PermissionDeniedError" };
+  }
+  if (error instanceof OpenAI.NotFoundError || httpStatus === 404) {
+    return { ...base, errorClass: "NotFoundError" };
+  }
+  if (error instanceof OpenAI.RateLimitError || httpStatus === 429) {
+    return { ...base, errorClass: "RateLimitError" };
+  }
+  if (
+    error instanceof OpenAI.InternalServerError ||
+    (httpStatus !== null && httpStatus >= 500)
+  ) {
+    return { ...base, errorClass: "InternalServerError" };
+  }
+  return { ...base, errorClass: "UnknownError" };
+}
+
 function decodeProviderOutput(response: OpenAIProductTitleProviderResponse) {
   if (response.contract === "responses.parse") {
     if (response.outputParsed === undefined || response.outputParsed === null) {
@@ -546,6 +693,7 @@ export async function generateOpenAIProductTitleSuggestions(
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   let terminalEventLogged = false;
   let providerResponse: OpenAIProductTitleProviderResponse | null = null;
+  let errorStage: OpenAIProductTitleErrorStage = "schema_construction";
 
   const log = (
     stage: OpenAIProductTitleLogEvent["stage"],
@@ -567,6 +715,12 @@ export async function generateOpenAIProductTitleSuggestions(
       rejectionCodes: [],
       durationMs: Date.now() - startedAt,
       usage: providerResponse?.usage ?? null,
+      errorClass: null,
+      errorType: null,
+      errorCode: null,
+      requestIdMasked: null,
+      errorStage: null,
+      retryCount: 0,
       ...overrides
     });
   };
@@ -574,6 +728,8 @@ export async function generateOpenAIProductTitleSuggestions(
   log("request_started");
 
   try {
+    const requestBody = buildResponseRequest(input, config);
+    errorStage = "provider_request";
     const timeout = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => {
         timedOut = true;
@@ -586,7 +742,7 @@ export async function generateOpenAIProductTitleSuggestions(
     });
 
     providerResponse = await Promise.race([
-      createResponse(buildResponseRequest(input, config), {
+      createResponse(requestBody, {
         signal: controller.signal
       }),
       timeout
@@ -638,7 +794,9 @@ export async function generateOpenAIProductTitleSuggestions(
       );
     }
 
+    errorStage = "response_parse";
     const decoded = decodeProviderOutput(providerResponse);
+    errorStage = "response_validation";
     const validation = inspectOpenAIProductTitleSuggestions(
       decoded,
       normalizeProductBrand(input.brand),
@@ -670,7 +828,16 @@ export async function generateOpenAIProductTitleSuggestions(
     return validation.suggestions;
   } catch (error) {
     let normalizedError = error;
-    if (
+    if (error instanceof OpenAIProductTitleSchemaBuildError) {
+      normalizedError = new OpenAIProductTitleError(
+        "OPENAI_SCHEMA_BUILD_FAILED",
+        "Nao foi possivel preparar a resposta estruturada da IA.",
+        {
+          errorStage: "schema_construction",
+          sdkError: classifyOpenAIProductTitleSdkError(error)
+        }
+      );
+    } else if (
       !(error instanceof OpenAIProductTitleError) &&
       (error instanceof SyntaxError || error instanceof z.ZodError)
     ) {
@@ -679,14 +846,23 @@ export async function generateOpenAIProductTitleSuggestions(
         "A resposta estruturada da IA nao pode ser interpretada.",
         {
           httpStatus: providerResponse?.httpStatus ?? null,
-          responseStatus: providerResponse?.status ?? null
+          responseStatus: providerResponse?.status ?? null,
+          errorStage: "response_parse",
+          sdkError: error instanceof z.ZodError
+            ? classifyOpenAIProductTitleSdkError(error)
+            : null
         }
       );
     } else if (!(error instanceof OpenAIProductTitleError)) {
+      const sdkError = classifyOpenAIProductTitleSdkError(error);
       normalizedError = new OpenAIProductTitleError(
         "OPENAI_REQUEST_FAILED",
         "Nao foi possivel concluir a requisicao da IA.",
-        { httpStatus: statusFromUnknownError(error) }
+        {
+          httpStatus: sdkError.httpStatus,
+          errorStage,
+          sdkError
+        }
       );
     }
 
@@ -723,7 +899,13 @@ export async function generateOpenAIProductTitleSuggestions(
           rejectionCodes: [
             productTitleError.code,
             ...(diagnostics.rejectionCodes ?? [])
-          ]
+          ],
+          errorClass: diagnostics.sdkError?.errorClass ?? null,
+          errorType: diagnostics.sdkError?.errorType ?? null,
+          errorCode: diagnostics.sdkError?.errorCode ?? null,
+          requestIdMasked: diagnostics.sdkError?.requestIdMasked ?? null,
+          errorStage: diagnostics.errorStage ?? errorStage,
+          retryCount: diagnostics.sdkError?.retryCount ?? 0
         }
       );
     }
