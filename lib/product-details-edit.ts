@@ -1,4 +1,13 @@
 import { analyzeProductBrand } from "@/lib/product-brand";
+import {
+  isValidDateOnly,
+  isValidPackagingGtin,
+  type ProductCommercialStatusValue,
+  type ProductDimensionUnitValue,
+  type ProductFormatValue,
+  type ProductProductionTypeValue,
+  type ProductTypeValue
+} from "@/lib/product-commercial-fields";
 
 export const PRODUCT_DETAILS_NAME_MAX_LENGTH = 60;
 
@@ -16,6 +25,16 @@ export type ProductDetailsEditForm = {
   width: string;
   depth: string;
   condition: string;
+  format: string;
+  productType: string;
+  commercialStatus: string;
+  productionType: string;
+  expirationDate: string;
+  freeShipping: string;
+  volumes: string;
+  itemsPerBox: string;
+  dimensionUnit: string;
+  packagingGtin: string;
   description: string;
 };
 
@@ -33,6 +52,16 @@ export type ProductDetailsEditSource = {
   width?: string | number | null;
   depth?: string | number | null;
   condition?: string | null;
+  format?: string | null;
+  productType?: string | null;
+  commercialStatus?: string | null;
+  productionType?: string | null;
+  expirationDate?: string | null;
+  freeShipping?: boolean | null;
+  volumes?: string | number | null;
+  itemsPerBox?: string | number | null;
+  dimensionUnit?: string | null;
+  packagingGtin?: string | null;
   description?: string | null;
 };
 
@@ -45,6 +74,9 @@ export type ProductDetailsFieldId =
   | "category"
   | "origin"
   | "blingStatus"
+  | "format"
+  | "productType"
+  | "commercialStatus"
   | "costPrice"
   | "salePrice"
   | "stock"
@@ -54,6 +86,13 @@ export type ProductDetailsFieldId =
   | "height"
   | "width"
   | "depth"
+  | "productionType"
+  | "expirationDate"
+  | "freeShipping"
+  | "volumes"
+  | "itemsPerBox"
+  | "dimensionUnit"
+  | "packagingGtin"
   | "updatedAt";
 
 type ProductDetailsFieldDefinition = {
@@ -62,6 +101,9 @@ type ProductDetailsFieldDefinition = {
   editable: boolean;
   placeholder: string;
   inputMode?: "decimal" | "text";
+  inputType?: "date" | "number" | "text";
+  options?: readonly { value: string; label: string }[];
+  sectionTitle?: "Parte principal" | "Caracteristicas";
 };
 
 export const productDetailsFieldDefinitions: readonly ProductDetailsFieldDefinition[] = [
@@ -73,15 +115,90 @@ export const productDetailsFieldDefinitions: readonly ProductDetailsFieldDefinit
   { id: "category", label: "Categoria", editable: true, placeholder: "Sem categoria" },
   { id: "origin", label: "Origem", editable: false, placeholder: "Nao informado" },
   { id: "blingStatus", label: "Status no Bling", editable: false, placeholder: "Nao informado" },
+  {
+    id: "format",
+    label: "Formato",
+    editable: true,
+    placeholder: "Nao informado",
+    sectionTitle: "Parte principal",
+    options: [
+      { value: "", label: "Nao informado" },
+      { value: "SIMPLE", label: "Simples" },
+      { value: "VARIATION", label: "Com variacoes" },
+      { value: "COMPOSITION", label: "Com composicao" }
+    ]
+  },
+  {
+    id: "productType",
+    label: "Tipo",
+    editable: true,
+    placeholder: "Nao informado",
+    options: [
+      { value: "", label: "Nao informado" },
+      { value: "PRODUCT", label: "Produto" },
+      { value: "SERVICE", label: "Servico" },
+      { value: "SERVICE_06_21_22", label: "Servico 06 21 22" }
+    ]
+  },
+  {
+    id: "commercialStatus",
+    label: "Situacao",
+    editable: true,
+    placeholder: "Nao informado",
+    options: [
+      { value: "", label: "Nao informado" },
+      { value: "ACTIVE", label: "Ativo" },
+      { value: "INACTIVE", label: "Inativo" }
+    ]
+  },
   { id: "costPrice", label: "Custo", editable: true, placeholder: "Nao informado", inputMode: "decimal" },
   { id: "salePrice", label: "Preco de venda", editable: true, placeholder: "Nao informado", inputMode: "decimal" },
   { id: "stock", label: "Estoque", editable: false, placeholder: "Nao informado" },
   { id: "weight", label: "Peso liquido (kg)", editable: true, placeholder: "Nao informado", inputMode: "decimal" },
   { id: "grossWeight", label: "Peso bruto (kg)", editable: true, placeholder: "Nao informado", inputMode: "decimal" },
   { id: "condition", label: "Condicao", editable: true, placeholder: "Nao informado" },
-  { id: "height", label: "Altura (cm)", editable: true, placeholder: "Nao informado", inputMode: "decimal" },
-  { id: "width", label: "Largura (cm)", editable: true, placeholder: "Nao informado", inputMode: "decimal" },
-  { id: "depth", label: "Profundidade (cm)", editable: true, placeholder: "Nao informado", inputMode: "decimal" },
+  { id: "height", label: "Altura", editable: true, placeholder: "Nao informado", inputMode: "decimal" },
+  { id: "width", label: "Largura", editable: true, placeholder: "Nao informado", inputMode: "decimal" },
+  { id: "depth", label: "Profundidade", editable: true, placeholder: "Nao informado", inputMode: "decimal" },
+  {
+    id: "productionType",
+    label: "Producao",
+    editable: true,
+    placeholder: "Nao informado",
+    sectionTitle: "Caracteristicas",
+    options: [
+      { value: "", label: "Nao informado" },
+      { value: "OWN", label: "Propria" },
+      { value: "THIRD_PARTY", label: "Terceiros" }
+    ]
+  },
+  { id: "expirationDate", label: "Data de validade", editable: true, placeholder: "Nao informado", inputType: "date" },
+  {
+    id: "freeShipping",
+    label: "Frete gratis",
+    editable: true,
+    placeholder: "Nao informado",
+    options: [
+      { value: "", label: "Nao informado" },
+      { value: "true", label: "Sim" },
+      { value: "false", label: "Nao" }
+    ]
+  },
+  { id: "volumes", label: "Volumes", editable: true, placeholder: "Nao informado", inputMode: "decimal", inputType: "number" },
+  { id: "itemsPerBox", label: "Itens por caixa", editable: true, placeholder: "Nao informado", inputMode: "decimal", inputType: "number" },
+  {
+    id: "dimensionUnit",
+    label: "Unidade de medida",
+    editable: true,
+    placeholder: "Nao informado",
+    options: [
+      { value: "", label: "Nao informado" },
+      { value: "METER", label: "Metro" },
+      { value: "CENTIMETER", label: "Centimetro" },
+      { value: "MILLIMETER", label: "Milimetro" }
+    ]
+  },
+  { id: "packagingGtin", label: "GTIN/EAN tributario", editable: true, placeholder: "Nao informado", inputMode: "text" },
   { id: "updatedAt", label: "Data de atualizacao", editable: false, placeholder: "Nao informado" }
 ] as const;
 
@@ -120,6 +237,16 @@ export function createProductDetailsEditForm(source: ProductDetailsEditSource): 
     width: toFormText(source.width).trim(),
     depth: toFormText(source.depth).trim(),
     condition: toConditionFormValue(source.condition),
+    format: toFormText(source.format).trim(),
+    productType: toFormText(source.productType).trim(),
+    commercialStatus: toFormText(source.commercialStatus).trim(),
+    productionType: toFormText(source.productionType).trim(),
+    expirationDate: toFormText(source.expirationDate).trim().slice(0, 10),
+    freeShipping: source.freeShipping === true ? "true" : source.freeShipping === false ? "false" : "",
+    volumes: toFormText(source.volumes).trim(),
+    itemsPerBox: toFormText(source.itemsPerBox).trim(),
+    dimensionUnit: toFormText(source.dimensionUnit).trim(),
+    packagingGtin: toFormText(source.packagingGtin).trim(),
     description: toFormText(source.description)
   };
 }
@@ -188,7 +315,17 @@ export type ProductDetailsPatch = {
   height?: number | null;
   width?: number | null;
   depth?: number | null;
+  dimensionUnit?: ProductDimensionUnitValue | null;
   condition?: "UNSPECIFIED" | "NEW" | "USED" | null;
+  format?: ProductFormatValue | null;
+  productType?: ProductTypeValue | null;
+  commercialStatus?: ProductCommercialStatusValue | null;
+  productionType?: ProductProductionTypeValue | null;
+  expirationDate?: string | null;
+  freeShipping?: boolean | null;
+  volumes?: number | null;
+  itemsPerBox?: number | null;
+  packagingGtin?: string | null;
   description?: string | null;
 };
 
@@ -244,6 +381,59 @@ export function buildProductDetailsPatch(
   if (condition !== baselineCondition) {
     payload.condition = condition as ProductDetailsPatch["condition"];
   }
+
+  for (const [formKey, allowed, payloadKey, error] of [
+    ["format", ["SIMPLE", "VARIATION", "COMPOSITION"], "format", "Selecione um formato valido."],
+    ["productType", ["PRODUCT", "SERVICE", "SERVICE_06_21_22"], "productType", "Selecione um tipo valido."],
+    ["commercialStatus", ["ACTIVE", "INACTIVE"], "commercialStatus", "Selecione uma situacao valida."],
+    ["productionType", ["OWN", "THIRD_PARTY"], "productionType", "Selecione um tipo de producao valido."],
+    ["dimensionUnit", ["METER", "CENTIMETER", "MILLIMETER"], "dimensionUnit", "Selecione uma unidade de medida valida."]
+  ] as const) {
+    const value = normalizedNullableText(current[formKey]);
+    const baselineValue = normalizedNullableText(baseline[formKey]);
+    if (value && !(allowed as readonly string[]).includes(value)) return { error };
+    if (value !== baselineValue) {
+      (payload as Record<string, unknown>)[payloadKey] = value;
+    }
+  }
+
+  const expirationDate = normalizedNullableText(current.expirationDate);
+  const baselineExpirationDate = normalizedNullableText(baseline.expirationDate);
+  if (expirationDate && !isValidDateOnly(expirationDate)) {
+    return { error: "Informe uma data de validade valida no formato AAAA-MM-DD." };
+  }
+  if (expirationDate !== baselineExpirationDate) payload.expirationDate = expirationDate;
+
+  const freeShipping = current.freeShipping === "" ? null : current.freeShipping === "true"
+    ? true
+    : current.freeShipping === "false"
+      ? false
+      : undefined;
+  const baselineFreeShipping = baseline.freeShipping === "" ? null : baseline.freeShipping === "true";
+  if (freeShipping === undefined) return { error: "Selecione uma opcao valida para frete gratis." };
+  if (freeShipping !== baselineFreeShipping) payload.freeShipping = freeShipping;
+
+  const volumes = parseOptionalDecimal(current.volumes, "Volumes");
+  if ("error" in volumes) return { error: volumes.error };
+  if (volumes.value !== null && !Number.isInteger(volumes.value)) {
+    return { error: "Volumes deve ser um numero inteiro." };
+  }
+  const baselineVolumes = parseOptionalDecimal(baseline.volumes, "Volumes");
+  const baselineVolumesValue = "error" in baselineVolumes ? null : baselineVolumes.value;
+  if (volumes.value !== baselineVolumesValue) payload.volumes = volumes.value;
+
+  const itemsPerBox = parseOptionalDecimal(current.itemsPerBox, "Itens por caixa");
+  if ("error" in itemsPerBox) return { error: itemsPerBox.error };
+  const baselineItemsPerBox = parseOptionalDecimal(baseline.itemsPerBox, "Itens por caixa");
+  const baselineItemsPerBoxValue = "error" in baselineItemsPerBox ? null : baselineItemsPerBox.value;
+  if (itemsPerBox.value !== baselineItemsPerBoxValue) payload.itemsPerBox = itemsPerBox.value;
+
+  const packagingGtin = normalizedNullableText(current.packagingGtin);
+  const baselinePackagingGtin = normalizedNullableText(baseline.packagingGtin);
+  if (packagingGtin && !isValidPackagingGtin(packagingGtin)) {
+    return { error: "GTIN/EAN tributario invalido. Informe 8, 12 ou 13 digitos validos." };
+  }
+  if (packagingGtin !== baselinePackagingGtin) payload.packagingGtin = packagingGtin;
 
   const description = normalizedNullableText(current.description);
   if (description !== normalizedNullableText(baseline.description)) payload.description = description;

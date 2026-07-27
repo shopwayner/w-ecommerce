@@ -126,6 +126,15 @@ function formatProductResponse(product: Awaited<ReturnType<typeof loadProductFor
     depth: product.depth?.toString() ?? null,
     dimensionUnit: product.dimensionUnit,
     condition: product.condition,
+    format: product.format,
+    productType: product.productType,
+    commercialStatus: product.commercialStatus,
+    productionType: product.productionType,
+    expirationDate: product.expirationDate?.toISOString().slice(0, 10) ?? null,
+    freeShipping: product.freeShipping,
+    volumes: product.volumes,
+    itemsPerBox: product.itemsPerBox?.toString() ?? null,
+    packagingGtin: product.packagingGtin,
     attributes: product.attributes,
     displayValue: typeof metadata.displayValue === "string" ? metadata.displayValue : null,
     salePriceDisplay: typeof metadata.salePriceDisplay === "string" ? metadata.salePriceDisplay : currentPrice?.salePrice.toString() ?? null,
@@ -336,7 +345,21 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       if (parsed.data.height !== undefined) productData.height = parsed.data.height;
       if (parsed.data.width !== undefined) productData.width = parsed.data.width;
       if (parsed.data.depth !== undefined) productData.depth = parsed.data.depth;
+      if (parsed.data.dimensionUnit !== undefined) productData.dimensionUnit = parsed.data.dimensionUnit;
       if (parsed.data.condition !== undefined) productData.condition = parsed.data.condition;
+      if (parsed.data.format !== undefined) productData.format = parsed.data.format;
+      if (parsed.data.productType !== undefined) productData.productType = parsed.data.productType;
+      if (parsed.data.commercialStatus !== undefined) productData.commercialStatus = parsed.data.commercialStatus;
+      if (parsed.data.productionType !== undefined) productData.productionType = parsed.data.productionType;
+      if (parsed.data.expirationDate !== undefined) {
+        productData.expirationDate = parsed.data.expirationDate
+          ? new Date(`${parsed.data.expirationDate}T00:00:00.000Z`)
+          : null;
+      }
+      if (parsed.data.freeShipping !== undefined) productData.freeShipping = parsed.data.freeShipping;
+      if (parsed.data.volumes !== undefined) productData.volumes = parsed.data.volumes;
+      if (parsed.data.itemsPerBox !== undefined) productData.itemsPerBox = parsed.data.itemsPerBox;
+      if (parsed.data.packagingGtin !== undefined) productData.packagingGtin = parsed.data.packagingGtin;
       if (parsed.data.attributes !== undefined) productData.attributes = toOptionalJson(parsed.data.attributes);
 
       const metadataChanged = parsed.data.unit !== undefined

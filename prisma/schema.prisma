@@ -149,6 +149,28 @@ enum ProductDimensionUnit {
   MILLIMETER
 }
 
+enum ProductFormat {
+  SIMPLE
+  VARIATION
+  COMPOSITION
+}
+
+enum ProductType {
+  PRODUCT
+  SERVICE
+  SERVICE_06_21_22
+}
+
+enum ProductCommercialStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ProductProductionType {
+  OWN
+  THIRD_PARTY
+}
+
 enum AuditLogStatus {
   SUCCESS
   FAILED
@@ -675,6 +697,15 @@ model Product {
   depth            Decimal?                 @db.Decimal(10, 3)
   dimensionUnit    ProductDimensionUnit?
   condition        ProductCondition?
+  format           ProductFormat?
+  productType      ProductType?
+  commercialStatus ProductCommercialStatus?
+  productionType   ProductProductionType?
+  expirationDate   DateTime?                @db.Date
+  freeShipping     Boolean?
+  volumes          Int?
+  itemsPerBox      Decimal?                 @db.Decimal(10, 3)
+  packagingGtin    String?
   attributes       Json?
   blockedFields    Json?
   createdAt        DateTime                 @default(now())

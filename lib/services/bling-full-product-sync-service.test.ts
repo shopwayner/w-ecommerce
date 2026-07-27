@@ -214,7 +214,7 @@ async function previewAndExecute(service: BlingFullProductSyncService) {
 test("a complete operation uses product PATCH, stock POST, image PATCH and one verification GET", async () => {
   const mocked = dependencies();
   const result = await previewAndExecute(new BlingFullProductSyncService(mocked.deps));
-  assert.equal(result.status, "UPDATED_WITH_WARNINGS");
+  assert.equal(result.status, "UPDATED");
   assert.equal(result.patchRequests, 2);
   assert.equal(result.postRequests, 1);
   assert.equal(result.putRequests, 0);
@@ -331,7 +331,7 @@ test("a SKU change preserves the existing mapping identity by externalProductId"
     remoteAfter: remote(["https://cdn.example.com/a.jpg"], { codigo: "NOVO-01" })
   });
   const result = await previewAndExecute(new BlingFullProductSyncService(mocked.deps));
-  assert.equal(result.status, "UPDATED_WITH_WARNINGS");
+  assert.equal(result.status, "UPDATED");
   assert.equal(mocked.calls.patch[0]?.codigo, "NOVO-01");
   assert.deepEqual(mocked.calls.recordedMappingIds, ["mapping_1"]);
   assert.equal(stableContext.mapping.externalProductId, "123456789");
@@ -370,15 +370,39 @@ test("an invalid connection is blocked before any external request", async () =>
   assert.equal(mocked.calls.get, 0);
 });
 
-test("the nine model gaps are reported per field without a COST warning", async () => {
+test("the nine persisted fields no longer produce unsupported warnings", async () => {
   const mocked = dependencies();
   const preview = await new BlingFullProductSyncService(mocked.deps).preview(request);
-  assert.deepEqual(
-    preview.unsupportedFields.map((item) => item.field),
-    BLING_FULL_PRODUCT_UNSUPPORTED_LOCAL_FIELDS.map((item) => item.field)
-  );
-  assert.equal(preview.unsupportedFields.length, 9);
+  assert.deepEqual(BLING_FULL_PRODUCT_UNSUPPORTED_LOCAL_FIELDS, []);
+  assert.deepEqual(preview.unsupportedFields, []);
   assert.equal(preview.notices.some((item) => /custo|fornecedor/i.test(item)), false);
+});
+
+test("the runtime loads the nine dedicated Product columns into the local sync snapshot", () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-full-product-sync-service.ts"),
+    "utf8"
+  );
+  for (const field of [
+    "format",
+    "productType",
+    "commercialStatus",
+    "productionType",
+    "expirationDate",
+    "freeShipping",
+    "volumes",
+    "itemsPerBox",
+    "packagingGtin"
+  ]) {
+    assert.match(source, new RegExp(`${field}: true`));
+  }
+  assert.match(source, /format: formatToBling\(product\.format\)/);
+  assert.match(source, /type: productTypeToBling\(product\.productType\)/);
+  assert.match(source, /situation: commercialStatusToBling\(product\.commercialStatus\)/);
+  assert.match(source, /productionType: productionTypeToBling\(product\.productionType\)/);
+  assert.match(source, /freeShipping: product\.freeShipping/);
+  assert.match(source, /volumes: product\.volumes/);
+  assert.match(source, /packagingGtin: product\.packagingGtin/);
 });
 
 test("verification accepts normalized numbers, dates, enums and booleans", () => {
@@ -391,7 +415,7 @@ test("verification accepts normalized numbers, dates, enums and booleans", () =>
     freeShipping: false,
     volumes: 1,
     itemsPerBox: 2,
-    packagingGtin: "17891234567892",
+    packagingGtin: "7908073723457",
     images: [],
     stock: null
   }), {});
@@ -409,7 +433,7 @@ test("verification accepts normalized numbers, dates, enums and booleans", () =>
       volumes: "1",
       itensPorCaixa: "2.0",
       dataValidade: "2027-12-31T00:00:00.000Z",
-      gtinEmbalagem: "17891234567892"
+      gtinEmbalagem: "7908073723457"
     }),
     dimensoes: { altura: "2.000", largura: "3.0", profundidade: "4", unidadeMedida: "1" }
   }, protectedFingerprint);
@@ -437,12 +461,12 @@ test("a real variation remains blocked", async () => {
   assert.match(preview.blockers[0], /variacoes ou composicao/);
 });
 
-test("a no-op returns warning-only without intent, job or external write", async () => {
+test("a no-op returns unchanged without intent, job or external write", async () => {
   const matchingRemote = remote(["https://cdn.example.com/a.jpg"]);
   const mocked = dependencies({ remoteBefore: matchingRemote });
   const service = new BlingFullProductSyncService(mocked.deps);
   const preview = await service.preview(request);
-  assert.equal(preview.status, "UP_TO_DATE_WITH_WARNINGS");
+  assert.equal(preview.status, "ALREADY_UP_TO_DATE");
   assert.equal(preview.modules.find((item) => item.module === "PRODUCT_FIELDS")?.status, "NO_CHANGES");
   assert.equal(preview.modules.find((item) => item.module === "STOCK")?.status, "NO_CHANGES");
   assert.equal(preview.modules.find((item) => item.module === "IMAGES")?.status, "NO_CHANGES");
@@ -459,7 +483,7 @@ test("a no-op returns warning-only without intent, job or external write", async
         intentAudits += 1;
       }
     });
-    assert.equal(result.status, "UP_TO_DATE_WITH_WARNINGS");
+    assert.equal(result.status, "UNCHANGED");
     assert.equal(result.patchRequests + result.postRequests + result.putRequests, 0);
   } finally {
     if (previous === undefined) delete process.env.BLING_FULL_PRODUCT_SYNC_ENABLED;

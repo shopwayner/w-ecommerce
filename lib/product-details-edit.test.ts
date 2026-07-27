@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -25,14 +26,26 @@ const completeSource = {
   width: "2",
   depth: "3",
   condition: "NEW",
+  format: "SIMPLE",
+  productType: "PRODUCT",
+  commercialStatus: "INACTIVE",
+  productionType: "OWN",
+  expirationDate: "2027-12-31",
+  freeShipping: false,
+  volumes: "1",
+  itemsPerBox: "2",
+  dimensionUnit: "CENTIMETER",
+  packagingGtin: "7908073723457",
   description: "Descricao preservada"
 };
 
 test("uses one stable field order in view and edit modes", () => {
   assert.deepEqual(productDetailsFieldDefinitions.map((field) => field.id), [
     "name", "brand", "sku", "ean", "unit", "category", "origin", "blingStatus",
+    "format", "productType", "commercialStatus",
     "costPrice", "salePrice", "stock", "weight", "grossWeight", "condition",
-    "height", "width", "depth", "updatedAt"
+    "height", "width", "depth", "productionType", "expirationDate", "freeShipping",
+    "volumes", "itemsPerBox", "dimensionUnit", "packagingGtin", "updatedAt"
   ]);
 });
 
@@ -49,7 +62,10 @@ test("keeps brand visible and editable while protected cards stay in the grid", 
 });
 
 test("initializes a complete edit snapshot and preserves brand casing", () => {
-  assert.deepEqual(createProductDetailsEditForm(completeSource), completeSource);
+  assert.deepEqual(createProductDetailsEditForm(completeSource), {
+    ...completeSource,
+    freeShipping: "false"
+  });
 });
 
 test("initializes missing unit, category and brand as empty inputs", () => {
@@ -57,6 +73,9 @@ test("initializes missing unit, category and brand as empty inputs", () => {
   assert.equal(form.brand, "");
   assert.equal(form.unit, "");
   assert.equal(form.category, "");
+  assert.equal(form.format, "");
+  assert.equal(form.freeShipping, "");
+  assert.equal(form.volumes, "");
 });
 
 test("normalizes supported condition labels for the edit select", () => {
@@ -174,6 +193,123 @@ test("backend preserves omitted fields in the validated partial contract", () =>
   });
 });
 
+test("builds a partial patch for the nine persisted fields and dimension unit", () => {
+  const baseline = createProductDetailsEditForm({ name: "Produto" });
+  const result = buildProductDetailsPatch(baseline, {
+    ...baseline,
+    format: "SIMPLE",
+    productType: "PRODUCT",
+    commercialStatus: "INACTIVE",
+    productionType: "THIRD_PARTY",
+    expirationDate: "2027-12-31",
+    freeShipping: "false",
+    volumes: "0",
+    itemsPerBox: "0",
+    dimensionUnit: "CENTIMETER",
+    packagingGtin: "7908073723457"
+  });
+  assert.deepEqual(result, {
+    payload: {
+      format: "SIMPLE",
+      productType: "PRODUCT",
+      commercialStatus: "INACTIVE",
+      productionType: "THIRD_PARTY",
+      dimensionUnit: "CENTIMETER",
+      expirationDate: "2027-12-31",
+      freeShipping: false,
+      volumes: 0,
+      itemsPerBox: 0,
+      packagingGtin: "7908073723457"
+    }
+  });
+});
+
+test("clearing optional commercial fields sends explicit null without touching omitted fields", () => {
+  const baseline = createProductDetailsEditForm(completeSource);
+  assert.deepEqual(buildProductDetailsPatch(baseline, {
+    ...baseline,
+    format: "",
+    freeShipping: "",
+    volumes: "",
+    packagingGtin: ""
+  }), {
+    payload: {
+      format: null,
+      freeShipping: null,
+      volumes: null,
+      packagingGtin: null
+    }
+  });
+});
+
+test("rejects invalid commercial enums, dates, counts and packaging GTINs", () => {
+  const baseline = createProductDetailsEditForm({ name: "Produto" });
+  for (const [changes, error] of [
+    [{ format: "OTHER" }, "Selecione um formato valido."],
+    [{ productType: "OTHER" }, "Selecione um tipo valido."],
+    [{ commercialStatus: "OTHER" }, "Selecione uma situacao valida."],
+    [{ productionType: "OTHER" }, "Selecione um tipo de producao valido."],
+    [{ dimensionUnit: "OTHER" }, "Selecione uma unidade de medida valida."],
+    [{ expirationDate: "2027-02-29" }, "Informe uma data de validade valida no formato AAAA-MM-DD."],
+    [{ freeShipping: "maybe" }, "Selecione uma opcao valida para frete gratis."],
+    [{ volumes: "1.5" }, "Volumes deve ser um numero inteiro."],
+    [{ packagingGtin: "17891234567892" }, "GTIN/EAN tributario invalido. Informe 8, 12 ou 13 digitos validos."]
+  ] as const) {
+    assert.deepEqual(buildProductDetailsPatch(baseline, { ...baseline, ...changes }), { error });
+  }
+});
+
+test("backend validates the nine fields while preserving false and zero", () => {
+  assert.deepEqual(productUpdateSchema.parse({
+    format: "SIMPLE",
+    productType: "PRODUCT",
+    commercialStatus: "ACTIVE",
+    productionType: "OWN",
+    expirationDate: "2028-02-29",
+    freeShipping: false,
+    volumes: 0,
+    itemsPerBox: 0,
+    packagingGtin: "7908073723457"
+  }), {
+    format: "SIMPLE",
+    productType: "PRODUCT",
+    commercialStatus: "ACTIVE",
+    productionType: "OWN",
+    expirationDate: "2028-02-29",
+    freeShipping: false,
+    volumes: 0,
+    itemsPerBox: 0,
+    packagingGtin: "7908073723457"
+  });
+  assert.equal(productUpdateSchema.safeParse({ expirationDate: "2027-02-29" }).success, false);
+  assert.equal(productUpdateSchema.safeParse({ packagingGtin: "17891234567892" }).success, false);
+  assert.equal(productUpdateSchema.safeParse({ volumes: 1.5 }).success, false);
+});
+
+test("all existing products remain valid when every new optional field is null", () => {
+  assert.deepEqual(productUpdateSchema.parse({
+    format: null,
+    productType: null,
+    commercialStatus: null,
+    productionType: null,
+    expirationDate: null,
+    freeShipping: null,
+    volumes: null,
+    itemsPerBox: null,
+    packagingGtin: null
+  }), {
+    format: null,
+    productType: null,
+    commercialStatus: null,
+    productionType: null,
+    expirationDate: null,
+    freeShipping: null,
+    volumes: null,
+    itemsPerBox: null,
+    packagingGtin: null
+  });
+});
+
 test("backend rejects empty prices but accepts explicit zero", () => {
   assert.equal(productUpdateSchema.safeParse({ displayValue: null }).success, false);
   assert.equal(productUpdateSchema.safeParse({ displayValue: "" }).success, false);
@@ -191,4 +327,17 @@ test("cancel can restore the immutable baseline without carrying edited values",
   const restored = createProductDetailsEditForm(completeSource);
   assert.notDeepEqual(edited, baseline);
   assert.deepEqual(restored, baseline);
+});
+
+test("the modal renders the same field contract in view and edit without a separate mobile layout", () => {
+  const source = readFileSync(
+    new URL("../components/product-details-modal.tsx", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /productDetailsFieldDefinitions\.map/);
+  assert.match(source, /field\.options\.map/);
+  assert.match(source, /sm:grid-cols-2 xl:grid-cols-3/);
+  assert.match(source, /formFromProduct\(currentProduct\)/);
+  assert.match(source, /setForm\(formFromProduct\(currentProduct\)\)/);
+  assert.doesNotMatch(source, /NEXT_PUBLIC.*BLING|requestWithoutRefresh/);
 });

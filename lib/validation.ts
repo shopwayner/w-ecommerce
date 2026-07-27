@@ -1,4 +1,13 @@
 import { z } from "zod";
+import {
+  isValidDateOnly,
+  isValidPackagingGtin,
+  PRODUCT_COMMERCIAL_STATUS_VALUES,
+  PRODUCT_DIMENSION_UNIT_VALUES,
+  PRODUCT_FORMAT_VALUES,
+  PRODUCT_PRODUCTION_TYPE_VALUES,
+  PRODUCT_TYPE_VALUES
+} from "@/lib/product-commercial-fields";
 import { isValidBrazilianDocument } from "@/lib/settings-admin";
 
 export const productCreateSchema = z.object({
@@ -51,7 +60,23 @@ export const productUpdateSchema = z.object({
   height: z.coerce.number().nonnegative().nullable().optional(),
   width: z.coerce.number().nonnegative().nullable().optional(),
   depth: z.coerce.number().nonnegative().nullable().optional(),
+  dimensionUnit: z.enum(PRODUCT_DIMENSION_UNIT_VALUES).nullable().optional(),
   condition: z.enum(["UNSPECIFIED", "NEW", "USED"]).nullable().optional(),
+  format: z.enum(PRODUCT_FORMAT_VALUES).nullable().optional(),
+  productType: z.enum(PRODUCT_TYPE_VALUES).nullable().optional(),
+  commercialStatus: z.enum(PRODUCT_COMMERCIAL_STATUS_VALUES).nullable().optional(),
+  productionType: z.enum(PRODUCT_PRODUCTION_TYPE_VALUES).nullable().optional(),
+  expirationDate: z.string().trim().refine(
+    isValidDateOnly,
+    "Informe uma data de validade valida no formato AAAA-MM-DD."
+  ).nullable().optional(),
+  freeShipping: z.boolean().nullable().optional(),
+  volumes: z.number().int().nonnegative().nullable().optional(),
+  itemsPerBox: z.number().finite().nonnegative().nullable().optional(),
+  packagingGtin: z.string().trim().refine(
+    isValidPackagingGtin,
+    "GTIN/EAN tributario invalido. Informe 8, 12 ou 13 digitos validos."
+  ).nullable().optional(),
   attributes: z.record(z.unknown()).nullable().optional(),
   displayValue: z.string().trim().min(1).optional(),
   salePriceDisplay: z.string().trim().min(1).optional(),

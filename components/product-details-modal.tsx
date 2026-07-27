@@ -84,7 +84,17 @@ export type ProductDetailsProduct = {
   height?: string | null;
   width?: string | null;
   depth?: string | null;
+  dimensionUnit?: string | null;
   condition?: string | null;
+  format?: string | null;
+  productType?: string | null;
+  commercialStatus?: string | null;
+  productionType?: string | null;
+  expirationDate?: string | null;
+  freeShipping?: boolean | null;
+  volumes?: number | null;
+  itemsPerBox?: string | null;
+  packagingGtin?: string | null;
   attributes?: unknown;
   blingStatus?: string | null;
   blingAccount: {
@@ -189,6 +199,46 @@ function formatDate(value: string) {
   }).format(new Date(value));
 }
 
+function dimensionUnitAbbreviation(value: string | null | undefined) {
+  if (value === "METER") return "m";
+  if (value === "MILLIMETER") return "mm";
+  return "cm";
+}
+
+function formatDateOnly(value: string | null | undefined) {
+  if (!value) return null;
+  const [year, month, day] = value.slice(0, 10).split("-");
+  return year && month && day ? `${day}/${month}/${year}` : value;
+}
+
+const productFormatLabels: Record<string, string> = {
+  SIMPLE: "Simples",
+  VARIATION: "Com variacoes",
+  COMPOSITION: "Com composicao"
+};
+
+const productTypeLabels: Record<string, string> = {
+  PRODUCT: "Produto",
+  SERVICE: "Servico",
+  SERVICE_06_21_22: "Servico 06 21 22"
+};
+
+const commercialStatusLabels: Record<string, string> = {
+  ACTIVE: "Ativo",
+  INACTIVE: "Inativo"
+};
+
+const productionTypeLabels: Record<string, string> = {
+  OWN: "Propria",
+  THIRD_PARTY: "Terceiros"
+};
+
+const dimensionUnitLabels: Record<string, string> = {
+  METER: "Metro",
+  CENTIMETER: "Centimetro",
+  MILLIMETER: "Milimetro"
+};
+
 function getCondition(product: ProductDetailsProduct) {
   return product.condition ?? productAttributeValue(product.attributes, conditionAliases);
 }
@@ -212,6 +262,16 @@ function formFromProduct(product: ProductDetailsProduct): ProductDetailsEditForm
     width: product.width,
     depth: product.depth,
     condition: getCondition(product),
+    format: product.format,
+    productType: product.productType,
+    commercialStatus: product.commercialStatus,
+    productionType: product.productionType,
+    expirationDate: product.expirationDate,
+    freeShipping: product.freeShipping,
+    volumes: product.volumes,
+    itemsPerBox: product.itemsPerBox,
+    dimensionUnit: product.dimensionUnit,
+    packagingGtin: product.packagingGtin,
     description: sanitizeDescription(product.description)
   });
 }
@@ -404,6 +464,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   const descriptionCollapsed = canToggleDescription && !descriptionExpanded;
   const cardClass = "rounded-lg border border-matrix-border bg-matrix-panel2/65 p-3";
   const inputClass = "mt-2 h-10 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 text-sm font-semibold text-matrix-fg outline-none transition focus:border-matrix-gold/70 focus:ring-2 focus:ring-matrix-gold/20";
+  const dimensionUnit = dimensionUnitAbbreviation(currentProduct.dimensionUnit);
 
   const detailIcons: Record<ProductDetailsFieldId, typeof Package> = {
     name: Package,
@@ -414,6 +475,9 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     category: Folder,
     origin: Globe2,
     blingStatus: ShieldCheck,
+    format: Package,
+    productType: Tag,
+    commercialStatus: ShieldCheck,
     costPrice: DollarSign,
     salePrice: Tag,
     stock: Box,
@@ -423,6 +487,13 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     height: Ruler,
     width: Ruler,
     depth: Ruler,
+    productionType: Factory,
+    expirationDate: CalendarDays,
+    freeShipping: Globe2,
+    volumes: Box,
+    itemsPerBox: Package,
+    dimensionUnit: Ruler,
+    packagingGtin: Barcode,
     updatedAt: CalendarDays
   };
   const detailValues: Record<ProductDetailsFieldId, string | number | null | undefined> = {
@@ -434,15 +505,35 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     category: currentProduct.category,
     origin: originText,
     blingStatus: getBlingStatusLabel(currentProduct.blingStatus),
+    format: currentProduct.format ? productFormatLabels[currentProduct.format] ?? currentProduct.format : null,
+    productType: currentProduct.productType ? productTypeLabels[currentProduct.productType] ?? currentProduct.productType : null,
+    commercialStatus: currentProduct.commercialStatus
+      ? commercialStatusLabels[currentProduct.commercialStatus] ?? currentProduct.commercialStatus
+      : null,
     costPrice: formatCurrency(currentProduct.costPriceDisplay ?? currentProduct.displayValue),
     salePrice: formatCurrency(currentProduct.salePriceDisplay),
     stock: currentProduct.stock,
     weight: formatMeasurement(currentProduct.weight, "kg"),
     grossWeight: formatMeasurement(getGrossWeight(currentProduct), "kg"),
     condition: getCondition(currentProduct),
-    height: formatMeasurement(currentProduct.height, "cm"),
-    width: formatMeasurement(currentProduct.width, "cm"),
-    depth: formatMeasurement(currentProduct.depth, "cm"),
+    height: formatMeasurement(currentProduct.height, dimensionUnit),
+    width: formatMeasurement(currentProduct.width, dimensionUnit),
+    depth: formatMeasurement(currentProduct.depth, dimensionUnit),
+    productionType: currentProduct.productionType
+      ? productionTypeLabels[currentProduct.productionType] ?? currentProduct.productionType
+      : null,
+    expirationDate: formatDateOnly(currentProduct.expirationDate),
+    freeShipping: currentProduct.freeShipping === null || currentProduct.freeShipping === undefined
+      ? null
+      : currentProduct.freeShipping
+        ? "Sim"
+        : "Nao",
+    volumes: currentProduct.volumes,
+    itemsPerBox: currentProduct.itemsPerBox,
+    dimensionUnit: currentProduct.dimensionUnit
+      ? dimensionUnitLabels[currentProduct.dimensionUnit] ?? currentProduct.dimensionUnit
+      : null,
+    packagingGtin: currentProduct.packagingGtin,
     updatedAt: formatDate(currentProduct.updatedAt)
   };
 
@@ -972,44 +1063,69 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
                 const formKey = field.id as keyof ProductDetailsEditForm;
                 const inputId = `product-details-${field.id}`;
                 return (
-                  <div key={field.id} className={cardClass}>
-                    <div className="flex min-w-0 items-center justify-between gap-2">
-                      <label className="flex min-w-0 items-center gap-2 text-xs text-matrix-muted" htmlFor={inputId}><Icon className="h-4 w-4 shrink-0 text-matrix-goldDark" />{field.label}</label>
-                      {field.id === "name" ? renderTitleAiTrigger() : null}
+                  <div key={field.id} className="contents">
+                    {field.sectionTitle ? <h3 className="mt-2 text-xs font-semibold uppercase text-matrix-goldDark sm:col-span-2 xl:col-span-3">{field.sectionTitle}</h3> : null}
+                    <div className={cardClass}>
+                      <div className="flex min-w-0 items-center justify-between gap-2">
+                        <label className="flex min-w-0 items-center gap-2 text-xs text-matrix-muted" htmlFor={inputId}><Icon className="h-4 w-4 shrink-0 text-matrix-goldDark" />{field.label}</label>
+                        {field.id === "name" ? renderTitleAiTrigger() : null}
+                      </div>
+                      {field.id === "condition" ? (
+                        <select className={inputClass} id={inputId} onChange={(event) => updateField("condition", event.target.value)} value={form.condition}>
+                          <option value="">Nao informado</option>
+                          <option value="NEW">Novo</option>
+                          <option value="USED">Usado</option>
+                          <option value="UNSPECIFIED">Nao especificado</option>
+                        </select>
+                      ) : field.options ? (
+                        <select
+                          className={inputClass}
+                          id={inputId}
+                          onChange={(event) => updateField(formKey, event.target.value)}
+                          value={form[formKey]}
+                        >
+                          {field.options.map((option) => (
+                            <option key={option.value || "empty"} value={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          className={inputClass}
+                          id={inputId}
+                          inputMode={field.inputMode}
+                          maxLength={field.id === "name" ? PRODUCT_DETAILS_NAME_MAX_LENGTH
+                            : field.id === "brand"
+                              ? 120
+                              : field.id === "packagingGtin"
+                                ? 13
+                                : undefined}
+                          min={field.inputType === "number" ? 0 : undefined}
+                          onChange={(event) => updateField(formKey, event.target.value)}
+                          placeholder={field.placeholder}
+                          ref={field.id === "name" ? nameInputRef : undefined}
+                          step={field.id === "volumes" ? 1 : field.inputType === "number" ? "any" : undefined}
+                          type={field.inputType ?? "text"}
+                          value={form[formKey]}
+                        />
+                      )}
+                      {field.id === "name" ? <span className={`mt-1 block text-right text-xs ${form.name.length >= 55 ? "text-matrix-goldDark" : "text-matrix-muted"}`}>{form.name.length}/{PRODUCT_DETAILS_NAME_MAX_LENGTH}</span> : null}
                     </div>
-                    {field.id === "condition" ? (
-                      <select className={inputClass} id={inputId} onChange={(event) => updateField("condition", event.target.value)} value={form.condition}>
-                        <option value="">Nao informado</option>
-                        <option value="NEW">Novo</option>
-                        <option value="USED">Usado</option>
-                        <option value="UNSPECIFIED">Nao especificado</option>
-                      </select>
-                    ) : (
-                      <input
-                        className={inputClass}
-                        id={inputId}
-                        inputMode={field.inputMode}
-                        maxLength={field.id === "name" ? PRODUCT_DETAILS_NAME_MAX_LENGTH : field.id === "brand" ? 120 : undefined}
-                        onChange={(event) => updateField(formKey, event.target.value)}
-                        placeholder={field.placeholder}
-                        ref={field.id === "name" ? nameInputRef : undefined}
-                        value={form[formKey]}
-                      />
-                    )}
-                    {field.id === "name" ? <span className={`mt-1 block text-right text-xs ${form.name.length >= 55 ? "text-matrix-goldDark" : "text-matrix-muted"}`}>{form.name.length}/{PRODUCT_DETAILS_NAME_MAX_LENGTH}</span> : null}
                   </div>
                 );
               }
               return (
-                <div key={field.id} className={cardClass}>
-                  <div className="flex gap-3">
-                    <Icon className="mt-0.5 h-4 w-4 shrink-0 text-matrix-goldDark" />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex min-w-0 items-start justify-between gap-2">
-                        <p className="min-w-0 text-xs text-matrix-muted">{field.label}</p>
-                        {field.id === "name" && canEditProduct ? renderTitleAiTrigger() : null}
+                <div key={field.id} className="contents">
+                  {field.sectionTitle ? <h3 className="mt-2 text-xs font-semibold uppercase text-matrix-goldDark sm:col-span-2 xl:col-span-3">{field.sectionTitle}</h3> : null}
+                  <div className={cardClass}>
+                    <div className="flex gap-3">
+                      <Icon className="mt-0.5 h-4 w-4 shrink-0 text-matrix-goldDark" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 items-start justify-between gap-2">
+                          <p className="min-w-0 text-xs text-matrix-muted">{field.label}</p>
+                          {field.id === "name" && canEditProduct ? renderTitleAiTrigger() : null}
+                        </div>
+                        <p className="mt-1 break-words text-sm font-semibold">{displayText(detailValues[field.id], field.placeholder)}</p>
                       </div>
-                      <p className="mt-1 break-words text-sm font-semibold">{displayText(detailValues[field.id], field.placeholder)}</p>
                     </div>
                   </div>
                 </div>

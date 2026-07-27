@@ -71,7 +71,7 @@ function completeProduct(
     itemsPerBox: 2,
     dimensionUnit: "CENTIMETER",
     gtin: "7891234567895",
-    packagingGtin: "17891234567892",
+    packagingGtin: "7908073723457",
     images: [
       { id: "b", position: 1, url: "https://cdn.example.com/b.jpg" },
       { id: "a", position: 0, url: "https://cdn.example.com/a.jpg" }
@@ -100,7 +100,7 @@ function remoteProduct(overrides: Record<string, unknown> = {}) {
     volumes: 1,
     itensPorCaixa: 2,
     gtin: "7891234567895",
-    gtinEmbalagem: "17891234567892",
+    gtinEmbalagem: "7908073723457",
     dimensoes: { largura: 3, altura: 2, profundidade: 4, unidadeMedida: 1 },
     estoque: { saldoVirtualTotal: 3 },
     ...overrides
@@ -134,7 +134,7 @@ const fieldCases: Array<{
   { label: "Itens por caixa", local: { itemsPerBox: 2 }, read: (value) => value.itensPorCaixa, expected: 2 },
   { label: "Unidade de medida", local: { dimensionUnit: "CENTIMETER" }, read: (value) => (value.dimensoes as Record<string, unknown>).unidadeMedida, expected: 1 },
   { label: "GTIN", local: { gtin: "7891234567895" }, read: (value) => value.gtin, expected: "7891234567895" },
-  { label: "GTIN tributario", local: { packagingGtin: "17891234567892" }, read: (value) => value.gtinEmbalagem, expected: "17891234567892" }
+  { label: "GTIN tributario", local: { packagingGtin: "7908073723457" }, read: (value) => value.gtinEmbalagem, expected: "7908073723457" }
 ];
 
 for (const fieldCase of fieldCases) {
@@ -164,7 +164,7 @@ test("all supported product fields share one strict PRODUCT_FIELDS payload", () 
     volumes: 1,
     itensPorCaixa: 2,
     gtin: "7891234567895",
-    gtinEmbalagem: "17891234567892",
+    gtinEmbalagem: "7908073723457",
     dimensoes: { altura: 2, largura: 3, profundidade: 4, unidadeMedida: 1 }
   });
   assert.deepEqual(plan.moduleStatuses, {
@@ -229,6 +229,27 @@ test("numeric zero and boolean false are valid populated values", () => {
   assert.equal(plan.mainPayload.itensPorCaixa, 0);
   assert.deepEqual(plan.mainPayload.dimensoes, { altura: 0, largura: 0, profundidade: 0 });
   assert.equal(plan.stockPayload?.quantidade, 0);
+});
+
+test("null local commercial fields are NOT_REQUESTED and never clear remote values", () => {
+  const plan = createBlingFullProductSyncPlan(emptyProduct(), {
+    remoteProduct: remoteProduct()
+  });
+  assert.deepEqual(plan.mainPayload, {});
+  assert.equal(plan.moduleStatuses.PRODUCT_FIELDS, "NOT_REQUESTED");
+  for (const field of [
+    "format",
+    "type",
+    "situation",
+    "productionType",
+    "expirationDate",
+    "freeShipping",
+    "volumes",
+    "itemsPerBox",
+    "packagingGtin"
+  ]) {
+    assert.ok(plan.omittedFields.includes(field));
+  }
 });
 
 test("matching populated fields are NO_CHANGES including normalized numeric and date values", () => {

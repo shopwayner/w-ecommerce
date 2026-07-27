@@ -312,6 +312,32 @@ function dimensionUnitFromRemote(remote: JsonRecord) {
   return numberValue(record(remote.dimensoes).unidadeMedida);
 }
 
+function formatToBling(value: string | null) {
+  if (value === "SIMPLE") return "S" as const;
+  if (value === "VARIATION") return "V" as const;
+  if (value === "COMPOSITION") return "E" as const;
+  return null;
+}
+
+function productTypeToBling(value: string | null) {
+  if (value === "PRODUCT") return "P" as const;
+  if (value === "SERVICE") return "S" as const;
+  if (value === "SERVICE_06_21_22") return "N" as const;
+  return null;
+}
+
+function commercialStatusToBling(value: string | null) {
+  if (value === "ACTIVE") return "A" as const;
+  if (value === "INACTIVE") return "I" as const;
+  return null;
+}
+
+function productionTypeToBling(value: string | null) {
+  if (value === "OWN") return "P" as const;
+  if (value === "THIRD_PARTY") return "T" as const;
+  return null;
+}
+
 function protectedRemoteSnapshot(remote: JsonRecord, plan: BlingFullProductSyncPlan) {
   const copy = structuredClone(remote) as JsonRecord;
   const keyByPayload = {
@@ -440,53 +466,7 @@ function parseJobResult(lastCursor: string | null) {
   }
 }
 
-export const BLING_FULL_PRODUCT_UNSUPPORTED_LOCAL_FIELDS: BlingFullProductUnsupportedField[] = [
-  {
-    field: "format",
-    label: "Formato",
-    reason: "O cadastro local ainda nao possui um campo dedicado para formato."
-  },
-  {
-    field: "type",
-    label: "Tipo",
-    reason: "O cadastro local ainda nao possui um campo dedicado para tipo."
-  },
-  {
-    field: "situation",
-    label: "Situacao",
-    reason: "O status local tem outra finalidade e nao representa a situacao comercial do Bling."
-  },
-  {
-    field: "productionType",
-    label: "Producao",
-    reason: "O cadastro local ainda nao possui um campo dedicado para tipo de producao."
-  },
-  {
-    field: "expirationDate",
-    label: "Data de validade",
-    reason: "O cadastro local ainda nao possui um campo dedicado para data de validade."
-  },
-  {
-    field: "freeShipping",
-    label: "Frete gratis",
-    reason: "O cadastro local ainda nao possui um campo dedicado para frete gratis."
-  },
-  {
-    field: "volumes",
-    label: "Volumes",
-    reason: "O cadastro local ainda nao possui um campo dedicado para volumes."
-  },
-  {
-    field: "itemsPerBox",
-    label: "Itens por caixa",
-    reason: "O cadastro local ainda nao possui um campo dedicado para itens por caixa."
-  },
-  {
-    field: "packagingGtin",
-    label: "GTIN/EAN tributario",
-    reason: "O cadastro local ainda nao possui um campo dedicado para GTIN/EAN tributario."
-  }
-];
+export const BLING_FULL_PRODUCT_UNSUPPORTED_LOCAL_FIELDS: BlingFullProductUnsupportedField[] = [];
 
 async function defaultLoadContext(input: {
   organizationId: string;
@@ -539,6 +519,15 @@ async function defaultLoadContext(input: {
       depth: true,
       dimensionUnit: true,
       condition: true,
+      format: true,
+      productType: true,
+      commercialStatus: true,
+      productionType: true,
+      expirationDate: true,
+      freeShipping: true,
+      volumes: true,
+      itemsPerBox: true,
+      packagingGtin: true,
       attributes: true,
       blockedFields: true,
       prices: {
@@ -586,26 +575,26 @@ async function defaultLoadContext(input: {
     externalProductId: mapping.externalProductId,
     name: product.name,
     sku: product.sku,
-    format: null,
-    type: null,
-    situation: null,
+    format: formatToBling(product.format),
+    type: productTypeToBling(product.productType),
+    situation: commercialStatusToBling(product.commercialStatus),
     price: price ? Number(price.salePrice) : null,
     unit: localUnit(product.blockedFields, product.attributes),
     condition: product.condition,
     brand: product.brand,
-    productionType: null,
-    expirationDate: null,
-    freeShipping: null,
+    productionType: productionTypeToBling(product.productionType),
+    expirationDate: product.expirationDate?.toISOString().slice(0, 10) ?? null,
+    freeShipping: product.freeShipping,
     weight: product.weight === null ? null : Number(product.weight),
     grossWeight: product.grossWeight === null ? null : Number(product.grossWeight),
     width: product.width === null ? null : Number(product.width),
     height: product.height === null ? null : Number(product.height),
     depth: product.depth === null ? null : Number(product.depth),
-    volumes: null,
-    itemsPerBox: null,
+    volumes: product.volumes,
+    itemsPerBox: product.itemsPerBox === null ? null : Number(product.itemsPerBox),
     dimensionUnit: product.dimensionUnit,
     gtin: product.ean,
-    packagingGtin: null,
+    packagingGtin: product.packagingGtin,
     images: product.images,
     stock: product.inventory.length ? inventory : stockOverride
   };
