@@ -35,6 +35,7 @@ import {
 import { MercadoLivrePhotoSearchModal } from "@/components/mercado-livre-photo-search-modal";
 import { Button } from "@/components/ui";
 import { INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES } from "@/lib/intelligent-product-preview";
+import { runBlingFullProductSyncFromEditor } from "@/lib/bling-full-product-sync-client";
 import { normalizeMercadoLivreReferenceImageUrl } from "@/lib/mercado-livre-reference-images";
 import {
   applyProductTitleSuggestion,
@@ -45,6 +46,10 @@ import {
   type ProductDetailsEditForm,
   type ProductDetailsFieldId
 } from "@/lib/product-details-edit";
+import type {
+  BlingFullProductSyncPreview,
+  BlingFullProductSyncResult
+} from "@/lib/services/bling-full-product-sync-service";
 
 type ProductDetailsImage = {
   id: string;
@@ -83,6 +88,7 @@ export type ProductDetailsProduct = {
   attributes?: unknown;
   blingStatus?: string | null;
   blingAccount: {
+    blingAccountId?: string;
     blingAccountName: string | null;
     displayName: string | null;
   } | null;
@@ -716,6 +722,138 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     }
   }
 
+  async function updateProductInBling() {
+    if (saveInFlight.current || saving) return;
+    const connectionId = currentProduct.blingAccount?.blingAccountId;
+    if (!connectionId) {
+      setError("Este produto nao possui vinculo valido com uma conta Bling.");
+      return;
+    }
+    const result = buildPayload();
+    if ("error" in result) {
+      setError(result.error ?? "Dados invalidos.");
+      return;
+    }
+
+    saveInFlight.current = true;
+    setSaving(true);
+    setError(null);
+    setFeedback(null);
+    try {
+      const capabilityResponse = await fetch(`/api/products/${currentProduct.id}/bling/full-sync`, {
+        cache: "no-store"
+      });
+      const capabilityPayload = (await capabilityResponse.json().catch(() => ({}))) as {
+        data?: { enabled?: boolean };
+        error?: string;
+      };
+      if (!capabilityResponse.ok || !capabilityPayload.data?.enabled) {
+        throw new Error(
+          capabilityPayload.error ?? "A atualizacao completa no Bling esta temporariamente desativada."
+        );
+      }
+
+      const idempotencyKey = crypto.randomUUID();
+      const operation = await runBlingFullProductSyncFromEditor({
+        currentProduct,
+        hasLocalChanges: result.changed,
+        saveLocal: async () => {
+          let savedProduct: T;
+          if (saveProduct) {
+            savedProduct = await saveProduct(currentProduct.id, result.payload);
+          } else {
+            const saveResponse = await fetch(`/api/products/${currentProduct.id}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(result.payload)
+            });
+            const savePayload = (await saveResponse.json()) as { data?: T; error?: string };
+            if (!saveResponse.ok || !savePayload.data) {
+              throw new Error(savePayload.error ?? "Nao foi possivel salvar o produto.");
+            }
+            savedProduct = savePayload.data;
+          }
+          setCurrentProduct(savedProduct);
+          onProductUpdated(savedProduct);
+          return savedProduct;
+        },
+        preview: async (savedProduct) => {
+          const previewResponse = await fetch(`/api/products/${savedProduct.id}/bling/full-sync`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              dryRun: true,
+              connectionId,
+              idempotencyKey
+            })
+          });
+          const previewPayload = (await previewResponse.json().catch(() => ({}))) as {
+            data?: BlingFullProductSyncPreview;
+            error?: string;
+          };
+          if (!previewResponse.ok || !previewPayload.data) {
+            throw new Error(previewPayload.error ?? "Nao foi possivel preparar a atualizacao no Bling.");
+          }
+          return previewPayload.data;
+        },
+        confirm: async (savedProduct, preview) => {
+          const syncResponse = await fetch(`/api/products/${savedProduct.id}/bling/full-sync`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              dryRun: false,
+              confirmed: true,
+              connectionId,
+              idempotencyKey,
+              planConfirmation: preview.planConfirmation
+            })
+          });
+          const syncPayload = (await syncResponse.json().catch(() => ({}))) as {
+            data?: BlingFullProductSyncResult;
+            error?: string;
+          };
+          if (!syncResponse.ok || !syncPayload.data) {
+            throw new Error(syncPayload.error ?? "Nao foi possivel atualizar o produto no Bling.");
+          }
+          return syncPayload.data;
+        }
+      });
+      const savedProduct = operation.savedProduct;
+      const syncResult = operation.result;
+
+      const refreshed = loadProduct
+        ? await loadProduct(savedProduct.id)
+        : await fetch(`/api/products/${savedProduct.id}`, { cache: "no-store" })
+            .then(async (response) => {
+              const payload = (await response.json()) as { data?: T; error?: string };
+              if (!response.ok || !payload.data) {
+                throw new Error(payload.error ?? "Nao foi possivel reler o produto.");
+              }
+              return payload.data;
+            });
+      const nextImages = orderedImages(refreshed);
+      setCurrentProduct(refreshed);
+      setForm(formFromProduct(refreshed));
+      setImages(nextImages);
+      setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
+      setBaselineImageKeys(nextImages.map(imageStateKey));
+      setSelectedImageId(nextImages[0]?.id ?? null);
+      cancelTitleAi();
+      onProductUpdated(refreshed);
+      setEditing(false);
+      if (["UPDATED", "UNCHANGED"].includes(syncResult.status)) {
+        setFeedback(syncResult.message);
+      } else {
+        setError(syncResult.message);
+      }
+    } catch (syncError) {
+      setError(syncError instanceof Error ? syncError.message : "Nao foi possivel atualizar o produto no Bling.");
+    } finally {
+      saveInFlight.current = false;
+      setSaving(false);
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-[70] bg-black/70 p-1 backdrop-blur-md sm:p-2" onMouseDown={(event) => event.target === event.currentTarget && requestClose()}>
       <section aria-modal="true" className="mx-auto flex h-[calc(100dvh-0.5rem)] w-full max-w-[1540px] flex-col overflow-hidden rounded-xl border border-matrix-gold/35 bg-matrix-panel text-matrix-fg shadow-glow sm:h-[calc(100dvh-1rem)]" role="dialog">
@@ -943,7 +1081,11 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
         <footer className="z-10 flex shrink-0 flex-col gap-3 border-t border-matrix-border bg-matrix-panel px-4 py-3 shadow-[0_-12px_32px_rgb(0_0_0/0.2)] sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <p className="text-xs text-matrix-muted">{editing ? "As mudancas permanecem locais ate a confirmacao do salvamento." : permissionChecked && !canEditProduct ? "Seu usuario pode visualizar, mas nao editar produtos." : "Visualizacao do cadastro local do W Ecommerce."}</p>
           <div className="grid grid-cols-2 gap-2 sm:flex sm:justify-end">
-            {editing ? <><Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">Cancelar</Button><Button disabled={saving || !hasPendingChanges || form.name.trim().length < 2 || form.name.trim().length > PRODUCT_DETAILS_NAME_MAX_LENGTH} onClick={requestSave} type="button"><Save className="h-4 w-4" />Salvar alteracoes</Button></> : <><Button onClick={requestClose} type="button" variant="secondary">Fechar</Button>{canEditProduct ? <Button disabled={!detailsLoaded || detailsLoading} onClick={beginEditing} type="button"><Edit3 className="h-4 w-4" />Editar</Button> : null}</>}
+            {editing ? (
+              currentProduct.blingAccount?.blingAccountId
+                ? <><Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">Cancelar</Button><Button disabled={saving || form.name.trim().length < 2 || form.name.trim().length > PRODUCT_DETAILS_NAME_MAX_LENGTH} onClick={() => void updateProductInBling()} type="button"><Package className="h-4 w-4" />{saving ? "Atualizando produto no Bling..." : "Atualizar produto no Bling"}</Button></>
+                : <><Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">Cancelar</Button><Button disabled={saving || !hasPendingChanges || form.name.trim().length < 2 || form.name.trim().length > PRODUCT_DETAILS_NAME_MAX_LENGTH} onClick={requestSave} type="button"><Save className="h-4 w-4" />Salvar alteracoes</Button></>
+            ) : <><Button onClick={requestClose} type="button" variant="secondary">Fechar</Button>{canEditProduct ? <Button disabled={!detailsLoaded || detailsLoading} onClick={beginEditing} type="button"><Edit3 className="h-4 w-4" />Editar</Button> : null}</>}
           </div>
         </footer>
       </section>

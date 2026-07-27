@@ -40,11 +40,11 @@ import {
   X
 } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
-import {
-  BlingProductUpdateModal,
-  type BlingProductReviewChanges,
-  type BlingProductUpdatePreview,
-  type BlingProductUpdateResult
+import { BlingFullProductSyncModal } from "@/components/bling-full-product-sync-modal";
+import type {
+  BlingProductReviewChanges,
+  BlingProductUpdatePreview,
+  BlingProductUpdateResult
 } from "@/components/bling-product-update-modal";
 import { ProductCopyButton } from "@/components/product-copy-button";
 import { ProductDetailsModal } from "@/components/product-details-modal";
@@ -61,6 +61,10 @@ import {
   confirmBlingImageAppend
 } from "@/lib/bling-product-image-append-client";
 import type { BlingProductUpdateCompletion } from "@/lib/bling-product-update-continuation";
+import type {
+  BlingFullProductSyncPreview,
+  BlingFullProductSyncResult
+} from "@/lib/services/bling-full-product-sync-service";
 
 const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre-oval.png";
 
@@ -530,6 +534,9 @@ export function ProductsPage() {
   const [blingUpdatePreview, setBlingUpdatePreview] = useState<BlingProductUpdatePreview | null>(null);
   const [blingUpdateResult, setBlingUpdateResult] = useState<BlingProductUpdateResult | null>(null);
   const [blingUpdateCompletion, setBlingUpdateCompletion] = useState<BlingProductUpdateCompletion | null>(null);
+  const [blingFullSyncPreview, setBlingFullSyncPreview] = useState<BlingFullProductSyncPreview | null>(null);
+  const [blingFullSyncResult, setBlingFullSyncResult] = useState<BlingFullProductSyncResult | null>(null);
+  const blingFullSyncIdempotencyKey = useRef<string | null>(null);
   const blingUpdateIdempotencyKey = useRef<string | null>(null);
   const blingImageAppendIdempotencyKey = useRef<string | null>(null);
   const blingUpdateRequestInFlight = useRef(false);
@@ -787,6 +794,101 @@ export function ProductsPage() {
     blingUpdateIdempotencyKey.current = null;
     blingImageAppendIdempotencyKey.current = null;
     blingUpdateRequestInFlight.current = false;
+    setBlingFullSyncPreview(null);
+    setBlingFullSyncResult(null);
+    blingFullSyncIdempotencyKey.current = null;
+  }
+
+  async function openBlingFullSyncPreview() {
+    setBlingUpdateOpen(true);
+    setBlingUpdateBusy(false);
+    setBlingUpdateMessage("");
+    setBlingFullSyncPreview(null);
+    setBlingFullSyncResult(null);
+    const idempotencyKey = crypto.randomUUID();
+    blingFullSyncIdempotencyKey.current = idempotencyKey;
+
+    if (!selectedBlingConnectionId) {
+      setBlingUpdateMessage("Selecione uma conta Bling no topo antes de atualizar produtos.");
+      return;
+    }
+    if (accountContext?.selectedOption?.status !== "ACTIVE") {
+      setBlingUpdateMessage("Reconecte a conta Bling antes de continuar.");
+      return;
+    }
+    if (!selectedBlingProduct) {
+      setBlingUpdateMessage(
+        selectedProducts.length > 1
+          ? "Selecione apenas um produto para atualizar no Bling."
+          : "Este produto ainda nao esta vinculado a esta conta Bling."
+      );
+      return;
+    }
+
+    setBlingUpdateBusy(true);
+    try {
+      const response = await fetch(`/api/products/${selectedBlingProduct.id}/bling/full-sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dryRun: true,
+          connectionId: selectedBlingConnectionId,
+          idempotencyKey
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.data) {
+        setBlingUpdateMessage(payload.error ?? "Nao foi possivel preparar a atualizacao completa.");
+        return;
+      }
+      setBlingFullSyncPreview(payload.data as BlingFullProductSyncPreview);
+    } catch {
+      setBlingUpdateMessage("Nao foi possivel preparar a atualizacao completa.");
+    } finally {
+      setBlingUpdateBusy(false);
+    }
+  }
+
+  async function confirmBlingFullProductSync() {
+    if (
+      !selectedBlingConnectionId
+      || !selectedBlingProduct
+      || !blingFullSyncPreview
+      || !blingFullSyncIdempotencyKey.current
+      || blingUpdateBusy
+      || blingUpdateRequestInFlight.current
+    ) return;
+
+    blingUpdateRequestInFlight.current = true;
+    setBlingUpdateBusy(true);
+    setBlingUpdateMessage("");
+    try {
+      const response = await fetch(`/api/products/${selectedBlingProduct.id}/bling/full-sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dryRun: false,
+          confirmed: true,
+          connectionId: selectedBlingConnectionId,
+          idempotencyKey: blingFullSyncIdempotencyKey.current,
+          planConfirmation: blingFullSyncPreview.planConfirmation
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.data) {
+        setBlingUpdateMessage(payload.error ?? "Nao foi possivel atualizar o produto no Bling.");
+        return;
+      }
+      setBlingFullSyncResult(payload.data as BlingFullProductSyncResult);
+      await loadProducts();
+    } catch {
+      setBlingUpdateMessage(
+        "O resultado da atualizacao ficou inconclusivo. Verifique o produto antes de tentar novamente."
+      );
+    } finally {
+      blingUpdateRequestInFlight.current = false;
+      setBlingUpdateBusy(false);
+    }
   }
 
   function resetNameOperationState() {
@@ -1413,12 +1515,12 @@ export function ProductsPage() {
                   !selectedBlingProduct ||
                   blingUpdateBusy
                 }
-                onClick={() => void openBlingUpdatePreview()}
+                onClick={() => void openBlingFullSyncPreview()}
                 type="button"
                 variant="secondary"
               >
                 <RefreshCw className="h-4 w-4" />
-                Atualizar no Bling
+                Atualizar produto no Bling
               </Button>
             </div>
           </div>
@@ -1699,18 +1801,13 @@ export function ProductsPage() {
         />
       ) : null}
       {blingUpdateOpen ? (
-        <BlingProductUpdateModal
-          busy={blingUpdateBusy}
+        <BlingFullProductSyncModal
+          loading={blingUpdateBusy}
           message={blingUpdateMessage}
-          onClose={closeBlingUpdateModal}
-          onConfirm={(fields) => void confirmBlingProductUpdate(fields)}
-          onConfirmImages={(images, confirmation) => void confirmBlingProductImages(images, confirmation)}
-          onPreviewImages={(images) => void previewBlingProductImages(images)}
-          onConfirmIncidentReview={() => void confirmBlingProductIncidentReview()}
-          onConfirmLinkMismatch={() => void confirmBlingProductLinkMismatch()}
-          operationCompletion={blingUpdateCompletion}
-          preview={blingUpdatePreview}
-          result={blingUpdateResult}
+          onCancel={closeBlingUpdateModal}
+          onConfirm={() => void confirmBlingFullProductSync()}
+          preview={blingFullSyncPreview}
+          result={blingFullSyncResult}
         />
       ) : null}
       {blingImportOpen ? (
