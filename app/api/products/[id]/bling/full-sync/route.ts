@@ -95,35 +95,40 @@ export async function POST(
 
     const correlationId = maskReference(randomUUID());
     const idempotencyRef = maskReference(parsed.data.idempotencyKey);
-    await logDangerousAction({
-      authContext: auth.context,
-      action: "BLING_FULL_PRODUCT_SYNC_INTENT",
-      entityType: "Product",
-      entityId: productId,
-      route: `/api/products/${productId}/bling/full-sync`,
-      method: "POST",
-      confirmation: true,
-      status: "SUCCESS",
-      riskLevel: "CRITICAL",
-      summary: "Atualizacao completa e allowlisted do produto no Bling confirmada pelo usuario.",
-      metadata: {
-        operation: "FULL_PRODUCT_SYNC",
-        connectionId: parsed.data.connectionId,
-        correlationId,
-        idempotencyRef
-      },
-      request,
-      requirePersist: true
-    });
-
     const result = await blingFullProductSyncService.execute({
       userId: auth.context.user.id,
       organizationId: auth.context.organizationId,
       connectionId: parsed.data.connectionId,
       productId,
       idempotencyKey: parsed.data.idempotencyKey,
-      planConfirmation: parsed.data.planConfirmation
+      planConfirmation: parsed.data.planConfirmation,
+      onIntent: async () => {
+        await logDangerousAction({
+          authContext: auth.context,
+          action: "BLING_FULL_PRODUCT_SYNC_INTENT",
+          entityType: "Product",
+          entityId: productId,
+          route: `/api/products/${productId}/bling/full-sync`,
+          method: "POST",
+          confirmation: true,
+          status: "SUCCESS",
+          riskLevel: "CRITICAL",
+          summary: "Atualizacao completa e allowlisted do produto no Bling confirmada pelo usuario.",
+          metadata: {
+            operation: "FULL_PRODUCT_SYNC",
+            connectionId: parsed.data.connectionId,
+            correlationId,
+            idempotencyRef
+          },
+          request,
+          requirePersist: true
+        });
+      }
     });
+
+    if (result.status === "UNCHANGED") {
+      return NextResponse.json({ data: result });
+    }
 
     await createAuditLog({
       authContext: auth.context,

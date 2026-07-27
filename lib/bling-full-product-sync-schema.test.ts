@@ -38,6 +38,26 @@ function product(overrides: Partial<BlingFullProductLocalValues> = {}): BlingFul
   };
 }
 
+function remoteProduct(overrides: Record<string, unknown> = {}) {
+  return {
+    nome: "Produto Matrix",
+    marca: "T-Mac",
+    codigo: "SKU-1",
+    gtin: "7891234567895",
+    unidade: "UN",
+    preco: 20,
+    descricaoComplementar: "Descricao do produto",
+    pesoLiquido: 1,
+    pesoBruto: 1.2,
+    condicao: 1,
+    dimensoes: { altura: 2, largura: 3, profundidade: 4, unidadeMedida: 1 },
+    categoria: { id: 99 },
+    estoque: { saldoVirtualTotal: 3 },
+    fornecedor: { precoCusto: 10 },
+    ...overrides
+  };
+}
+
 test("maps every populated local field through explicit allowlists", () => {
   const plan = createBlingFullProductSyncPlan(product(), {
     category: { status: "RESOLVED", id: 99 },
@@ -250,6 +270,8 @@ test("an identical five-image gallery reports no additions or removals", () => {
   assert.equal(plan.remoteImageCount, 5);
   assert.equal(plan.remoteImagesToAddCount, 0);
   assert.equal(plan.remoteImagesToRemoveCount, 0);
+  assert.equal(plan.imagesPayload, null);
+  assert.equal(plan.moduleStatuses.IMAGES, "NO_CHANGES");
 });
 
 test("a gallery above the official limit is blocked without truncation", () => {
@@ -381,4 +403,123 @@ test("controlled disposable product produces a sanitized dry-run without executi
     { module: "IMAGES", method: "PATCH", path: "/produtos/16681407082" }
   ]);
   assert.equal(plan.blockers.length, 0);
+});
+
+test("matching populated product fields are classified as NO_CHANGES", () => {
+  const plan = createBlingFullProductSyncPlan(product({ images: [] }), {
+    category: { status: "RESOLVED", id: 99 },
+    remoteProduct: remoteProduct()
+  });
+  assert.deepEqual(plan.mainPayload, {});
+  assert.equal(plan.moduleStatuses.PRODUCT_FIELDS, "NO_CHANGES");
+  assert.equal(plan.moduleStatuses.PRICE_COST, "NO_CHANGES");
+});
+
+test("the same photos in a different order remain a pending image change", () => {
+  const images = [
+    { id: "a", position: 0, url: "https://cdn.example.com/a.jpg" },
+    { id: "b", position: 1, url: "https://cdn.example.com/b.jpg" }
+  ];
+  const plan = createBlingFullProductSyncPlan(product({ category: null, images }), {
+    remoteProduct: remoteProduct(),
+    remoteImageUrls: [
+      "https://cdn.example.com/b.jpg",
+      "https://cdn.example.com/a.jpg"
+    ]
+  });
+  assert.equal(plan.moduleStatuses.IMAGES, "PENDING");
+  assert.ok(plan.imagesPayload);
+});
+
+test("an added local photo remains a pending image change", () => {
+  const plan = createBlingFullProductSyncPlan(product({
+    category: null,
+    images: [
+      { id: "a", position: 0, url: "https://cdn.example.com/a.jpg" },
+      { id: "b", position: 1, url: "https://cdn.example.com/b.jpg" }
+    ]
+  }), {
+    remoteProduct: remoteProduct(),
+    remoteImageUrls: ["https://cdn.example.com/a.jpg"]
+  });
+  assert.equal(plan.moduleStatuses.IMAGES, "PENDING");
+  assert.equal(plan.remoteImagesToAddCount, 1);
+});
+
+test("a remote photo removed by exact mirroring remains a pending image change", () => {
+  const plan = createBlingFullProductSyncPlan(product({
+    category: null,
+    images: [{ id: "a", position: 0, url: "https://cdn.example.com/a.jpg" }]
+  }), {
+    remoteProduct: remoteProduct(),
+    remoteImageUrls: [
+      "https://cdn.example.com/a.jpg",
+      "https://cdn.example.com/b.jpg"
+    ]
+  });
+  assert.equal(plan.moduleStatuses.IMAGES, "PENDING");
+  assert.equal(plan.remoteImagesToRemoveCount, 1);
+});
+
+test("an absent local stock is NOT_REQUESTED and needs no stock payload", () => {
+  const plan = createBlingFullProductSyncPlan(product({
+    category: null,
+    cost: null,
+    stock: null,
+    images: []
+  }), { remoteProduct: remoteProduct() });
+  assert.equal(plan.moduleStatuses.STOCK, "NOT_REQUESTED");
+  assert.equal(plan.stockPayload, null);
+});
+
+test("local and remote stock zero are NO_CHANGES", () => {
+  const plan = createBlingFullProductSyncPlan(product({
+    category: null,
+    cost: null,
+    price: null,
+    stock: 0,
+    images: []
+  }), {
+    remoteProduct: remoteProduct({ estoque: { saldoVirtualTotal: "0" } })
+  });
+  assert.equal(plan.moduleStatuses.STOCK, "NO_CHANGES");
+  assert.equal(plan.stockPayload, null);
+});
+
+test("local stock zero and a different remote stock are PENDING", () => {
+  const plan = createBlingFullProductSyncPlan(product({
+    category: null,
+    cost: null,
+    price: null,
+    stock: 0,
+    images: []
+  }), {
+    depositId: 7,
+    remoteProduct: remoteProduct({ estoque: { saldoVirtualTotal: 1 } })
+  });
+  assert.equal(plan.moduleStatuses.STOCK, "PENDING");
+  assert.equal(plan.stockPayload?.quantidade, 0);
+});
+
+test("all equal or absent modules produce ALREADY_UP_TO_DATE", () => {
+  const imageUrls = [
+    "https://cdn.example.com/a.jpg",
+    "https://cdn.example.com/b.jpg"
+  ];
+  const plan = createBlingFullProductSyncPlan(product({
+    category: null,
+    cost: null,
+    price: null,
+    stock: null,
+    images: imageUrls.map((url, index) => ({ id: String(index), position: index, url }))
+  }), {
+    remoteProduct: remoteProduct(),
+    remoteImageUrls: imageUrls
+  });
+  assert.equal(plan.status, "ALREADY_UP_TO_DATE");
+  assert.deepEqual(plan.endpoints, []);
+  assert.equal(plan.moduleStatuses.PRODUCT_FIELDS, "NO_CHANGES");
+  assert.equal(plan.moduleStatuses.STOCK, "NOT_REQUESTED");
+  assert.equal(plan.moduleStatuses.IMAGES, "NO_CHANGES");
+  assert.equal(plan.moduleStatuses.VERIFICATION, "NOT_REQUESTED");
 });

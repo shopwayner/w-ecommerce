@@ -19,11 +19,23 @@ function formatStock(value: number | null) {
 }
 
 function moduleLabel(module: BlingFullProductModuleResult["module"]) {
-  if (module === "PRODUCT_FIELDS") return "Atualizando dados";
-  if (module === "PRICE_COST") return "Atualizando preco e custo";
-  if (module === "STOCK") return "Atualizando estoque";
-  if (module === "IMAGES") return "Atualizando fotos";
-  return "Verificando resultado";
+  if (module === "PRODUCT_FIELDS") return "Dados do produto";
+  if (module === "PRICE_COST") return "Preco e custo";
+  if (module === "STOCK") return "Estoque";
+  if (module === "IMAGES") return "Fotos";
+  return "Verificacao";
+}
+
+function moduleStatusLabel(item: BlingFullProductModuleResult) {
+  if (item.status === "COMPLETED") return "Concluido";
+  if (item.status === "FAILED") return "Falhou";
+  if (item.status === "VERIFICATION_FAILED") return "Verificacao falhou";
+  if (item.status === "NO_CHANGES") {
+    if (item.module === "PRODUCT_FIELDS" || item.module === "PRICE_COST") return "Ja atualizados";
+    return item.module === "IMAGES" ? "Ja atualizadas" : "Ja atualizado";
+  }
+  if (item.status === "NOT_REQUESTED") return "Nao informado";
+  return "Pendente";
 }
 
 function ModuleStatus({ item }: { item: BlingFullProductModuleResult }) {
@@ -37,15 +49,7 @@ function ModuleStatus({ item }: { item: BlingFullProductModuleResult }) {
             ? "text-red-600"
             : "text-matrix-muted"
       }>
-        {item.status === "COMPLETED"
-          ? "Concluido"
-          : item.status === "FAILED"
-            ? "Falhou"
-            : item.status === "VERIFICATION_FAILED"
-              ? "Verificacao falhou"
-              : item.status === "NOT_REQUESTED"
-              ? "Nao necessario"
-              : "Pendente"}
+        {moduleStatusLabel(item)}
       </span>
     </li>
   );
@@ -71,6 +75,8 @@ export function BlingFullProductSyncModal({
     preview
     && preview.capabilityEnabled
     && !preview.blockers.length
+    && preview.status === "READY"
+    && preview.modules.some((item) => item.status === "PENDING")
     && !loading
     && !result
   );
@@ -171,6 +177,12 @@ export function BlingFullProductSyncModal({
                   <ul className="mt-2 space-y-1 text-sm text-matrix-muted">
                     {preview.notices.map((notice) => <li key={notice}>{notice}</li>)}
                   </ul>
+                </div>
+              ) : null}
+              {preview.status === "ALREADY_UP_TO_DATE" ? (
+                <div className="mt-4 rounded-lg border border-green-500/25 bg-green-500/10 p-3 text-sm text-green-700">
+                  <p className="font-semibold">Este produto ja esta atualizado no Bling.</p>
+                  <p className="mt-1">Nenhuma alteracao sera enviada.</p>
                 </div>
               ) : null}
               {!preview.capabilityEnabled ? (

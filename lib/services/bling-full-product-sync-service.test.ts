@@ -5,6 +5,7 @@ import test from "node:test";
 import type { BlingFullProductLocalValues } from "@/lib/bling-full-product-sync-schema";
 import {
   BlingFullProductSyncService,
+  hasMeaningfulProductStructure,
   verifyBlingFullProductSyncPlan,
   type FullSyncContext,
   type FullSyncDependencies
@@ -97,6 +98,8 @@ function dependencies(input: {
     stock: [] as Array<Record<string, unknown>>,
     finish: 0,
     record: 0,
+    reserve: 0,
+    resolveDeposit: 0,
     recordedMappingIds: [] as string[],
     load: 0,
     get: 0
@@ -111,7 +114,23 @@ function dependencies(input: {
     async getRemote() {
       calls.get += 1;
       const afterWrite = calls.patch.length > 0 || calls.stock.length > 0;
-      if (!afterWrite) return input.remoteBefore ?? remote();
+      if (!afterWrite) {
+        return input.remoteBefore ?? remote([], {
+          nome: "Produto anterior",
+          marca: "Marca anterior",
+          codigo: "SKU-ANTERIOR",
+          preco: 19,
+          gtin: "7890000000000",
+          unidade: "PC",
+          descricaoComplementar: "Descricao anterior",
+          pesoLiquido: 0,
+          pesoBruto: 0,
+          condicao: 0,
+          dimensoes: { altura: 0, largura: 0, profundidade: 0, unidadeMedida: 0 },
+          estoque: { saldoVirtualTotal: 2 },
+          fornecedor: { precoCusto: 9 }
+        });
+      }
       if (input.remoteAfter) return input.remoteAfter;
       return input.divergentAfter
         ? remote(["https://cdn.example.com/a.jpg"], { nome: "Nome divergente" })
@@ -121,6 +140,7 @@ function dependencies(input: {
       return { status: "OMITTED" };
     },
     async resolveDepositId() {
+      calls.resolveDeposit += 1;
       return 7;
     },
     async patchProduct(request) {
@@ -131,6 +151,7 @@ function dependencies(input: {
       calls.stock.push(request.payload);
     },
     async reserveJob() {
+      calls.reserve += 1;
       return input.reserveState === "IN_FLIGHT"
         ? { state: "IN_FLIGHT", jobId: "job_1" }
         : { state: "NEW", jobId: "job_1" };
@@ -405,4 +426,126 @@ test("external sync recording updates only the existing stable mapping", () => {
   assert.match(implementation, /externalProductId:\s*input\.context\.mapping\.externalProductId/);
   assert.doesNotMatch(implementation, /\.create\(/);
   assert.doesNotMatch(implementation, /externalSku/);
+});
+
+test("missing structure is treated as simple", () => {
+  assert.equal(hasMeaningfulProductStructure({}), false);
+});
+
+test("null structure is treated as simple", () => {
+  assert.equal(hasMeaningfulProductStructure({ estrutura: null }), false);
+});
+
+test("an empty structure object is treated as simple", () => {
+  assert.equal(hasMeaningfulProductStructure({ estrutura: {} }), false);
+});
+
+test("empty structure strings and components are treated as simple", () => {
+  assert.equal(hasMeaningfulProductStructure({
+    estrutura: {
+      tipoEstoque: "",
+      lancamentoEstoque: "   ",
+      componentes: []
+    }
+  }), false);
+});
+
+test("null and empty component records are ignored", () => {
+  assert.equal(hasMeaningfulProductStructure({
+    estrutura: { componentes: [null, {}, { produto: {} }] }
+  }), false);
+});
+
+test("a component with produto.id is meaningful", () => {
+  assert.equal(hasMeaningfulProductStructure({
+    estrutura: { componentes: [{ produto: { id: 123 } }] }
+  }), true);
+});
+
+test("a component with produto.codigo is meaningful", () => {
+  assert.equal(hasMeaningfulProductStructure({
+    estrutura: { componentes: [{ produto: { codigo: "COMP-1" } }] }
+  }), true);
+});
+
+test("a real variation remains blocked", async () => {
+  const mocked = dependencies({
+    remoteBefore: remote([], { variacoes: [{ id: 1 }] })
+  });
+  const preview = await new BlingFullProductSyncService(mocked.deps).preview({
+    userId: "user_1",
+    organizationId: "org_1",
+    connectionId: "connection_1",
+    productId: "product_1",
+    idempotencyKey: "8ee6a493-2d85-46e4-b691-d9104e02de56"
+  });
+  assert.equal(preview.status, "BLOCKED");
+  assert.match(preview.blockers[0], /variacoes ou composicao/);
+});
+
+test("an explicitly complex remote format remains blocked", async () => {
+  const mocked = dependencies({
+    remoteBefore: remote([], { formato: "E" })
+  });
+  const preview = await new BlingFullProductSyncService(mocked.deps).preview({
+    userId: "user_1",
+    organizationId: "org_1",
+    connectionId: "connection_1",
+    productId: "product_1",
+    idempotencyKey: "8ee6a493-2d85-46e4-b691-d9104e02de56"
+  });
+  assert.equal(preview.status, "BLOCKED");
+  assert.match(preview.blockers[0], /variacoes ou composicao/);
+});
+
+test("a no-op returns UNCHANGED without writes, job reservation or intent audit", async () => {
+  const matchingRemote = remote(["https://cdn.example.com/a.jpg"], {
+    estrutura: {
+      tipoEstoque: "",
+      lancamentoEstoque: "",
+      componentes: []
+    },
+    variacoes: []
+  });
+  const mocked = dependencies({ remoteBefore: matchingRemote });
+  const service = new BlingFullProductSyncService(mocked.deps);
+  const request = {
+    userId: "user_1",
+    organizationId: "org_1",
+    connectionId: "connection_1",
+    productId: "product_1",
+    idempotencyKey: "8ee6a493-2d85-46e4-b691-d9104e02de56"
+  };
+  const preview = await service.preview(request);
+  assert.equal(preview.status, "ALREADY_UP_TO_DATE");
+  assert.equal(preview.modules.find((item) => item.module === "PRODUCT_FIELDS")?.status, "NO_CHANGES");
+  assert.equal(preview.modules.find((item) => item.module === "STOCK")?.status, "NO_CHANGES");
+  assert.equal(preview.modules.find((item) => item.module === "IMAGES")?.status, "NO_CHANGES");
+  assert.equal(mocked.calls.resolveDeposit, 0);
+
+  let intentAudits = 0;
+  const previous = process.env.BLING_FULL_PRODUCT_SYNC_ENABLED;
+  process.env.BLING_FULL_PRODUCT_SYNC_ENABLED = "true";
+  try {
+    const result = await service.execute({
+      ...request,
+      planConfirmation: preview.planConfirmation,
+      async onIntent() {
+        intentAudits += 1;
+      }
+    });
+    assert.equal(result.status, "UNCHANGED");
+    assert.equal(result.patchRequests, 0);
+    assert.equal(result.postRequests, 0);
+    assert.equal(result.verificationGetExecuted, false);
+  } finally {
+    if (previous === undefined) delete process.env.BLING_FULL_PRODUCT_SYNC_ENABLED;
+    else process.env.BLING_FULL_PRODUCT_SYNC_ENABLED = previous;
+  }
+  assert.equal(mocked.calls.patch.length, 0);
+  assert.equal(mocked.calls.stock.length, 0);
+  assert.equal(mocked.calls.reserve, 0);
+  assert.equal(mocked.calls.finish, 0);
+  assert.equal(mocked.calls.record, 0);
+  assert.equal(intentAudits, 0);
 });

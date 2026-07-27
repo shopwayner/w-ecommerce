@@ -12,6 +12,8 @@ export const BLING_FULL_PRODUCT_SYNC_MODULES = [
 ] as const;
 
 export type BlingFullProductSyncModule = (typeof BLING_FULL_PRODUCT_SYNC_MODULES)[number];
+export type BlingFullProductSyncPlanningStatus = "NOT_REQUESTED" | "NO_CHANGES" | "PENDING";
+export type BlingFullProductSyncPlanStatus = "READY" | "BLOCKED" | "ALREADY_UP_TO_DATE";
 
 const nonEmptyText = z.string().trim().min(1);
 const nonNegativeNumber = z.number().finite().nonnegative();
@@ -115,6 +117,7 @@ export type BlingFullProductResolution = {
   depositId?: number | null;
   remoteVideoUrl?: string | null;
   remoteImageUrls?: string[];
+  remoteProduct?: Record<string, unknown>;
 };
 
 export type BlingFullProductSyncPlan = {
@@ -136,6 +139,8 @@ export type BlingFullProductSyncPlan = {
   remoteImageCount: number;
   remoteImagesToAddCount: number;
   remoteImagesToRemoveCount: number;
+  status: BlingFullProductSyncPlanStatus;
+  moduleStatuses: Record<BlingFullProductSyncModule, BlingFullProductSyncPlanningStatus>;
   endpoints: Array<{
     module: Exclude<BlingFullProductSyncModule, "VERIFICATION">;
     method: "PATCH" | "POST";
@@ -158,6 +163,53 @@ function text(value: string | null | undefined) {
 
 function usefulNumber(value: number | null | undefined) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function comparableNumber(value: unknown) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function comparableText(value: unknown) {
+  return text(typeof value === "string" || typeof value === "number" ? String(value) : null)
+    ?.normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/\s+/g, " ")
+    .toLowerCase() ?? "";
+}
+
+function mainFieldMatchesRemote(
+  field: keyof z.infer<typeof blingFullProductMainPayloadSchema>,
+  expected: unknown,
+  remote: Record<string, unknown>
+) {
+  if (field === "dimensoes") {
+    const expectedDimensions = record(expected);
+    const remoteDimensions = record(remote.dimensoes);
+    return Object.entries(expectedDimensions).every(
+      ([key, value]) => comparableNumber(remoteDimensions[key]) === comparableNumber(value)
+    );
+  }
+  if (field === "categoria") {
+    return comparableNumber(record(remote.categoria).id) === comparableNumber(record(expected).id);
+  }
+  if (
+    field === "preco"
+    || field === "pesoLiquido"
+    || field === "pesoBruto"
+    || field === "condicao"
+  ) {
+    return comparableNumber(remote[field]) === comparableNumber(expected);
+  }
+  return comparableText(remote[field]) === comparableText(expected);
 }
 
 function canonical(value: unknown): unknown {
@@ -221,7 +273,7 @@ export function createBlingFullProductSyncPlan(
   const omittedFields: string[] = [];
   const blockers: string[] = [];
   const notices: string[] = [];
-  const mainPayload: z.input<typeof blingFullProductMainPayloadSchema> = {};
+  const requestedMainPayload: z.input<typeof blingFullProductMainPayloadSchema> = {};
 
   function addText(
     localField: string,
@@ -230,7 +282,7 @@ export function createBlingFullProductSyncPlan(
   ) {
     const normalized = text(value);
     if (normalized) {
-      (mainPayload as Record<string, unknown>)[remoteField] = normalized;
+      (requestedMainPayload as Record<string, unknown>)[remoteField] = normalized;
       populatedFields.push(localField);
     } else {
       omittedFields.push(localField);
@@ -249,7 +301,7 @@ export function createBlingFullProductSyncPlan(
   const cost = usefulNumber(local.cost);
   const stock = usefulNumber(local.stock);
   if (price !== null) {
-    mainPayload.preco = price;
+    requestedMainPayload.preco = price;
     populatedFields.push("price");
   } else {
     omittedFields.push("price");
@@ -265,7 +317,7 @@ export function createBlingFullProductSyncPlan(
   ] as const) {
     const normalized = usefulNumber(value);
     if (normalized !== null) {
-      mainPayload[remoteField] = normalized;
+      requestedMainPayload[remoteField] = normalized;
       populatedFields.push(localField);
     } else {
       omittedFields.push(localField);
@@ -274,7 +326,7 @@ export function createBlingFullProductSyncPlan(
 
   const normalizedCondition = condition(local.condition);
   if (normalizedCondition !== undefined) {
-    mainPayload.condicao = normalizedCondition;
+    requestedMainPayload.condicao = normalizedCondition;
     populatedFields.push("condition");
   } else {
     omittedFields.push("condition");
@@ -301,7 +353,7 @@ export function createBlingFullProductSyncPlan(
   } else {
     omittedFields.push("dimensionUnit");
   }
-  if (Object.keys(dimensions).length) mainPayload.dimensoes = dimensions;
+  if (Object.keys(dimensions).length) requestedMainPayload.dimensoes = dimensions;
 
   const localCategory = text(local.category);
   const categoryResolution: BlingFullProductCategoryResolution = localCategory
@@ -310,7 +362,7 @@ export function createBlingFullProductSyncPlan(
   if (localCategory) {
     populatedFields.push("category");
     if (categoryResolution.status === "RESOLVED") {
-      mainPayload.categoria = { id: categoryResolution.id };
+      requestedMainPayload.categoria = { id: categoryResolution.id };
     } else if (categoryResolution.status === "AMBIGUOUS") {
       notices.push("A categoria local possui mais de uma correspondencia exata no Bling e foi omitida desta atualizacao.");
     } else if (categoryResolution.status === "UNRESOLVED") {
@@ -322,19 +374,41 @@ export function createBlingFullProductSyncPlan(
     omittedFields.push("category");
   }
 
-  const priceCostPayload = price !== null || cost !== null
+  const remote = resolution.remoteProduct;
+  const hasRemote = remote !== undefined;
+  const parsedRequestedMainPayload = blingFullProductMainPayloadSchema.parse(requestedMainPayload);
+  const mainPayload = blingFullProductMainPayloadSchema.parse(
+    hasRemote
+      ? Object.fromEntries(
+          Object.entries(parsedRequestedMainPayload).filter(
+            ([field, value]) => !mainFieldMatchesRemote(
+              field as keyof typeof parsedRequestedMainPayload,
+              value,
+              remote
+            )
+          )
+        )
+      : parsedRequestedMainPayload
+  );
+  const remotePrice = hasRemote ? comparableNumber(remote.preco) : null;
+  const remoteCost = hasRemote ? comparableNumber(record(remote.fornecedor).precoCusto) : null;
+  const priceChanged = price !== null && (!hasRemote || remotePrice !== price);
+  const costChanged = cost !== null && (!hasRemote || remoteCost !== cost);
+  const priceCostPayload = priceChanged || costChanged
     ? blingFullProductPriceCostPayloadSchema.parse({
-        ...(price !== null ? { preco: price } : {}),
-        ...(cost !== null ? { custo: cost } : {})
+        ...(priceChanged ? { preco: price } : {}),
+        ...(costChanged ? { custo: cost } : {})
       })
     : null;
 
   let stockPayload: z.infer<typeof blingFullProductStockPayloadSchema> | null = null;
   const externalProductId = Number(local.externalProductId);
-  if (cost !== null && stock === null) {
+  const remoteStock = hasRemote ? comparableNumber(record(remote.estoque).saldoVirtualTotal) : null;
+  const stockChanged = stock !== null && (!hasRemote || remoteStock !== stock);
+  if (costChanged && stock === null) {
     blockers.push("O custo so pode ser sincronizado com uma operacao oficial de estoque identificada.");
   }
-  if (stock !== null) {
+  if (stock !== null && (stockChanged || costChanged)) {
     if (!Number.isSafeInteger(externalProductId) || externalProductId <= 0) {
       blockers.push("O ID externo do produto nao e valido para atualizar o estoque.");
     } else if (!resolution.depositId) {
@@ -364,7 +438,11 @@ export function createBlingFullProductSyncPlan(
   if (images.length > BLING_PRODUCT_IMAGE_LIMIT) {
     blockers.push(`A galeria local excede o limite de ${BLING_PRODUCT_IMAGE_LIMIT} imagens do Bling.`);
   }
-  const imagesPayload = images.length && images.length <= BLING_PRODUCT_IMAGE_LIMIT
+  const imagesMatchRemote = images.length === remoteImages.length
+    && images.every((image, index) => image.url === remoteImages[index]?.url);
+  const imagesPayload = images.length
+    && images.length <= BLING_PRODUCT_IMAGE_LIMIT
+    && !imagesMatchRemote
     ? blingFullProductImagesPayloadSchema.parse({
         midia: {
           imagens: { imagensURL: images.map((image) => ({ link: image.url })) },
@@ -375,7 +453,6 @@ export function createBlingFullProductSyncPlan(
   if (images.length) populatedFields.push("images");
   else omittedFields.push("images");
 
-  const parsedMainPayload = blingFullProductMainPayloadSchema.parse(mainPayload);
   const localFingerprint = fingerprintBlingFullProductValue({
     ...local,
     images: undefined
@@ -388,16 +465,51 @@ export function createBlingFullProductSyncPlan(
     imageFingerprint,
     remoteImageFingerprint,
     categoryResolution,
-    mainPayload: parsedMainPayload,
+    mainPayload,
     priceCostPayload,
     stockPayload,
     imagesPayload
   };
+  const moduleStatuses: BlingFullProductSyncPlan["moduleStatuses"] = {
+    PRODUCT_FIELDS: Object.keys(parsedRequestedMainPayload).length === 0
+      ? "NOT_REQUESTED"
+      : Object.keys(mainPayload).length === 0
+        ? "NO_CHANGES"
+        : "PENDING",
+    PRICE_COST: price === null && cost === null
+      ? "NOT_REQUESTED"
+      : priceCostPayload
+        ? "PENDING"
+        : "NO_CHANGES",
+    STOCK: stock === null
+      ? "NOT_REQUESTED"
+      : stockChanged
+        ? "PENDING"
+        : "NO_CHANGES",
+    IMAGES: images.length === 0
+      ? "NOT_REQUESTED"
+      : imagesPayload
+        ? "PENDING"
+        : "NO_CHANGES",
+    VERIFICATION: "NOT_REQUESTED"
+  };
+  if (Object.values(moduleStatuses).includes("PENDING")) moduleStatuses.VERIFICATION = "PENDING";
+  const status: BlingFullProductSyncPlanStatus = blockers.length
+    ? "BLOCKED"
+    : Object.values(moduleStatuses).includes("PENDING")
+      ? "READY"
+      : "ALREADY_UP_TO_DATE";
   const endpoints: BlingFullProductSyncPlan["endpoints"] = [];
-  if (Object.keys(parsedMainPayload).length) {
+  if (Object.keys(mainPayload).length) {
     endpoints.push({ module: "PRODUCT_FIELDS", method: "PATCH", path: `/produtos/${local.externalProductId}` });
   }
-  if (stockPayload) endpoints.push({ module: "STOCK", method: "POST", path: "/estoques" });
+  if (stockPayload) {
+    endpoints.push({
+      module: stockChanged ? "STOCK" : "PRICE_COST",
+      method: "POST",
+      path: "/estoques"
+    });
+  }
   if (imagesPayload) endpoints.push({ module: "IMAGES", method: "PATCH", path: `/produtos/${local.externalProductId}` });
 
   return {
@@ -417,6 +529,8 @@ export function createBlingFullProductSyncPlan(
     remoteImagesToRemoveCount: images.length
       ? remoteImages.filter((image) => !localImageSet.has(image.url)).length
       : 0,
+    status,
+    moduleStatuses,
     endpoints,
     modules: [...BLING_FULL_PRODUCT_SYNC_MODULES]
   };

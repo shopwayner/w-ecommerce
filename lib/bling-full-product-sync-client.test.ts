@@ -39,6 +39,7 @@ test("a blocker in the preview prevents external confirmation", async () => {
       async preview() {
         return {
           operation: "FULL_PRODUCT_SYNC",
+          status: "BLOCKED",
           productId: "product_1",
           title: "Produto",
           populatedFieldCount: 1,
