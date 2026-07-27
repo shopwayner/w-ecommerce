@@ -51,6 +51,7 @@ test("a blocker in the preview prevents external confirmation", async () => {
           remoteImagesToRemoveCount: 0,
           stock: null,
           price: null,
+          unsupportedFields: [],
           blockers: ["deposito ausente"],
           notices: [],
           endpoints: [],
@@ -60,7 +61,6 @@ test("a blocker in the preview prevents external confirmation", async () => {
           capabilityEnabled: true,
           payloads: {
             productFields: { nome: "Produto" },
-            priceCost: null,
             stock: null,
             images: null
           }

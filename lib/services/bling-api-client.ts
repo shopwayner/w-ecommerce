@@ -13,6 +13,12 @@ type BlingRequestOptions = {
   query?: Record<string, string | number | boolean | undefined>;
   body?: unknown;
   timeoutMs?: number;
+  onResponseMeta?: (metadata: BlingApiResponseMetadata) => void;
+};
+
+export type BlingApiResponseMetadata = {
+  status: number;
+  requestIdMasked?: string;
 };
 
 export type BlingApiErrorCode =
@@ -285,6 +291,16 @@ export class BlingApiClient {
         requestState: "UNKNOWN"
       });
     }
+
+    const requestIdMasked = maskUpstreamRequestId(
+      response.headers.get("x-request-id")
+        ?? response.headers.get("x-correlation-id")
+        ?? response.headers.get("x-bling-request-id")
+    );
+    options.onResponseMeta?.({
+      status: response.status,
+      ...(requestIdMasked ? { requestIdMasked } : {})
+    });
 
     if (response.status === 401 && !retried && allowRefresh && options.method === "GET") {
       try {

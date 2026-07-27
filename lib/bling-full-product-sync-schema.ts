@@ -5,53 +5,60 @@ import { normalizeProductBrand } from "@/lib/product-brand";
 
 export const BLING_FULL_PRODUCT_SYNC_MODULES = [
   "PRODUCT_FIELDS",
-  "PRICE_COST",
   "STOCK",
   "IMAGES",
   "VERIFICATION"
 ] as const;
 
 export type BlingFullProductSyncModule = (typeof BLING_FULL_PRODUCT_SYNC_MODULES)[number];
-export type BlingFullProductSyncPlanningStatus = "NOT_REQUESTED" | "NO_CHANGES" | "PENDING";
-export type BlingFullProductSyncPlanStatus = "READY" | "BLOCKED" | "ALREADY_UP_TO_DATE";
+export type BlingFullProductSyncPlanningStatus =
+  | "NOT_REQUESTED"
+  | "UNSUPPORTED"
+  | "NO_CHANGES"
+  | "PENDING";
+export type BlingFullProductSyncPlanStatus =
+  | "READY"
+  | "READY_TO_SYNC_WITH_WARNINGS"
+  | "BLOCKED"
+  | "ALREADY_UP_TO_DATE"
+  | "UP_TO_DATE_WITH_WARNINGS";
 
 const nonEmptyText = z.string().trim().min(1);
 const nonNegativeNumber = z.number().finite().nonnegative();
+const nonNegativeInteger = z.number().int().nonnegative();
 
 export const blingFullProductMainPayloadSchema = z.object({
   nome: nonEmptyText.optional(),
-  marca: nonEmptyText.optional(),
   codigo: nonEmptyText.optional(),
+  formato: z.enum(["S", "V", "E"]).optional(),
+  tipo: z.enum(["S", "P", "N"]).optional(),
+  situacao: z.enum(["A", "I"]).optional(),
   preco: nonNegativeNumber.optional(),
-  gtin: nonEmptyText.optional(),
   unidade: nonEmptyText.optional(),
-  descricaoComplementar: nonEmptyText.optional(),
+  condicao: z.union([z.literal(0), z.literal(1), z.literal(2)]).optional(),
+  marca: nonEmptyText.optional(),
+  tipoProducao: z.enum(["P", "T"]).optional(),
+  dataValidade: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  freteGratis: z.boolean().optional(),
   pesoLiquido: nonNegativeNumber.optional(),
   pesoBruto: nonNegativeNumber.optional(),
-  condicao: z.union([z.literal(0), z.literal(1), z.literal(2)]).optional(),
+  volumes: nonNegativeInteger.optional(),
+  itensPorCaixa: nonNegativeNumber.optional(),
+  gtin: nonEmptyText.optional(),
+  gtinEmbalagem: nonEmptyText.optional(),
   dimensoes: z.object({
     altura: nonNegativeNumber.optional(),
     largura: nonNegativeNumber.optional(),
     profundidade: nonNegativeNumber.optional(),
     unidadeMedida: z.union([z.literal(0), z.literal(1), z.literal(2)]).optional()
-  }).strict().optional(),
-  categoria: z.object({
-    id: z.number().int().positive()
   }).strict().optional()
 }).strict();
-
-export const blingFullProductPriceCostPayloadSchema = z.object({
-  preco: nonNegativeNumber.optional(),
-  custo: nonNegativeNumber.optional()
-}).strict().refine((value) => Object.keys(value).length > 0, "Informe preco ou custo.");
 
 export const blingFullProductStockPayloadSchema = z.object({
   produto: z.object({ id: z.number().int().positive() }).strict(),
   deposito: z.object({ id: z.number().int().positive() }).strict(),
   operacao: z.literal("B"),
-  quantidade: nonNegativeNumber,
-  preco: nonNegativeNumber.optional(),
-  custo: nonNegativeNumber.optional()
+  quantidade: nonNegativeNumber
 }).strict();
 
 const blingImageSchema = z.object({
@@ -82,42 +89,73 @@ export const blingFullProductSyncRequestSchema = z.discriminatedUnion("dryRun", 
   }).strict()
 ]);
 
+export type BlingFullProductLocalField =
+  | "name"
+  | "sku"
+  | "format"
+  | "type"
+  | "situation"
+  | "price"
+  | "unit"
+  | "condition"
+  | "brand"
+  | "productionType"
+  | "expirationDate"
+  | "freeShipping"
+  | "weight"
+  | "grossWeight"
+  | "width"
+  | "height"
+  | "depth"
+  | "volumes"
+  | "itemsPerBox"
+  | "dimensionUnit"
+  | "gtin"
+  | "packagingGtin"
+  | "images"
+  | "stock";
+
+export type BlingFullProductUnsupportedField = {
+  field: BlingFullProductLocalField;
+  label: string;
+  reason: string;
+};
+
 export type BlingFullProductLocalValues = {
   productId: string;
   externalProductId: string;
   name: string;
-  brand: string | null;
   sku: string | null;
-  gtin: string | null;
-  unit: string | null;
-  category: string | null;
-  cost: number | null;
+  format: "S" | "V" | "E" | null;
+  type: "S" | "P" | "N" | null;
+  situation: "A" | "I" | null;
   price: number | null;
-  stock: number | null;
+  unit: string | null;
+  condition: "UNSPECIFIED" | "NEW" | "USED" | null;
+  brand: string | null;
+  productionType: "P" | "T" | null;
+  expirationDate: string | null;
+  freeShipping: boolean | null;
   weight: number | null;
   grossWeight: number | null;
-  condition: "UNSPECIFIED" | "NEW" | "USED" | null;
-  height: number | null;
   width: number | null;
+  height: number | null;
   depth: number | null;
+  volumes: number | null;
+  itemsPerBox: number | null;
   dimensionUnit: "METER" | "CENTIMETER" | "MILLIMETER" | null;
-  description: string | null;
+  gtin: string | null;
+  packagingGtin: string | null;
   images: Array<{ id: string; url: string; position: number }>;
+  stock: number | null;
 };
 
-export type BlingFullProductCategoryResolution =
-  | { status: "OMITTED" }
-  | { status: "RESOLVED"; id: number }
-  | { status: "NOT_FOUND" }
-  | { status: "AMBIGUOUS" }
-  | { status: "UNRESOLVED" };
-
 export type BlingFullProductResolution = {
-  category?: BlingFullProductCategoryResolution;
   depositId?: number | null;
   remoteVideoUrl?: string | null;
   remoteImageUrls?: string[];
   remoteProduct?: Record<string, unknown>;
+  unsupportedFields?: BlingFullProductUnsupportedField[];
 };
 
 export type BlingFullProductSyncPlan = {
@@ -127,11 +165,10 @@ export type BlingFullProductSyncPlan = {
   planFingerprint: string;
   populatedFields: string[];
   omittedFields: string[];
+  unsupportedFields: BlingFullProductUnsupportedField[];
   blockers: string[];
   notices: string[];
-  categoryResolution: BlingFullProductCategoryResolution;
   mainPayload: z.infer<typeof blingFullProductMainPayloadSchema>;
-  priceCostPayload: z.infer<typeof blingFullProductPriceCostPayloadSchema> | null;
   stockPayload: z.infer<typeof blingFullProductStockPayloadSchema> | null;
   imagesPayload: z.infer<typeof blingFullProductImagesPayloadSchema> | null;
   imageCount: number;
@@ -142,7 +179,7 @@ export type BlingFullProductSyncPlan = {
   status: BlingFullProductSyncPlanStatus;
   moduleStatuses: Record<BlingFullProductSyncModule, BlingFullProductSyncPlanningStatus>;
   endpoints: Array<{
-    module: Exclude<BlingFullProductSyncModule, "VERIFICATION">;
+    modules: Array<Exclude<BlingFullProductSyncModule, "VERIFICATION">>;
     method: "PATCH" | "POST";
     path: string;
   }>;
@@ -186,6 +223,11 @@ function comparableText(value: unknown) {
     .toLowerCase() ?? "";
 }
 
+function comparableDate(value: unknown) {
+  if (typeof value !== "string") return "";
+  return value.trim().slice(0, 10);
+}
+
 function mainFieldMatchesRemote(
   field: keyof z.infer<typeof blingFullProductMainPayloadSchema>,
   expected: unknown,
@@ -198,17 +240,18 @@ function mainFieldMatchesRemote(
       ([key, value]) => comparableNumber(remoteDimensions[key]) === comparableNumber(value)
     );
   }
-  if (field === "categoria") {
-    return comparableNumber(record(remote.categoria).id) === comparableNumber(record(expected).id);
-  }
   if (
     field === "preco"
     || field === "pesoLiquido"
     || field === "pesoBruto"
+    || field === "volumes"
+    || field === "itensPorCaixa"
     || field === "condicao"
   ) {
     return comparableNumber(remote[field]) === comparableNumber(expected);
   }
+  if (field === "freteGratis") return remote[field] === expected;
+  if (field === "dataValidade") return comparableDate(remote[field]) === comparableDate(expected);
   return comparableText(remote[field]) === comparableText(expected);
 }
 
@@ -272,14 +315,19 @@ export function createBlingFullProductSyncPlan(
   const populatedFields: string[] = [];
   const omittedFields: string[] = [];
   const blockers: string[] = [];
-  const notices: string[] = [];
+  const unsupportedFields = resolution.unsupportedFields ?? [];
+  const unsupported = new Set(unsupportedFields.map((item) => item.field));
+  const notices = unsupportedFields.map(
+    (item) => `${item.label}: ${item.reason}`
+  );
   const requestedMainPayload: z.input<typeof blingFullProductMainPayloadSchema> = {};
 
   function addText(
-    localField: string,
+    localField: BlingFullProductLocalField,
     remoteField: keyof z.input<typeof blingFullProductMainPayloadSchema>,
     value: string | null | undefined
   ) {
+    if (unsupported.has(localField)) return;
     const normalized = text(value);
     if (normalized) {
       (requestedMainPayload as Record<string, unknown>)[remoteField] = normalized;
@@ -289,48 +337,65 @@ export function createBlingFullProductSyncPlan(
     }
   }
 
-  addText("name", "nome", local.name);
-  const brand = normalizeProductBrand(local.brand);
-  addText("brand", "marca", brand);
-  addText("sku", "codigo", local.sku);
-  addText("gtin", "gtin", local.gtin);
-  addText("unit", "unidade", local.unit);
-  addText("description", "descricaoComplementar", local.description);
-
-  const price = usefulNumber(local.price);
-  const cost = usefulNumber(local.cost);
-  const stock = usefulNumber(local.stock);
-  if (price !== null) {
-    requestedMainPayload.preco = price;
-    populatedFields.push("price");
-  } else {
-    omittedFields.push("price");
-  }
-  if (cost !== null) populatedFields.push("cost");
-  else omittedFields.push("cost");
-  if (stock !== null) populatedFields.push("stock");
-  else omittedFields.push("stock");
-
-  for (const [localField, remoteField, value] of [
-    ["weight", "pesoLiquido", local.weight],
-    ["grossWeight", "pesoBruto", local.grossWeight]
-  ] as const) {
+  function addNumber(
+    localField: BlingFullProductLocalField,
+    remoteField: keyof z.input<typeof blingFullProductMainPayloadSchema>,
+    value: number | null | undefined
+  ) {
+    if (unsupported.has(localField)) return;
     const normalized = usefulNumber(value);
     if (normalized !== null) {
-      requestedMainPayload[remoteField] = normalized;
+      (requestedMainPayload as Record<string, unknown>)[remoteField] = normalized;
       populatedFields.push(localField);
     } else {
       omittedFields.push(localField);
     }
   }
 
-  const normalizedCondition = condition(local.condition);
-  if (normalizedCondition !== undefined) {
-    requestedMainPayload.condicao = normalizedCondition;
-    populatedFields.push("condition");
-  } else {
-    omittedFields.push("condition");
+  addText("name", "nome", local.name);
+  addText("sku", "codigo", local.sku);
+  if (!unsupported.has("format") && local.format) {
+    requestedMainPayload.formato = local.format;
+    populatedFields.push("format");
+  } else if (!unsupported.has("format")) omittedFields.push("format");
+  if (!unsupported.has("type") && local.type) {
+    requestedMainPayload.tipo = local.type;
+    populatedFields.push("type");
+  } else if (!unsupported.has("type")) omittedFields.push("type");
+  if (!unsupported.has("situation") && local.situation) {
+    requestedMainPayload.situacao = local.situation;
+    populatedFields.push("situation");
+  } else if (!unsupported.has("situation")) omittedFields.push("situation");
+  addNumber("price", "preco", local.price);
+  addText("unit", "unidade", local.unit);
+
+  if (!unsupported.has("condition")) {
+    const normalizedCondition = condition(local.condition);
+    if (normalizedCondition !== undefined) {
+      requestedMainPayload.condicao = normalizedCondition;
+      populatedFields.push("condition");
+    } else omittedFields.push("condition");
   }
+
+  const brand = normalizeProductBrand(local.brand);
+  addText("brand", "marca", brand);
+  if (!unsupported.has("productionType") && local.productionType) {
+    requestedMainPayload.tipoProducao = local.productionType;
+    populatedFields.push("productionType");
+  } else if (!unsupported.has("productionType")) omittedFields.push("productionType");
+  addText("expirationDate", "dataValidade", local.expirationDate);
+  if (!unsupported.has("freeShipping")) {
+    if (typeof local.freeShipping === "boolean") {
+      requestedMainPayload.freteGratis = local.freeShipping;
+      populatedFields.push("freeShipping");
+    } else omittedFields.push("freeShipping");
+  }
+  addNumber("weight", "pesoLiquido", local.weight);
+  addNumber("grossWeight", "pesoBruto", local.grossWeight);
+  addNumber("volumes", "volumes", local.volumes);
+  addNumber("itemsPerBox", "itensPorCaixa", local.itemsPerBox);
+  addText("gtin", "gtin", local.gtin);
+  addText("packagingGtin", "gtinEmbalagem", local.packagingGtin);
 
   const dimensions: NonNullable<z.input<typeof blingFullProductMainPayloadSchema>["dimensoes"]> = {};
   for (const [localField, remoteField, value] of [
@@ -338,41 +403,21 @@ export function createBlingFullProductSyncPlan(
     ["width", "largura", local.width],
     ["depth", "profundidade", local.depth]
   ] as const) {
+    if (unsupported.has(localField)) continue;
     const normalized = usefulNumber(value);
     if (normalized !== null) {
       dimensions[remoteField] = normalized;
       populatedFields.push(localField);
-    } else {
-      omittedFields.push(localField);
-    }
+    } else omittedFields.push(localField);
   }
-  const normalizedDimensionUnit = dimensionUnit(local.dimensionUnit);
-  if (normalizedDimensionUnit !== undefined) {
-    dimensions.unidadeMedida = normalizedDimensionUnit;
-    populatedFields.push("dimensionUnit");
-  } else {
-    omittedFields.push("dimensionUnit");
+  if (!unsupported.has("dimensionUnit")) {
+    const normalizedDimensionUnit = dimensionUnit(local.dimensionUnit);
+    if (normalizedDimensionUnit !== undefined) {
+      dimensions.unidadeMedida = normalizedDimensionUnit;
+      populatedFields.push("dimensionUnit");
+    } else omittedFields.push("dimensionUnit");
   }
   if (Object.keys(dimensions).length) requestedMainPayload.dimensoes = dimensions;
-
-  const localCategory = text(local.category);
-  const categoryResolution: BlingFullProductCategoryResolution = localCategory
-    ? resolution.category ?? { status: "NOT_FOUND" }
-    : { status: "OMITTED" };
-  if (localCategory) {
-    populatedFields.push("category");
-    if (categoryResolution.status === "RESOLVED") {
-      requestedMainPayload.categoria = { id: categoryResolution.id };
-    } else if (categoryResolution.status === "AMBIGUOUS") {
-      notices.push("A categoria local possui mais de uma correspondencia exata no Bling e foi omitida desta atualizacao.");
-    } else if (categoryResolution.status === "UNRESOLVED") {
-      notices.push("Nao foi possivel concluir a busca exata da categoria no Bling; somente este campo foi omitido.");
-    } else {
-      notices.push("A categoria local nao possui correspondencia exata no Bling e foi omitida desta atualizacao.");
-    }
-  } else {
-    omittedFields.push("category");
-  }
 
   const remote = resolution.remoteProduct;
   const hasRemote = remote !== undefined;
@@ -390,25 +435,17 @@ export function createBlingFullProductSyncPlan(
         )
       : parsedRequestedMainPayload
   );
-  const remotePrice = hasRemote ? comparableNumber(remote.preco) : null;
-  const remoteCost = hasRemote ? comparableNumber(record(remote.fornecedor).precoCusto) : null;
-  const priceChanged = price !== null && (!hasRemote || remotePrice !== price);
-  const costChanged = cost !== null && (!hasRemote || remoteCost !== cost);
-  const priceCostPayload = priceChanged || costChanged
-    ? blingFullProductPriceCostPayloadSchema.parse({
-        ...(priceChanged ? { preco: price } : {}),
-        ...(costChanged ? { custo: cost } : {})
-      })
-    : null;
 
+  const stock = unsupported.has("stock") ? null : usefulNumber(local.stock);
+  if (!unsupported.has("stock")) {
+    if (stock !== null) populatedFields.push("stock");
+    else omittedFields.push("stock");
+  }
   let stockPayload: z.infer<typeof blingFullProductStockPayloadSchema> | null = null;
   const externalProductId = Number(local.externalProductId);
   const remoteStock = hasRemote ? comparableNumber(record(remote.estoque).saldoVirtualTotal) : null;
   const stockChanged = stock !== null && (!hasRemote || remoteStock !== stock);
-  if (costChanged && stock === null) {
-    blockers.push("O custo so pode ser sincronizado com uma operacao oficial de estoque identificada.");
-  }
-  if (stock !== null && (stockChanged || costChanged)) {
+  if (stock !== null && stockChanged) {
     if (!Number.isSafeInteger(externalProductId) || externalProductId <= 0) {
       blockers.push("O ID externo do produto nao e valido para atualizar o estoque.");
     } else if (!resolution.depositId) {
@@ -418,14 +455,12 @@ export function createBlingFullProductSyncPlan(
         produto: { id: externalProductId },
         deposito: { id: resolution.depositId },
         operacao: "B",
-        quantidade: stock,
-        ...(price !== null ? { preco: price } : {}),
-        ...(cost !== null ? { custo: cost } : {})
+        quantidade: stock
       });
     }
   }
 
-  const images = normalizeBlingFullProductImages(local.images);
+  const images = unsupported.has("images") ? [] : normalizeBlingFullProductImages(local.images);
   const remoteImages = normalizeBlingFullProductImages(
     (resolution.remoteImageUrls ?? []).map((url, index) => ({
       id: `remote-${index}`,
@@ -450,8 +485,10 @@ export function createBlingFullProductSyncPlan(
         }
       })
     : null;
-  if (images.length) populatedFields.push("images");
-  else omittedFields.push("images");
+  if (!unsupported.has("images")) {
+    if (images.length) populatedFields.push("images");
+    else omittedFields.push("images");
+  }
 
   const localFingerprint = fingerprintBlingFullProductValue({
     ...local,
@@ -464,23 +501,19 @@ export function createBlingFullProductSyncPlan(
     localFingerprint,
     imageFingerprint,
     remoteImageFingerprint,
-    categoryResolution,
+    unsupportedFields,
     mainPayload,
-    priceCostPayload,
     stockPayload,
     imagesPayload
   };
+  const requestedProductFieldKeys = Object.keys(parsedRequestedMainPayload);
+  const pendingProductFieldKeys = Object.keys(mainPayload);
   const moduleStatuses: BlingFullProductSyncPlan["moduleStatuses"] = {
-    PRODUCT_FIELDS: Object.keys(parsedRequestedMainPayload).length === 0
+    PRODUCT_FIELDS: requestedProductFieldKeys.length === 0
       ? "NOT_REQUESTED"
-      : Object.keys(mainPayload).length === 0
+      : pendingProductFieldKeys.length === 0
         ? "NO_CHANGES"
         : "PENDING",
-    PRICE_COST: price === null && cost === null
-      ? "NOT_REQUESTED"
-      : priceCostPayload
-        ? "PENDING"
-        : "NO_CHANGES",
     STOCK: stock === null
       ? "NOT_REQUESTED"
       : stockChanged
@@ -494,32 +527,48 @@ export function createBlingFullProductSyncPlan(
     VERIFICATION: "NOT_REQUESTED"
   };
   if (Object.values(moduleStatuses).includes("PENDING")) moduleStatuses.VERIFICATION = "PENDING";
+  const hasPending = Object.values(moduleStatuses).includes("PENDING");
+  const hasUnsupported = unsupportedFields.length > 0;
   const status: BlingFullProductSyncPlanStatus = blockers.length
     ? "BLOCKED"
-    : Object.values(moduleStatuses).includes("PENDING")
-      ? "READY"
-      : "ALREADY_UP_TO_DATE";
+    : hasPending
+      ? hasUnsupported
+        ? "READY_TO_SYNC_WITH_WARNINGS"
+        : "READY"
+      : hasUnsupported
+        ? "UP_TO_DATE_WITH_WARNINGS"
+        : "ALREADY_UP_TO_DATE";
   const endpoints: BlingFullProductSyncPlan["endpoints"] = [];
   if (Object.keys(mainPayload).length) {
-    endpoints.push({ module: "PRODUCT_FIELDS", method: "PATCH", path: `/produtos/${local.externalProductId}` });
+    endpoints.push({
+      modules: ["PRODUCT_FIELDS"],
+      method: "PATCH",
+      path: `/produtos/${local.externalProductId}`
+    });
   }
   if (stockPayload) {
     endpoints.push({
-      module: stockChanged ? "STOCK" : "PRICE_COST",
+      modules: ["STOCK"],
       method: "POST",
       path: "/estoques"
     });
   }
-  if (imagesPayload) endpoints.push({ module: "IMAGES", method: "PATCH", path: `/produtos/${local.externalProductId}` });
+  if (imagesPayload) {
+    endpoints.push({
+      modules: ["IMAGES"],
+      method: "PATCH",
+      path: `/produtos/${local.externalProductId}`
+    });
+  }
 
   return {
     ...planCore,
     planFingerprint: fingerprintBlingFullProductValue(planCore),
     populatedFields: [...new Set(populatedFields)],
     omittedFields: [...new Set(omittedFields)],
+    unsupportedFields,
     blockers,
     notices,
-    categoryResolution,
     imageCount: images.length,
     imageOrder: images.map((image) => image.url),
     remoteImageCount: remoteImages.length,

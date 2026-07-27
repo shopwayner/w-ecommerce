@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import {
+  BLING_FULL_PRODUCT_SYNC_MODULES,
   blingFullProductImagesPayloadSchema,
   blingFullProductMainPayloadSchema,
   blingFullProductStockPayloadSchema,
@@ -9,419 +12,254 @@ import {
   type BlingFullProductLocalValues
 } from "./bling-full-product-sync-schema";
 
-function product(overrides: Partial<BlingFullProductLocalValues> = {}): BlingFullProductLocalValues {
+function emptyProduct(
+  overrides: Partial<BlingFullProductLocalValues> = {}
+): BlingFullProductLocalValues {
   return {
     productId: "product_1",
     externalProductId: "123456789",
+    name: " ",
+    sku: null,
+    format: null,
+    type: null,
+    situation: null,
+    price: null,
+    unit: null,
+    condition: null,
+    brand: null,
+    productionType: null,
+    expirationDate: null,
+    freeShipping: null,
+    weight: null,
+    grossWeight: null,
+    width: null,
+    height: null,
+    depth: null,
+    volumes: null,
+    itemsPerBox: null,
+    dimensionUnit: null,
+    gtin: null,
+    packagingGtin: null,
+    images: [],
+    stock: null,
+    ...overrides
+  };
+}
+
+function completeProduct(
+  overrides: Partial<BlingFullProductLocalValues> = {}
+): BlingFullProductLocalValues {
+  return emptyProduct({
     name: "Produto Matrix",
-    brand: "T-Mac",
     sku: "SKU-1",
-    gtin: "7891234567895",
-    unit: "UN",
-    category: "Pecas",
-    cost: 10,
+    format: "S",
+    type: "P",
+    situation: "I",
     price: 20,
-    stock: 3,
+    unit: "UN",
+    condition: "NEW",
+    brand: "T-Mac",
+    productionType: "P",
+    expirationDate: "2027-12-31",
+    freeShipping: false,
     weight: 1,
     grossWeight: 1.2,
-    condition: "NEW",
-    height: 2,
     width: 3,
+    height: 2,
     depth: 4,
+    volumes: 1,
+    itemsPerBox: 2,
     dimensionUnit: "CENTIMETER",
-    description: "Descricao do produto",
+    gtin: "7891234567895",
+    packagingGtin: "17891234567892",
     images: [
       { id: "b", position: 1, url: "https://cdn.example.com/b.jpg" },
       { id: "a", position: 0, url: "https://cdn.example.com/a.jpg" }
     ],
+    stock: 3,
     ...overrides
-  };
+  });
 }
 
 function remoteProduct(overrides: Record<string, unknown> = {}) {
   return {
     nome: "Produto Matrix",
-    marca: "T-Mac",
     codigo: "SKU-1",
-    gtin: "7891234567895",
-    unidade: "UN",
+    formato: "S",
+    tipo: "P",
+    situacao: "I",
     preco: 20,
-    descricaoComplementar: "Descricao do produto",
+    unidade: "UN",
+    condicao: 1,
+    marca: "T-Mac",
+    tipoProducao: "P",
+    dataValidade: "2027-12-31",
+    freteGratis: false,
     pesoLiquido: 1,
     pesoBruto: 1.2,
-    condicao: 1,
-    dimensoes: { altura: 2, largura: 3, profundidade: 4, unidadeMedida: 1 },
-    categoria: { id: 99 },
+    volumes: 1,
+    itensPorCaixa: 2,
+    gtin: "7891234567895",
+    gtinEmbalagem: "17891234567892",
+    dimensoes: { largura: 3, altura: 2, profundidade: 4, unidadeMedida: 1 },
     estoque: { saldoVirtualTotal: 3 },
-    fornecedor: { precoCusto: 10 },
     ...overrides
   };
 }
 
-test("maps every populated local field through explicit allowlists", () => {
-  const plan = createBlingFullProductSyncPlan(product(), {
-    category: { status: "RESOLVED", id: 99 },
-    depositId: 7,
-    remoteVideoUrl: "https://www.youtube.com/watch?v=matrix"
+const fieldCases: Array<{
+  label: string;
+  local: Partial<BlingFullProductLocalValues>;
+  read: (payload: Record<string, unknown>) => unknown;
+  expected: unknown;
+}> = [
+  { label: "Nome", local: { name: "Produto Matrix" }, read: (value) => value.nome, expected: "Produto Matrix" },
+  { label: "SKU", local: { sku: "SKU-1" }, read: (value) => value.codigo, expected: "SKU-1" },
+  { label: "Formato", local: { format: "S" }, read: (value) => value.formato, expected: "S" },
+  { label: "Tipo", local: { type: "P" }, read: (value) => value.tipo, expected: "P" },
+  { label: "Situacao", local: { situation: "I" }, read: (value) => value.situacao, expected: "I" },
+  { label: "Preco de venda", local: { price: 20 }, read: (value) => value.preco, expected: 20 },
+  { label: "Unidade", local: { unit: "UN" }, read: (value) => value.unidade, expected: "UN" },
+  { label: "Condicao", local: { condition: "NEW" }, read: (value) => value.condicao, expected: 1 },
+  { label: "Marca", local: { brand: "T-Mac" }, read: (value) => value.marca, expected: "T-Mac" },
+  { label: "Producao", local: { productionType: "P" }, read: (value) => value.tipoProducao, expected: "P" },
+  { label: "Data de validade", local: { expirationDate: "2027-12-31" }, read: (value) => value.dataValidade, expected: "2027-12-31" },
+  { label: "Frete gratis", local: { freeShipping: false }, read: (value) => value.freteGratis, expected: false },
+  { label: "Peso liquido", local: { weight: 1 }, read: (value) => value.pesoLiquido, expected: 1 },
+  { label: "Peso bruto", local: { grossWeight: 1.2 }, read: (value) => value.pesoBruto, expected: 1.2 },
+  { label: "Largura", local: { width: 3 }, read: (value) => (value.dimensoes as Record<string, unknown>).largura, expected: 3 },
+  { label: "Altura", local: { height: 2 }, read: (value) => (value.dimensoes as Record<string, unknown>).altura, expected: 2 },
+  { label: "Profundidade", local: { depth: 4 }, read: (value) => (value.dimensoes as Record<string, unknown>).profundidade, expected: 4 },
+  { label: "Volumes", local: { volumes: 1 }, read: (value) => value.volumes, expected: 1 },
+  { label: "Itens por caixa", local: { itemsPerBox: 2 }, read: (value) => value.itensPorCaixa, expected: 2 },
+  { label: "Unidade de medida", local: { dimensionUnit: "CENTIMETER" }, read: (value) => (value.dimensoes as Record<string, unknown>).unidadeMedida, expected: 1 },
+  { label: "GTIN", local: { gtin: "7891234567895" }, read: (value) => value.gtin, expected: "7891234567895" },
+  { label: "GTIN tributario", local: { packagingGtin: "17891234567892" }, read: (value) => value.gtinEmbalagem, expected: "17891234567892" }
+];
+
+for (const fieldCase of fieldCases) {
+  test(`${fieldCase.label} uses its documented Bling property`, () => {
+    const plan = createBlingFullProductSyncPlan(emptyProduct(fieldCase.local), {});
+    assert.deepEqual(fieldCase.read(plan.mainPayload), fieldCase.expected);
   });
-  assert.deepEqual(Object.keys(plan.mainPayload).sort(), [
-    "categoria",
-    "codigo",
-    "condicao",
-    "descricaoComplementar",
-    "dimensoes",
-    "gtin",
-    "marca",
-    "nome",
-    "pesoBruto",
-    "pesoLiquido",
-    "preco",
-    "unidade"
+}
+
+test("all supported product fields share one strict PRODUCT_FIELDS payload", () => {
+  const plan = createBlingFullProductSyncPlan(completeProduct(), { depositId: 7 });
+  assert.deepEqual(plan.mainPayload, {
+    nome: "Produto Matrix",
+    codigo: "SKU-1",
+    formato: "S",
+    tipo: "P",
+    situacao: "I",
+    preco: 20,
+    unidade: "UN",
+    condicao: 1,
+    marca: "T-Mac",
+    tipoProducao: "P",
+    dataValidade: "2027-12-31",
+    freteGratis: false,
+    pesoLiquido: 1,
+    pesoBruto: 1.2,
+    volumes: 1,
+    itensPorCaixa: 2,
+    gtin: "7891234567895",
+    gtinEmbalagem: "17891234567892",
+    dimensoes: { altura: 2, largura: 3, profundidade: 4, unidadeMedida: 1 }
+  });
+  assert.deepEqual(plan.moduleStatuses, {
+    PRODUCT_FIELDS: "PENDING",
+    STOCK: "PENDING",
+    IMAGES: "PENDING",
+    VERIFICATION: "PENDING"
+  });
+});
+
+test("Fotos mirror the complete local gallery in position and id order", () => {
+  const plan = createBlingFullProductSyncPlan(completeProduct(), {});
+  assert.deepEqual(plan.imagesPayload?.midia.imagens.imagensURL, [
+    { link: "https://cdn.example.com/a.jpg" },
+    { link: "https://cdn.example.com/b.jpg" }
   ]);
+  assert.equal(plan.moduleStatuses.IMAGES, "PENDING");
+});
+
+test("Estoque uses only quantity and operational identifiers", () => {
+  const plan = createBlingFullProductSyncPlan(emptyProduct({ stock: 7 }), { depositId: 9 });
   assert.deepEqual(plan.stockPayload, {
     produto: { id: 123456789 },
-    deposito: { id: 7 },
+    deposito: { id: 9 },
     operacao: "B",
-    quantidade: 3,
-    preco: 20,
-    custo: 10
+    quantidade: 7
   });
-  assert.equal(plan.imagesPayload?.midia.video?.url, "https://www.youtube.com/watch?v=matrix");
-  assert.equal(plan.blockers.length, 0);
+  assert.equal("preco" in (plan.stockPayload ?? {}), false);
+  assert.equal("custo" in (plan.stockPayload ?? {}), false);
 });
 
-test("a product with only a name creates only the name payload", () => {
-  const plan = createBlingFullProductSyncPlan(product({
-    brand: null,
-    sku: null,
-    gtin: null,
-    unit: null,
-    category: null,
-    cost: null,
-    price: null,
-    stock: null,
-    weight: null,
-    grossWeight: null,
-    condition: null,
-    height: null,
-    width: null,
-    depth: null,
-    dimensionUnit: null,
-    description: null,
-    images: []
-  }), {});
-  assert.deepEqual(plan.mainPayload, { nome: "Produto Matrix" });
-  assert.equal(plan.stockPayload, null);
-  assert.equal(plan.imagesPayload, null);
-});
-
-test("name price and stock use product PATCH and the official stock balance payload", () => {
-  const plan = createBlingFullProductSyncPlan(product({
-    brand: null,
-    sku: null,
-    gtin: null,
-    unit: null,
-    category: null,
-    cost: null,
-    price: 30,
-    stock: 4,
-    weight: null,
-    grossWeight: null,
-    condition: null,
-    height: null,
-    width: null,
-    depth: null,
-    dimensionUnit: null,
-    description: null,
-    images: []
-  }), { depositId: 5 });
-  assert.deepEqual(plan.mainPayload, { nome: "Produto Matrix", preco: 30 });
-  assert.equal(plan.stockPayload?.quantidade, 4);
-  assert.equal(plan.stockPayload?.preco, 30);
-});
-
-test("empty strings and generic brands are omitted instead of clearing Bling", () => {
-  const plan = createBlingFullProductSyncPlan(product({
+test("empty text and generic brands are omitted without clearing remote values", () => {
+  const plan = createBlingFullProductSyncPlan(emptyProduct({
+    name: " ",
+    sku: "",
+    unit: "\t",
     brand: "Sem marca",
-    sku: "   ",
     gtin: "",
-    unit: " ",
-    category: null,
-    description: "\t"
-  }), { depositId: 7 });
-  assert.equal("marca" in plan.mainPayload, false);
-  assert.equal("codigo" in plan.mainPayload, false);
-  assert.equal("gtin" in plan.mainPayload, false);
-  assert.equal("unidade" in plan.mainPayload, false);
-  assert.equal("descricaoComplementar" in plan.mainPayload, false);
+    packagingGtin: " "
+  }), {});
+  assert.deepEqual(plan.mainPayload, {});
 });
 
-test("numeric zero is preserved for price cost stock weights and dimensions", () => {
-  const plan = createBlingFullProductSyncPlan(product({
-    category: null,
-    cost: 0,
+test("numeric zero and boolean false are valid populated values", () => {
+  const plan = createBlingFullProductSyncPlan(emptyProduct({
     price: 0,
-    stock: 0,
+    freeShipping: false,
     weight: 0,
     grossWeight: 0,
-    height: 0,
     width: 0,
+    height: 0,
     depth: 0,
-    images: []
+    volumes: 0,
+    itemsPerBox: 0,
+    stock: 0
   }), { depositId: 7 });
   assert.equal(plan.mainPayload.preco, 0);
+  assert.equal(plan.mainPayload.freteGratis, false);
   assert.equal(plan.mainPayload.pesoLiquido, 0);
   assert.equal(plan.mainPayload.pesoBruto, 0);
-  assert.deepEqual(plan.mainPayload.dimensoes, {
-    altura: 0,
-    largura: 0,
-    profundidade: 0,
-    unidadeMedida: 1
-  });
+  assert.equal(plan.mainPayload.volumes, 0);
+  assert.equal(plan.mainPayload.itensPorCaixa, 0);
+  assert.deepEqual(plan.mainPayload.dimensoes, { altura: 0, largura: 0, profundidade: 0 });
   assert.equal(plan.stockPayload?.quantidade, 0);
-  assert.equal(plan.stockPayload?.preco, 0);
-  assert.equal(plan.stockPayload?.custo, 0);
 });
 
-test("SKU GTIN unit description and dimensions retain their official field names", () => {
-  const plan = createBlingFullProductSyncPlan(product({ category: null, images: [] }), { depositId: 1 });
-  assert.equal(plan.mainPayload.codigo, "SKU-1");
-  assert.equal(plan.mainPayload.gtin, "7891234567895");
-  assert.equal(plan.mainPayload.unidade, "UN");
-  assert.equal(plan.mainPayload.descricaoComplementar, "Descricao do produto");
-  assert.equal(plan.mainPayload.dimensoes?.unidadeMedida, 1);
+test("matching populated fields are NO_CHANGES including normalized numeric and date values", () => {
+  const plan = createBlingFullProductSyncPlan(completeProduct({ images: [] }), {
+    remoteProduct: remoteProduct({
+      preco: "20.0000",
+      dataValidade: "2027-12-31T00:00:00.000Z",
+      estoque: { saldoVirtualTotal: "3" }
+    })
+  });
+  assert.deepEqual(plan.mainPayload, {});
+  assert.equal(plan.stockPayload, null);
+  assert.equal(plan.moduleStatuses.PRODUCT_FIELDS, "NO_CHANGES");
+  assert.equal(plan.moduleStatuses.STOCK, "NO_CHANGES");
 });
 
-test("no local image omits the media block and preserves the remote gallery", () => {
-  const plan = createBlingFullProductSyncPlan(product({ category: null, images: [] }), {
-    depositId: 1,
+test("no local photos preserves a non-empty remote gallery", () => {
+  const plan = createBlingFullProductSyncPlan(emptyProduct(), {
     remoteImageUrls: [
       "https://cdn.example.com/remote-a.jpg",
       "https://cdn.example.com/remote-b.jpg"
     ]
   });
   assert.equal(plan.imagesPayload, null);
-  assert.equal(plan.endpoints.some((endpoint) => endpoint.module === "IMAGES"), false);
   assert.equal(plan.remoteImageCount, 2);
   assert.equal(plan.remoteImagesToRemoveCount, 0);
+  assert.equal(plan.moduleStatuses.IMAGES, "NOT_REQUESTED");
 });
 
-test("one local image creates a gallery with one image", () => {
-  const plan = createBlingFullProductSyncPlan(product({
-    category: null,
-    images: [{ id: "a", position: 0, url: "https://cdn.example.com/a.jpg" }]
-  }), { depositId: 1 });
-  assert.deepEqual(plan.imagesPayload?.midia.imagens.imagensURL, [
-    { link: "https://cdn.example.com/a.jpg" }
-  ]);
-});
-
-test("five local images create a gallery with five images", () => {
-  const images = Array.from({ length: 5 }, (_, index) => ({
-    id: String(index),
-    position: index,
-    url: `https://cdn.example.com/${index}.jpg`
-  }));
-  const plan = createBlingFullProductSyncPlan(product({ category: null, images }), { depositId: 1 });
-  assert.equal(plan.imagesPayload?.midia.imagens.imagensURL.length, 5);
-});
-
-test("exact mirror preview reports a five to three gallery transition", () => {
-  const localImages = Array.from({ length: 3 }, (_, index) => ({
-    id: String(index),
-    position: index,
-    url: `https://cdn.example.com/${index}.jpg`
-  }));
-  const plan = createBlingFullProductSyncPlan(product({ category: null, images: localImages }), {
-    depositId: 1,
-    remoteImageUrls: Array.from({ length: 5 }, (_, index) => `https://cdn.example.com/${index}.jpg`)
-  });
-  assert.equal(plan.remoteImageCount, 5);
-  assert.equal(plan.remoteImagesToAddCount, 0);
-  assert.equal(plan.remoteImagesToRemoveCount, 2);
-  assert.equal(plan.imageCount, 3);
-});
-
-test("exact mirror preview reports a three to five gallery transition", () => {
-  const localImages = Array.from({ length: 5 }, (_, index) => ({
-    id: String(index),
-    position: index,
-    url: `https://cdn.example.com/${index}.jpg`
-  }));
-  const plan = createBlingFullProductSyncPlan(product({ category: null, images: localImages }), {
-    depositId: 1,
-    remoteImageUrls: Array.from({ length: 3 }, (_, index) => `https://cdn.example.com/${index}.jpg`)
-  });
-  assert.equal(plan.remoteImageCount, 3);
-  assert.equal(plan.remoteImagesToAddCount, 2);
-  assert.equal(plan.remoteImagesToRemoveCount, 0);
-  assert.equal(plan.imageCount, 5);
-});
-
-test("an identical five-image gallery reports no additions or removals", () => {
-  const urls = Array.from({ length: 5 }, (_, index) => `https://cdn.example.com/${index}.jpg`);
-  const plan = createBlingFullProductSyncPlan(product({
-    category: null,
-    images: urls.map((url, index) => ({ id: String(index), position: index, url }))
-  }), {
-    depositId: 1,
-    remoteImageUrls: urls
-  });
-  assert.equal(plan.remoteImageCount, 5);
-  assert.equal(plan.remoteImagesToAddCount, 0);
-  assert.equal(plan.remoteImagesToRemoveCount, 0);
-  assert.equal(plan.imagesPayload, null);
-  assert.equal(plan.moduleStatuses.IMAGES, "NO_CHANGES");
-});
-
-test("a gallery above the official limit is blocked without truncation", () => {
-  const images = Array.from({ length: 14 }, (_, index) => ({
-    id: String(index),
-    position: index,
-    url: `https://cdn.example.com/${index}.jpg`
-  }));
-  const plan = createBlingFullProductSyncPlan(product({ category: null, images }), { depositId: 1 });
-  assert.equal(plan.imagesPayload, null);
-  assert.equal(plan.imageCount, 14);
-  assert.match(plan.blockers[0], /limite de 13 imagens/);
-});
-
-test("local image order uses position and then id", () => {
-  const images = normalizeBlingFullProductImages([
-    { id: "z", position: 1, url: "https://cdn.example.com/z.jpg" },
-    { id: "b", position: 0, url: "https://cdn.example.com/b.jpg" },
-    { id: "a", position: 0, url: "https://cdn.example.com/a.jpg" }
-  ]);
-  assert.deepEqual(images.map((image) => image.id), ["a", "b", "z"]);
-});
-
-test("duplicate local image URLs are removed globally", () => {
-  const images = normalizeBlingFullProductImages([
-    { id: "a", position: 0, url: "https://cdn.example.com/a.jpg#first" },
-    { id: "b", position: 1, url: "https://cdn.example.com/a.jpg" }
-  ]);
-  assert.equal(images.length, 1);
-});
-
-test("remote video is preserved only when the media payload is sent", () => {
-  const withImages = createBlingFullProductSyncPlan(product({ category: null }), {
-    depositId: 1,
-    remoteVideoUrl: "https://www.youtube.com/watch?v=matrix"
-  });
-  assert.equal(withImages.imagesPayload?.midia.video?.url, "https://www.youtube.com/watch?v=matrix");
-  const withoutImages = createBlingFullProductSyncPlan(product({ category: null, images: [] }), {
-    depositId: 1,
-    remoteVideoUrl: "https://www.youtube.com/watch?v=matrix"
-  });
-  assert.equal(withoutImages.imagesPayload, null);
-});
-
-test("unresolved category omits only category while an unresolved deposit blocks stock", () => {
-  const plan = createBlingFullProductSyncPlan(product(), {
-    category: { status: "AMBIGUOUS" }
-  });
-  assert.equal(plan.blockers.length, 1);
-  assert.equal(plan.notices.length, 1);
-  assert.equal(plan.mainPayload.categoria, undefined);
-  assert.equal(plan.stockPayload, null);
-  assert.equal(plan.mainPayload.nome, "Produto Matrix");
-});
-
-test("numeric strings and null are rejected instead of being treated as numeric zero", () => {
-  assert.equal(blingFullProductMainPayloadSchema.safeParse({ preco: "0" }).success, false);
-  assert.equal(blingFullProductMainPayloadSchema.safeParse({ preco: null }).success, false);
-  assert.equal(blingFullProductMainPayloadSchema.safeParse({ preco: undefined }).success, true);
-  assert.equal(blingFullProductMainPayloadSchema.safeParse({ preco: 0 }).success, true);
-  assert.equal(blingFullProductMainPayloadSchema.safeParse({ nome: "Produto" }).success, true);
-});
-
-test("strict payload schemas reject additional properties", () => {
-  assert.equal(blingFullProductMainPayloadSchema.safeParse({ nome: "Produto", organizationId: "org" }).success, false);
-  assert.equal(blingFullProductStockPayloadSchema.safeParse({
-    produto: { id: 1 },
-    deposito: { id: 2 },
-    operacao: "B",
-    quantidade: 0,
-    retry: true
-  }).success, false);
-  assert.equal(blingFullProductImagesPayloadSchema.safeParse({
-    midia: { imagens: { imagensURL: [{ link: "https://cdn.example.com/a.jpg" }] } },
-    nome: "nao permitido"
-  }).success, false);
-});
-
-test("controlled disposable product produces a sanitized dry-run without executing writes", () => {
-  const plan = createBlingFullProductSyncPlan(product({
-    productId: "fixture_product",
-    externalProductId: "16681407082",
-    name: "[TESTE] IMAGES_ONLY_APPEND 0-2-3",
-    brand: null,
-    sku: "MATRIX-IMG-APPEND-TEST-20260723-01",
-    gtin: null,
-    unit: "UN",
-    category: null,
-    cost: 0,
-    price: 0,
-    stock: 0,
-    weight: null,
-    grossWeight: null,
-    condition: null,
-    height: null,
-    width: null,
-    depth: null,
-    dimensionUnit: null,
-    description: null,
-    images: [
-      { id: "fixture-c", position: 2, url: "https://cdn.example.com/fixture-c.jpg" },
-      { id: "fixture-a", position: 0, url: "https://cdn.example.com/fixture-a.jpg" },
-      { id: "fixture-b", position: 1, url: "https://cdn.example.com/fixture-b.jpg" }
-    ]
-  }), { depositId: 7 });
-
-  assert.deepEqual(plan.mainPayload, {
-    nome: "[TESTE] IMAGES_ONLY_APPEND 0-2-3",
-    codigo: "MATRIX-IMG-APPEND-TEST-20260723-01",
-    unidade: "UN",
-    preco: 0
-  });
-  assert.deepEqual(plan.stockPayload, {
-    produto: { id: 16681407082 },
-    deposito: { id: 7 },
-    operacao: "B",
-    quantidade: 0,
-    preco: 0,
-    custo: 0
-  });
-  assert.deepEqual(plan.imagesPayload?.midia.imagens.imagensURL, [
-    { link: "https://cdn.example.com/fixture-a.jpg" },
-    { link: "https://cdn.example.com/fixture-b.jpg" },
-    { link: "https://cdn.example.com/fixture-c.jpg" }
-  ]);
-  assert.deepEqual(plan.endpoints, [
-    { module: "PRODUCT_FIELDS", method: "PATCH", path: "/produtos/16681407082" },
-    { module: "STOCK", method: "POST", path: "/estoques" },
-    { module: "IMAGES", method: "PATCH", path: "/produtos/16681407082" }
-  ]);
-  assert.equal(plan.blockers.length, 0);
-});
-
-test("matching populated product fields are classified as NO_CHANGES", () => {
-  const plan = createBlingFullProductSyncPlan(product({ images: [] }), {
-    category: { status: "RESOLVED", id: 99 },
-    remoteProduct: remoteProduct()
-  });
-  assert.deepEqual(plan.mainPayload, {});
-  assert.equal(plan.moduleStatuses.PRODUCT_FIELDS, "NO_CHANGES");
-  assert.equal(plan.moduleStatuses.PRICE_COST, "NO_CHANGES");
-});
-
-test("the same photos in a different order remain a pending image change", () => {
-  const images = [
-    { id: "a", position: 0, url: "https://cdn.example.com/a.jpg" },
-    { id: "b", position: 1, url: "https://cdn.example.com/b.jpg" }
-  ];
-  const plan = createBlingFullProductSyncPlan(product({ category: null, images }), {
-    remoteProduct: remoteProduct(),
+test("the same gallery in another order is mirrored back to local order", () => {
+  const plan = createBlingFullProductSyncPlan(completeProduct(), {
     remoteImageUrls: [
       "https://cdn.example.com/b.jpg",
       "https://cdn.example.com/a.jpg"
@@ -431,95 +269,99 @@ test("the same photos in a different order remain a pending image change", () =>
   assert.ok(plan.imagesPayload);
 });
 
-test("an added local photo remains a pending image change", () => {
-  const plan = createBlingFullProductSyncPlan(product({
-    category: null,
-    images: [
-      { id: "a", position: 0, url: "https://cdn.example.com/a.jpg" },
-      { id: "b", position: 1, url: "https://cdn.example.com/b.jpg" }
-    ]
-  }), {
-    remoteProduct: remoteProduct(),
-    remoteImageUrls: ["https://cdn.example.com/a.jpg"]
-  });
-  assert.equal(plan.moduleStatuses.IMAGES, "PENDING");
-  assert.equal(plan.remoteImagesToAddCount, 1);
+test("duplicate local URLs are removed globally and fragments do not create copies", () => {
+  const images = normalizeBlingFullProductImages([
+    { id: "b", position: 1, url: "https://cdn.example.com/a.jpg" },
+    { id: "a", position: 0, url: "https://cdn.example.com/a.jpg#principal" }
+  ]);
+  assert.deepEqual(images.map((item) => item.id), ["a"]);
 });
 
-test("a remote photo removed by exact mirroring remains a pending image change", () => {
-  const plan = createBlingFullProductSyncPlan(product({
-    category: null,
-    images: [{ id: "a", position: 0, url: "https://cdn.example.com/a.jpg" }]
-  }), {
-    remoteProduct: remoteProduct(),
-    remoteImageUrls: [
-      "https://cdn.example.com/a.jpg",
-      "https://cdn.example.com/b.jpg"
-    ]
-  });
-  assert.equal(plan.moduleStatuses.IMAGES, "PENDING");
-  assert.equal(plan.remoteImagesToRemoveCount, 1);
+test("more than 13 local images blocks mirroring without truncation", () => {
+  const images = Array.from({ length: 14 }, (_, index) => ({
+    id: String(index),
+    position: index,
+    url: `https://cdn.example.com/${index}.jpg`
+  }));
+  const plan = createBlingFullProductSyncPlan(emptyProduct({ images }), {});
+  assert.equal(plan.imagesPayload, null);
+  assert.equal(plan.imageCount, 14);
+  assert.match(plan.blockers[0], /limite de 13 imagens/);
 });
 
-test("an absent local stock is NOT_REQUESTED and needs no stock payload", () => {
-  const plan = createBlingFullProductSyncPlan(product({
-    category: null,
-    cost: null,
-    stock: null,
-    images: []
-  }), { remoteProduct: remoteProduct() });
-  assert.equal(plan.moduleStatuses.STOCK, "NOT_REQUESTED");
-  assert.equal(plan.stockPayload, null);
+test("remote video is preserved when the gallery payload must be sent", () => {
+  const plan = createBlingFullProductSyncPlan(completeProduct(), {
+    remoteVideoUrl: "https://www.youtube.com/watch?v=matrix"
+  });
+  assert.equal(plan.imagesPayload?.midia.video?.url, "https://www.youtube.com/watch?v=matrix");
 });
 
-test("local and remote stock zero are NO_CHANGES", () => {
-  const plan = createBlingFullProductSyncPlan(product({
-    category: null,
-    cost: null,
-    price: null,
-    stock: 0,
-    images: []
-  }), {
-    remoteProduct: remoteProduct({ estoque: { saldoVirtualTotal: "0" } })
+test("unsupported fields are omitted individually and do not block supported fields", () => {
+  const plan = createBlingFullProductSyncPlan(completeProduct({ images: [], stock: null }), {
+    unsupportedFields: [{
+      field: "format",
+      label: "Formato",
+      reason: "Campo local ausente."
+    }]
   });
-  assert.equal(plan.moduleStatuses.STOCK, "NO_CHANGES");
-  assert.equal(plan.stockPayload, null);
+  assert.equal(plan.mainPayload.formato, undefined);
+  assert.equal(plan.mainPayload.nome, "Produto Matrix");
+  assert.equal(plan.unsupportedFields.length, 1);
+  assert.equal(plan.status, "READY_TO_SYNC_WITH_WARNINGS");
+  assert.equal(plan.blockers.length, 0);
 });
 
-test("local stock zero and a different remote stock are PENDING", () => {
-  const plan = createBlingFullProductSyncPlan(product({
-    category: null,
-    cost: null,
-    price: null,
-    stock: 0,
-    images: []
-  }), {
-    depositId: 7,
-    remoteProduct: remoteProduct({ estoque: { saldoVirtualTotal: 1 } })
-  });
-  assert.equal(plan.moduleStatuses.STOCK, "PENDING");
-  assert.equal(plan.stockPayload?.quantidade, 0);
+test("only the four final modules exist and price belongs to PRODUCT_FIELDS", () => {
+  const plan = createBlingFullProductSyncPlan(emptyProduct({ price: 12.34 }), {});
+  assert.deepEqual(BLING_FULL_PRODUCT_SYNC_MODULES, [
+    "PRODUCT_FIELDS",
+    "STOCK",
+    "IMAGES",
+    "VERIFICATION"
+  ]);
+  assert.deepEqual(plan.endpoints, [{
+    modules: ["PRODUCT_FIELDS"],
+    method: "PATCH",
+    path: "/produtos/123456789"
+  }]);
 });
 
-test("all equal or absent modules produce ALREADY_UP_TO_DATE", () => {
-  const imageUrls = [
-    "https://cdn.example.com/a.jpg",
-    "https://cdn.example.com/b.jpg"
-  ];
-  const plan = createBlingFullProductSyncPlan(product({
-    category: null,
-    cost: null,
-    price: null,
-    stock: null,
-    images: imageUrls.map((url, index) => ({ id: String(index), position: index, url }))
-  }), {
-    remoteProduct: remoteProduct(),
-    remoteImageUrls: imageUrls
-  });
-  assert.equal(plan.status, "ALREADY_UP_TO_DATE");
-  assert.deepEqual(plan.endpoints, []);
-  assert.equal(plan.moduleStatuses.PRODUCT_FIELDS, "NO_CHANGES");
-  assert.equal(plan.moduleStatuses.STOCK, "NOT_REQUESTED");
-  assert.equal(plan.moduleStatuses.IMAGES, "NO_CHANGES");
-  assert.equal(plan.moduleStatuses.VERIFICATION, "NOT_REQUESTED");
+test("strict schemas reject unrelated product, stock and image properties", () => {
+  assert.equal(blingFullProductMainPayloadSchema.safeParse({
+    nome: "Produto",
+    categoria: { id: 1 }
+  }).success, false);
+  assert.equal(blingFullProductMainPayloadSchema.safeParse({
+    nome: "Produto",
+    descricaoComplementar: "fora do escopo"
+  }).success, false);
+  assert.equal(blingFullProductStockPayloadSchema.safeParse({
+    produto: { id: 1 },
+    deposito: { id: 2 },
+    operacao: "B",
+    quantidade: 0,
+    preco: 10
+  }).success, false);
+  assert.equal(blingFullProductImagesPayloadSchema.safeParse({
+    midia: { imagens: { imagensURL: [{ link: "https://cdn.example.com/a.jpg" }] } },
+    nome: "fora do escopo"
+  }).success, false);
+});
+
+test("the runtime contains no COST module, supplier endpoint or PUT operation", () => {
+  const schemaSource = readFileSync(
+    path.join(process.cwd(), "lib/bling-full-product-sync-schema.ts"),
+    "utf8"
+  );
+  const serviceSource = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-full-product-sync-service.ts"),
+    "utf8"
+  );
+  for (const source of [schemaSource, serviceSource]) {
+    assert.doesNotMatch(source, /PRICE_COST/);
+    assert.doesNotMatch(source, /["']COST["']/);
+    assert.doesNotMatch(source, /produtos\/fornecedores/);
+    assert.doesNotMatch(source, /precoCusto/);
+    assert.doesNotMatch(source, /method:\s*["']PUT["']/);
+  }
 });

@@ -8,15 +8,19 @@ import {
   createBlingFullProductSyncPlan,
   fingerprintBlingFullProductValue,
   normalizeBlingFullProductImages,
-  type BlingFullProductCategoryResolution,
   type BlingFullProductLocalValues,
   type BlingFullProductSyncModule,
   type BlingFullProductSyncPlanningStatus,
-  type BlingFullProductSyncPlan
+  type BlingFullProductSyncPlan,
+  type BlingFullProductUnsupportedField
 } from "@/lib/bling-full-product-sync-schema";
 import { prisma } from "@/lib/prisma";
 import { decryptSecret, encryptSecret } from "@/lib/security/encryption";
-import { blingApiClient } from "@/lib/services/bling-api-client";
+import {
+  BlingApiError,
+  blingApiClient,
+  type BlingApiResponseMetadata
+} from "@/lib/services/bling-api-client";
 import {
   acquireBlingProductUpdateLock,
   hasBlockingBlingProductIncident
@@ -37,9 +41,30 @@ export type BlingFullProductModuleResult = {
     | "VERIFICATION_FAILED";
 };
 
+export type BlingFullProductModuleAudit = {
+  module: BlingFullProductSyncModule;
+  method: "GET" | "PATCH" | "POST";
+  endpoint: string;
+  status: "COMPLETED" | "FAILED" | "VERIFICATION_FAILED";
+  httpStatus: number | null;
+  requestIdMasked?: string;
+  payloadHash?: string;
+  durationMs: number;
+  attempt: 1;
+  verificationStatus: "NOT_REQUESTED" | "COMPLETED" | "FAILED";
+};
+
+export type BlingFullProductModuleIntent = {
+  module: Exclude<BlingFullProductSyncModule, "VERIFICATION">;
+  method: "PATCH" | "POST";
+  endpoint: string;
+  payloadHash: string;
+  attempt: 1;
+};
+
 export type BlingFullProductSyncPreview = {
   operation: "FULL_PRODUCT_SYNC";
-  status: "READY" | "BLOCKED" | "ALREADY_UP_TO_DATE";
+  status: BlingFullProductSyncPlan["status"];
   productId: string;
   title: string;
   populatedFieldCount: number;
@@ -51,6 +76,7 @@ export type BlingFullProductSyncPreview = {
   remoteImagesToRemoveCount: number;
   stock: number | null;
   price: number | null;
+  unsupportedFields: BlingFullProductUnsupportedField[];
   blockers: string[];
   notices: string[];
   endpoints: BlingFullProductSyncPlan["endpoints"];
@@ -60,7 +86,6 @@ export type BlingFullProductSyncPreview = {
   capabilityEnabled: boolean;
   payloads: {
     productFields: Record<string, unknown>;
-    priceCost: Record<string, unknown> | null;
     stock: Record<string, unknown> | null;
     images: { imageCount: number; includesVideo: boolean } | null;
   };
@@ -69,18 +94,26 @@ export type BlingFullProductSyncPreview = {
 export type BlingFullProductSyncResult = {
   operation: "FULL_PRODUCT_SYNC";
   productId: string;
-  status: "UPDATED" | "UNCHANGED" | "PARTIAL" | "FAILED" | "IN_FLIGHT";
+  status:
+    | "UPDATED"
+    | "UPDATED_WITH_WARNINGS"
+    | "UNCHANGED"
+    | "UP_TO_DATE_WITH_WARNINGS"
+    | "PARTIAL"
+    | "FAILED"
+    | "IN_FLIGHT";
   message: string;
   modules: BlingFullProductModuleResult[];
   patchRequests: number;
   postRequests: number;
-  putRequests: 0;
+  putRequests: number;
   retries: 0;
   verificationGetExecuted: boolean;
   planFingerprint: string;
   protectedFingerprintBefore: string;
   protectedFingerprintAfter: string | null;
   divergences: string[];
+  moduleAudits: BlingFullProductModuleAudit[];
   replayed?: boolean;
 };
 
@@ -127,13 +160,8 @@ type FullSyncDependencies = {
     organizationId: string;
     connectionId: string;
     externalProductId: string;
+    onResponseMeta?: (metadata: BlingApiResponseMetadata) => void;
   }): Promise<JsonRecord>;
-  resolveCategory(input: {
-    organizationId: string;
-    connectionId: string;
-    localCategory: string | null;
-    remote: JsonRecord;
-  }): Promise<BlingFullProductCategoryResolution>;
   resolveDepositId(input: {
     organizationId: string;
     connectionId: string;
@@ -143,12 +171,12 @@ type FullSyncDependencies = {
     connectionId: string;
     externalProductId: string;
     payload: Record<string, unknown>;
-  }): Promise<void>;
+  }): Promise<BlingApiResponseMetadata>;
   postStock(input: {
     organizationId: string;
     connectionId: string;
     payload: Record<string, unknown>;
-  }): Promise<void>;
+  }): Promise<BlingApiResponseMetadata>;
   reserveJob(input: {
     organizationId: string;
     connectionId: string;
@@ -202,11 +230,6 @@ function localUnit(blockedFields: unknown, attributes: unknown) {
 
 function remoteVideoUrl(remote: JsonRecord) {
   return text(record(record(remote.midia).video).url);
-}
-
-function remoteCategoryId(remote: JsonRecord) {
-  const id = numberValue(record(remote.categoria).id);
-  return id && Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
 function normalizeComparableText(value: unknown) {
@@ -293,16 +316,23 @@ function protectedRemoteSnapshot(remote: JsonRecord, plan: BlingFullProductSyncP
   const copy = structuredClone(remote) as JsonRecord;
   const keyByPayload = {
     nome: "nome",
-    marca: "marca",
     codigo: "codigo",
+    formato: "formato",
+    tipo: "tipo",
+    situacao: "situacao",
     preco: "preco",
-    gtin: "gtin",
     unidade: "unidade",
-    descricaoComplementar: "descricaoComplementar",
+    condicao: "condicao",
+    marca: "marca",
+    tipoProducao: "tipoProducao",
+    dataValidade: "dataValidade",
+    freteGratis: "freteGratis",
     pesoLiquido: "pesoLiquido",
     pesoBruto: "pesoBruto",
-    condicao: "condicao",
-    categoria: "categoria"
+    volumes: "volumes",
+    itensPorCaixa: "itensPorCaixa",
+    gtin: "gtin",
+    gtinEmbalagem: "gtinEmbalagem"
   } as const;
   for (const [payloadKey, remoteKey] of Object.entries(keyByPayload)) {
     if (payloadKey in plan.mainPayload) delete copy[remoteKey];
@@ -318,12 +348,6 @@ function protectedRemoteSnapshot(remote: JsonRecord, plan: BlingFullProductSyncP
     delete stock.saldoVirtualTotal;
     if (Object.keys(stock).length) copy.estoque = stock;
     else delete copy.estoque;
-    if (plan.stockPayload.custo !== undefined) {
-      const supplier = record(copy.fornecedor);
-      delete supplier.precoCusto;
-      if (Object.keys(supplier).length) copy.fornecedor = supplier;
-      else delete copy.fornecedor;
-    }
   }
   if (plan.imagesPayload) {
     const media = record(copy.midia);
@@ -349,28 +373,38 @@ export function verifyBlingFullProductSyncPlan(
   const divergences: string[] = [];
   const payload = plan.mainPayload;
   const dimensions = record(remote.dimensoes);
-  const category = record(remote.categoria);
   const comparisons: Array<[string, unknown, unknown]> = [
     ["name", payload.nome, remote.nome],
-    ["brand", payload.marca, remote.marca],
     ["sku", payload.codigo, remote.codigo],
+    ["format", payload.formato, remote.formato],
+    ["type", payload.tipo, remote.tipo],
+    ["situation", payload.situacao, remote.situacao],
     ["price", payload.preco, remote.preco],
-    ["gtin", payload.gtin, remote.gtin],
     ["unit", payload.unidade, remote.unidade],
-    ["description", payload.descricaoComplementar, remote.descricaoComplementar],
+    ["condition", payload.condicao, conditionFromRemote(remote.condicao)],
+    ["brand", payload.marca, remote.marca],
+    ["productionType", payload.tipoProducao, remote.tipoProducao],
+    ["expirationDate", payload.dataValidade, remote.dataValidade],
+    ["freeShipping", payload.freteGratis, remote.freteGratis],
     ["weight", payload.pesoLiquido, remote.pesoLiquido],
     ["grossWeight", payload.pesoBruto, remote.pesoBruto],
-    ["condition", payload.condicao, conditionFromRemote(remote.condicao)],
+    ["volumes", payload.volumes, remote.volumes],
+    ["itemsPerBox", payload.itensPorCaixa, remote.itensPorCaixa],
+    ["gtin", payload.gtin, remote.gtin],
+    ["packagingGtin", payload.gtinEmbalagem, remote.gtinEmbalagem],
     ["height", payload.dimensoes?.altura, dimensions.altura],
     ["width", payload.dimensoes?.largura, dimensions.largura],
     ["depth", payload.dimensoes?.profundidade, dimensions.profundidade],
-    ["dimensionUnit", payload.dimensoes?.unidadeMedida, dimensionUnitFromRemote(remote)],
-    ["category", payload.categoria?.id, category.id]
+    ["dimensionUnit", payload.dimensoes?.unidadeMedida, dimensionUnitFromRemote(remote)]
   ];
   for (const [field, expected, actual] of comparisons) {
     if (expected === undefined) continue;
     if (typeof expected === "number") {
       if (numberValue(actual) !== expected) divergences.push(field);
+    } else if (typeof expected === "boolean") {
+      if (actual !== expected) divergences.push(field);
+    } else if (field === "expirationDate") {
+      if (String(actual ?? "").slice(0, 10) !== expected) divergences.push(field);
     } else if (normalizeComparableText(actual) !== normalizeComparableText(expected)) {
       divergences.push(field);
     }
@@ -378,10 +412,6 @@ export function verifyBlingFullProductSyncPlan(
   if (plan.stockPayload) {
     const actualStock = numberValue(record(remote.estoque).saldoVirtualTotal);
     if (actualStock !== plan.stockPayload.quantidade) divergences.push("stock");
-    const remoteCost = numberValue(record(remote.fornecedor).precoCusto);
-    if (plan.stockPayload.custo !== undefined && remoteCost !== plan.stockPayload.custo) {
-      divergences.push("cost");
-    }
   }
   if (plan.imagesPayload && !compareImages(plan.imageOrder, remote)) divergences.push("images");
   const protectedFingerprintAfter = fingerprintBlingFullProductValue(protectedRemoteSnapshot(remote, plan));
@@ -409,6 +439,54 @@ function parseJobResult(lastCursor: string | null) {
     return null;
   }
 }
+
+export const BLING_FULL_PRODUCT_UNSUPPORTED_LOCAL_FIELDS: BlingFullProductUnsupportedField[] = [
+  {
+    field: "format",
+    label: "Formato",
+    reason: "O cadastro local ainda nao possui um campo dedicado para formato."
+  },
+  {
+    field: "type",
+    label: "Tipo",
+    reason: "O cadastro local ainda nao possui um campo dedicado para tipo."
+  },
+  {
+    field: "situation",
+    label: "Situacao",
+    reason: "O status local tem outra finalidade e nao representa a situacao comercial do Bling."
+  },
+  {
+    field: "productionType",
+    label: "Producao",
+    reason: "O cadastro local ainda nao possui um campo dedicado para tipo de producao."
+  },
+  {
+    field: "expirationDate",
+    label: "Data de validade",
+    reason: "O cadastro local ainda nao possui um campo dedicado para data de validade."
+  },
+  {
+    field: "freeShipping",
+    label: "Frete gratis",
+    reason: "O cadastro local ainda nao possui um campo dedicado para frete gratis."
+  },
+  {
+    field: "volumes",
+    label: "Volumes",
+    reason: "O cadastro local ainda nao possui um campo dedicado para volumes."
+  },
+  {
+    field: "itemsPerBox",
+    label: "Itens por caixa",
+    reason: "O cadastro local ainda nao possui um campo dedicado para itens por caixa."
+  },
+  {
+    field: "packagingGtin",
+    label: "GTIN/EAN tributario",
+    reason: "O cadastro local ainda nao possui um campo dedicado para GTIN/EAN tributario."
+  }
+];
 
 async function defaultLoadContext(input: {
   organizationId: string;
@@ -454,8 +532,6 @@ async function defaultLoadContext(input: {
       brand: true,
       sku: true,
       ean: true,
-      description: true,
-      category: true,
       weight: true,
       grossWeight: true,
       height: true,
@@ -468,7 +544,7 @@ async function defaultLoadContext(input: {
       prices: {
         take: 1,
         orderBy: { createdAt: "desc" },
-        select: { costPrice: true, salePrice: true }
+        select: { salePrice: true }
       },
       inventory: {
         where: { connectionId: input.connectionId },
@@ -509,80 +585,41 @@ async function defaultLoadContext(input: {
     productId: product.id,
     externalProductId: mapping.externalProductId,
     name: product.name,
-    brand: product.brand,
     sku: product.sku,
-    gtin: product.ean,
-    unit: localUnit(product.blockedFields, product.attributes),
-    category: product.category,
-    cost: price ? Number(price.costPrice) : null,
+    format: null,
+    type: null,
+    situation: null,
     price: price ? Number(price.salePrice) : null,
-    stock: product.inventory.length ? inventory : stockOverride,
+    unit: localUnit(product.blockedFields, product.attributes),
+    condition: product.condition,
+    brand: product.brand,
+    productionType: null,
+    expirationDate: null,
+    freeShipping: null,
     weight: product.weight === null ? null : Number(product.weight),
     grossWeight: product.grossWeight === null ? null : Number(product.grossWeight),
-    condition: product.condition,
-    height: product.height === null ? null : Number(product.height),
     width: product.width === null ? null : Number(product.width),
+    height: product.height === null ? null : Number(product.height),
     depth: product.depth === null ? null : Number(product.depth),
+    volumes: null,
+    itemsPerBox: null,
     dimensionUnit: product.dimensionUnit,
-    description: product.description,
-    images: product.images
+    gtin: product.ean,
+    packagingGtin: null,
+    images: product.images,
+    stock: product.inventory.length ? inventory : stockOverride
   };
   return { local, mapping };
-}
-
-async function defaultResolveCategory(input: {
-  organizationId: string;
-  connectionId: string;
-  localCategory: string | null;
-  remote: JsonRecord;
-}): Promise<BlingFullProductCategoryResolution> {
-  const expected = normalizeComparableText(input.localCategory);
-  if (!expected) return { status: "OMITTED" };
-  const currentId = remoteCategoryId(input.remote);
-  if (currentId) {
-    const response = await blingApiClient.requestReadOnly<unknown>({
-      organizationId: input.organizationId,
-      connectionId: input.connectionId,
-      path: `/categorias/produtos/${currentId}`
-    });
-    const category = dataRecord(response);
-    if (normalizeComparableText(text(category.descricao, category.nome)) === expected) {
-      return { status: "RESOLVED", id: currentId };
-    }
-  }
-  const matchingIds = new Set<number>();
-  let exhausted = false;
-  for (let page = 1; page <= 20; page += 1) {
-    const response = await blingApiClient.requestReadOnly<unknown>({
-      organizationId: input.organizationId,
-      connectionId: input.connectionId,
-      path: "/categorias/produtos",
-      query: { pagina: page, limite: 100 }
-    });
-    const categories = listData(response);
-    for (const category of categories) {
-      if (normalizeComparableText(text(category.descricao, category.nome)) !== expected) continue;
-      const id = numberValue(category.id);
-      if (id && Number.isSafeInteger(id) && id > 0) matchingIds.add(id);
-    }
-    if (matchingIds.size > 1) return { status: "AMBIGUOUS" };
-    if (categories.length < 100) {
-      exhausted = true;
-      break;
-    }
-  }
-  if (!exhausted) return { status: "UNRESOLVED" };
-  const [id] = matchingIds;
-  return id ? { status: "RESOLVED", id } : { status: "NOT_FOUND" };
 }
 
 async function defaultResolveDepositId(input: {
   organizationId: string;
   connectionId: string;
 }) {
-  const response = await blingApiClient.requestReadOnly<unknown>({
+  const response = await blingApiClient.requestWithoutRefresh<unknown>({
     organizationId: input.organizationId,
     connectionId: input.connectionId,
+    method: "GET",
     path: "/depositos",
     query: { pagina: 1, limite: 100, situacao: 1 }
   });
@@ -677,7 +714,7 @@ async function defaultFinishJob(input: {
       status: ["FAILED", "PARTIAL"].includes(input.result.status) ? "FAILED" : "COMPLETED",
       totalFetched: 1,
       totalExistingProducts: 1,
-      totalUpdatedDrafts: input.result.status === "UPDATED" ? 1 : 0,
+      totalUpdatedDrafts: ["UPDATED", "UPDATED_WITH_WARNINGS"].includes(input.result.status) ? 1 : 0,
       totalErrors: ["FAILED", "PARTIAL"].includes(input.result.status) ? 1 : 0,
       finishedAt: new Date(),
       errorMessage: ["FAILED", "PARTIAL"].includes(input.result.status) ? input.result.message : null,
@@ -707,34 +744,45 @@ async function defaultRecordExternalSync(input: { context: FullSyncContext; at: 
 const defaultDependencies: FullSyncDependencies = {
   loadContext: defaultLoadContext,
   async getRemote(input) {
-    const response = await blingApiClient.requestReadOnly<unknown>({
+    const response = await blingApiClient.requestWithoutRefresh<unknown>({
       organizationId: input.organizationId,
       connectionId: input.connectionId,
-      path: `/produtos/${input.externalProductId}`
+      method: "GET",
+      path: `/produtos/${input.externalProductId}`,
+      onResponseMeta: input.onResponseMeta
     });
     return dataRecord(response);
   },
-  resolveCategory: defaultResolveCategory,
   resolveDepositId: defaultResolveDepositId,
   async patchProduct(input) {
+    let responseMeta: BlingApiResponseMetadata | undefined;
     await blingApiClient.requestWithoutRefresh({
       organizationId: input.organizationId,
       connectionId: input.connectionId,
       method: "PATCH",
       path: `/produtos/${input.externalProductId}`,
       body: input.payload,
-      timeoutMs: 30_000
+      timeoutMs: 30_000,
+      onResponseMeta: (value) => {
+        responseMeta = value;
+      }
     });
+    return responseMeta ?? { status: 200 };
   },
   async postStock(input) {
+    let responseMeta: BlingApiResponseMetadata | undefined;
     await blingApiClient.requestWithoutRefresh({
       organizationId: input.organizationId,
       connectionId: input.connectionId,
       method: "POST",
       path: "/estoques",
       body: input.payload,
-      timeoutMs: 30_000
+      timeoutMs: 30_000,
+      onResponseMeta: (value) => {
+        responseMeta = value;
+      }
     });
+    return responseMeta ?? { status: 201 };
   },
   reserveJob: defaultReserveJob,
   finishJob: defaultFinishJob,
@@ -755,6 +803,53 @@ function setModule(
 ) {
   const item = modules.find((candidate) => candidate.module === module);
   if (item) item.status = status;
+}
+
+function payloadHash(payload: unknown) {
+  return fingerprintBlingFullProductValue(payload);
+}
+
+function errorResponseMetadata(error: unknown) {
+  return error instanceof BlingApiError
+    ? {
+        httpStatus: error.status,
+        ...(error.details?.requestIdMasked
+          ? { requestIdMasked: error.details.requestIdMasked }
+          : {})
+      }
+    : { httpStatus: null };
+}
+
+function appendModuleAudits(
+  target: BlingFullProductModuleAudit[],
+  modules: BlingFullProductSyncModule[],
+  input: Omit<BlingFullProductModuleAudit, "module">
+) {
+  for (const moduleName of modules) target.push({ module: moduleName, ...input });
+}
+
+function moduleIntents(plan: BlingFullProductSyncPlan): BlingFullProductModuleIntent[] {
+  const intents: BlingFullProductModuleIntent[] = [];
+  for (const endpoint of plan.endpoints) {
+    const payload = endpoint.method === "POST"
+      ? plan.stockPayload
+      : endpoint.modules.includes("IMAGES")
+        ? plan.imagesPayload
+        : plan.mainPayload;
+    if (!payload) continue;
+    const sanitizedEndpoint = endpoint.path
+      .replace(/^\/produtos\/\d+$/, "/produtos/{externalProductId}");
+    for (const moduleName of endpoint.modules) {
+      intents.push({
+        module: moduleName,
+        method: endpoint.method,
+        endpoint: sanitizedEndpoint,
+        payloadHash: payloadHash(payload),
+        attempt: 1
+      });
+    }
+  }
+  return intents;
 }
 
 function createConfirmation(
@@ -838,28 +933,20 @@ async function preparePlan(
     connectionId: input.connectionId,
     externalProductId: context.mapping.externalProductId
   });
-  const category = await dependencies.resolveCategory({
-    organizationId: input.organizationId,
-    connectionId: input.connectionId,
-    localCategory: context.local.category,
-    remote
-  });
   const remoteStock = numberValue(record(remote.estoque).saldoVirtualTotal);
-  const remoteCost = numberValue(record(remote.fornecedor).precoCusto);
   const stockChanged = context.local.stock !== null && remoteStock !== context.local.stock;
-  const costChanged = context.local.cost !== null && remoteCost !== context.local.cost;
-  const depositId = context.local.stock === null || (!stockChanged && !costChanged)
+  const depositId = context.local.stock === null || !stockChanged
     ? null
     : await dependencies.resolveDepositId({
         organizationId: input.organizationId,
         connectionId: input.connectionId
       });
   const plan = createBlingFullProductSyncPlan(context.local, {
-    category,
     depositId,
     remoteVideoUrl: remoteVideoUrl(remote),
     remoteImageUrls: remoteImageUrls(remote),
-    remoteProduct: remote
+    remoteProduct: remote,
+    unsupportedFields: BLING_FULL_PRODUCT_UNSUPPORTED_LOCAL_FIELDS
   });
   const remoteId = text(remote.id);
   if (remoteId !== context.mapping.externalProductId) {
@@ -906,6 +993,7 @@ export class BlingFullProductSyncService {
       remoteImagesToRemoveCount: plan.remoteImagesToRemoveCount,
       stock: context.local.stock,
       price: context.local.price,
+      unsupportedFields: plan.unsupportedFields,
       blockers: plan.blockers,
       notices: plan.notices,
       endpoints: plan.endpoints,
@@ -915,7 +1003,6 @@ export class BlingFullProductSyncService {
       capabilityEnabled: process.env.BLING_FULL_PRODUCT_SYNC_ENABLED === "true",
       payloads: {
         productFields: plan.mainPayload,
-        priceCost: plan.priceCostPayload,
         stock: plan.stockPayload,
         images: plan.imagesPayload
           ? {
@@ -934,7 +1021,7 @@ export class BlingFullProductSyncService {
     productId: string;
     idempotencyKey: string;
     planConfirmation: string;
-    onIntent?: () => Promise<void>;
+    onIntent?: (input: { moduleIntents: BlingFullProductModuleIntent[] }) => Promise<void>;
   }): Promise<BlingFullProductSyncResult> {
     if (process.env.BLING_FULL_PRODUCT_SYNC_ENABLED !== "true") {
       throw new Error("A atualizacao completa de produtos no Bling esta temporariamente desativada.");
@@ -945,12 +1032,15 @@ export class BlingFullProductSyncService {
     const protectedFingerprintBefore = fingerprintBlingFullProductValue(
       protectedRemoteSnapshot(remote, plan)
     );
-    if (plan.status === "ALREADY_UP_TO_DATE") {
+    if (plan.status === "ALREADY_UP_TO_DATE" || plan.status === "UP_TO_DATE_WITH_WARNINGS") {
+      const hasWarnings = plan.status === "UP_TO_DATE_WITH_WARNINGS";
       return {
         operation: "FULL_PRODUCT_SYNC",
         productId: input.productId,
-        status: "UNCHANGED",
-        message: "Este produto ja esta atualizado no Bling.",
+        status: hasWarnings ? "UP_TO_DATE_WITH_WARNINGS" : "UNCHANGED",
+        message: hasWarnings
+          ? "Os campos suportados ja estao atualizados no Bling."
+          : "Este produto ja esta atualizado no Bling.",
         modules: moduleResults(plan),
         patchRequests: 0,
         postRequests: 0,
@@ -960,10 +1050,11 @@ export class BlingFullProductSyncService {
         planFingerprint: plan.planFingerprint,
         protectedFingerprintBefore,
         protectedFingerprintAfter: protectedFingerprintBefore,
-        divergences: []
+        divergences: [],
+        moduleAudits: []
       };
     }
-    await input.onIntent?.();
+    await input.onIntent?.({ moduleIntents: moduleIntents(plan) });
 
     const reservation = await this.dependencies.reserveJob({
       organizationId: input.organizationId,
@@ -988,98 +1079,168 @@ export class BlingFullProductSyncService {
         planFingerprint: plan.planFingerprint,
         protectedFingerprintBefore,
         protectedFingerprintAfter: null,
-        divergences: []
+        divergences: [],
+        moduleAudits: []
       };
     }
 
     const modules = moduleResults(plan);
+    const moduleAudits: BlingFullProductModuleAudit[] = [];
     let patchRequests = 0;
     let postRequests = 0;
+    const putRequests = 0;
     let verificationGetExecuted = false;
     let protectedFingerprintAfter: string | null = null;
     let divergences: string[] = [];
-    let status: BlingFullProductSyncResult["status"] = "UPDATED";
-    let message = "Produto atualizado no Bling.";
-    let activeModule: BlingFullProductSyncModule | null = null;
+    const hasWarnings = plan.unsupportedFields.length > 0;
+    let status: BlingFullProductSyncResult["status"] = hasWarnings
+      ? "UPDATED_WITH_WARNINGS"
+      : "UPDATED";
+    let message = hasWarnings
+      ? "Produto atualizado no Bling com avisos em campos nao suportados."
+      : "Produto atualizado no Bling.";
+    let activeModules: BlingFullProductSyncModule[] = [];
+
+    const runWrite = async (input: {
+      modules: BlingFullProductSyncModule[];
+      method: "PATCH" | "POST";
+      endpoint: string;
+      payload: Record<string, unknown>;
+      request: () => Promise<BlingApiResponseMetadata>;
+    }) => {
+      const startedAt = Date.now();
+      try {
+        const response = await input.request();
+        appendModuleAudits(moduleAudits, input.modules, {
+          method: input.method,
+          endpoint: input.endpoint,
+          status: "COMPLETED",
+          httpStatus: response.status,
+          ...(response.requestIdMasked ? { requestIdMasked: response.requestIdMasked } : {}),
+          payloadHash: payloadHash(input.payload),
+          durationMs: Date.now() - startedAt,
+          attempt: 1,
+          verificationStatus: "NOT_REQUESTED"
+        });
+      } catch (error) {
+        appendModuleAudits(moduleAudits, input.modules, {
+          method: input.method,
+          endpoint: input.endpoint,
+          status: "FAILED",
+          ...errorResponseMetadata(error),
+          payloadHash: payloadHash(input.payload),
+          durationMs: Date.now() - startedAt,
+          attempt: 1,
+          verificationStatus: "NOT_REQUESTED"
+        });
+        throw error;
+      }
+    };
 
     try {
       if (Object.keys(plan.mainPayload).length) {
         const payload = blingFullProductMainPayloadSchema.parse(plan.mainPayload);
-        activeModule = "PRODUCT_FIELDS";
+        activeModules = ["PRODUCT_FIELDS"];
         patchRequests += 1;
-        await this.dependencies.patchProduct({
-          organizationId: input.organizationId,
-          connectionId: input.connectionId,
-          externalProductId: context.mapping.externalProductId,
-          payload
+        await runWrite({
+          modules: activeModules,
+          method: "PATCH",
+          endpoint: "/produtos/{externalProductId}",
+          payload,
+          request: () => this.dependencies.patchProduct({
+            organizationId: input.organizationId,
+            connectionId: input.connectionId,
+            externalProductId: context.mapping.externalProductId,
+            payload
+          })
         });
-        setModule(modules, "PRODUCT_FIELDS", "COMPLETED");
-        if (plan.priceCostPayload?.preco !== undefined && plan.priceCostPayload.custo === undefined) {
-          setModule(modules, "PRICE_COST", "COMPLETED");
-        }
-        activeModule = null;
+        for (const moduleName of activeModules) setModule(modules, moduleName, "COMPLETED");
+        activeModules = [];
       } else {
         setModule(modules, "PRODUCT_FIELDS", plan.moduleStatuses.PRODUCT_FIELDS);
       }
 
-      if (!plan.priceCostPayload) {
-        setModule(modules, "PRICE_COST", plan.moduleStatuses.PRICE_COST);
-      } else if (plan.stockPayload) {
-        setModule(modules, "PRICE_COST", "PENDING");
-      } else if (plan.priceCostPayload.preco !== undefined) {
-        setModule(modules, "PRICE_COST", "COMPLETED");
-      }
-
       if (plan.stockPayload) {
         const payload = blingFullProductStockPayloadSchema.parse(plan.stockPayload);
-        activeModule = "STOCK";
+        activeModules = ["STOCK"];
         postRequests += 1;
-        await this.dependencies.postStock({
-          organizationId: input.organizationId,
-          connectionId: input.connectionId,
-          payload
+        await runWrite({
+          modules: activeModules,
+          method: "POST",
+          endpoint: "/estoques",
+          payload,
+          request: () => this.dependencies.postStock({
+            organizationId: input.organizationId,
+            connectionId: input.connectionId,
+            payload
+          })
         });
-        if (plan.moduleStatuses.STOCK === "PENDING") setModule(modules, "STOCK", "COMPLETED");
-        setModule(modules, "PRICE_COST", "COMPLETED");
-        activeModule = null;
+        setModule(modules, "STOCK", "COMPLETED");
+        activeModules = [];
       } else {
         setModule(modules, "STOCK", plan.moduleStatuses.STOCK);
-        if (plan.priceCostPayload?.preco !== undefined) setModule(modules, "PRICE_COST", "COMPLETED");
       }
 
       if (plan.imagesPayload) {
         const payload = blingFullProductImagesPayloadSchema.parse(plan.imagesPayload);
-        activeModule = "IMAGES";
+        activeModules = ["IMAGES"];
         patchRequests += 1;
-        await this.dependencies.patchProduct({
-          organizationId: input.organizationId,
-          connectionId: input.connectionId,
-          externalProductId: context.mapping.externalProductId,
-          payload
+        await runWrite({
+          modules: activeModules,
+          method: "PATCH",
+          endpoint: "/produtos/{externalProductId}",
+          payload,
+          request: () => this.dependencies.patchProduct({
+            organizationId: input.organizationId,
+            connectionId: input.connectionId,
+            externalProductId: context.mapping.externalProductId,
+            payload
+          })
         });
         setModule(modules, "IMAGES", "COMPLETED");
-        activeModule = null;
+        activeModules = [];
       } else {
         setModule(modules, "IMAGES", plan.moduleStatuses.IMAGES);
       }
 
-      activeModule = "VERIFICATION";
+      activeModules = ["VERIFICATION"];
+      const verificationStartedAt = Date.now();
+      let verificationResponse: BlingApiResponseMetadata | undefined;
       const after = await this.dependencies.getRemote({
         organizationId: input.organizationId,
         connectionId: input.connectionId,
-        externalProductId: context.mapping.externalProductId
+        externalProductId: context.mapping.externalProductId,
+        onResponseMeta: (value) => {
+          verificationResponse = value;
+        }
       });
       verificationGetExecuted = true;
-      const verification = verifyBlingFullProductSyncPlan(plan, after, protectedFingerprintBefore);
+      const verification = verifyBlingFullProductSyncPlan(
+        plan,
+        after,
+        protectedFingerprintBefore
+      );
       protectedFingerprintAfter = verification.protectedFingerprintAfter;
       divergences = verification.divergences;
+      appendModuleAudits(moduleAudits, ["VERIFICATION"], {
+        method: "GET",
+        endpoint: "/produtos/{externalProductId}",
+        status: verification.matches ? "COMPLETED" : "VERIFICATION_FAILED",
+        httpStatus: verificationResponse?.status ?? 200,
+        ...(verificationResponse?.requestIdMasked
+          ? { requestIdMasked: verificationResponse.requestIdMasked }
+          : {}),
+        durationMs: Date.now() - verificationStartedAt,
+        attempt: 1,
+        verificationStatus: verification.matches ? "COMPLETED" : "FAILED"
+      });
       if (!verification.matches) {
         status = "PARTIAL";
         message = "O produto foi salvo no W Ecommerce, mas a atualizacao no Bling foi concluida parcialmente.";
         setModule(modules, "VERIFICATION", "VERIFICATION_FAILED");
       } else {
         setModule(modules, "VERIFICATION", "COMPLETED");
-        activeModule = null;
+        activeModules = [];
         const recorded = await this.dependencies.recordExternalSync({ context, at: new Date() });
         if (!recorded) {
           status = "PARTIAL";
@@ -1087,24 +1248,26 @@ export class BlingFullProductSyncService {
           divergences.push("localMapping");
         }
       }
-    } catch {
+    } catch (error) {
       const completed = modules.some((item) => item.status === "COMPLETED");
       status = completed ? "PARTIAL" : "FAILED";
       message = completed
         ? "O produto foi salvo no W Ecommerce, mas a atualizacao no Bling foi concluida parcialmente."
         : "O produto foi salvo no W Ecommerce, mas nao foi possivel atualizar no Bling.";
-      if (activeModule) {
-        setModule(
-          modules,
-          activeModule,
-          activeModule === "VERIFICATION" ? "VERIFICATION_FAILED" : "FAILED"
-        );
-        if (activeModule === "PRODUCT_FIELDS" && plan.priceCostPayload?.preco !== undefined) {
-          setModule(modules, "PRICE_COST", "FAILED");
-        }
-        if (activeModule === "STOCK" && plan.priceCostPayload) {
-          setModule(modules, "PRICE_COST", "FAILED");
-        }
+      for (const activeModule of activeModules) {
+        setModule(modules, activeModule, activeModule === "VERIFICATION" ? "VERIFICATION_FAILED" : "FAILED");
+      }
+      if (activeModules.includes("VERIFICATION")) {
+        const response = errorResponseMetadata(error);
+        appendModuleAudits(moduleAudits, ["VERIFICATION"], {
+          method: "GET",
+          endpoint: "/produtos/{externalProductId}",
+          status: "VERIFICATION_FAILED",
+          ...response,
+          durationMs: 0,
+          attempt: 1,
+          verificationStatus: "FAILED"
+        });
       }
       for (const item of modules) {
         if (item.status === "PENDING") item.status = "NOT_REQUESTED";
@@ -1119,13 +1282,14 @@ export class BlingFullProductSyncService {
       modules,
       patchRequests,
       postRequests,
-      putRequests: 0,
+      putRequests,
       retries: 0,
       verificationGetExecuted,
       planFingerprint: plan.planFingerprint,
       protectedFingerprintBefore,
       protectedFingerprintAfter,
-      divergences: [...new Set(divergences)]
+      divergences: [...new Set(divergences)],
+      moduleAudits
     };
     await this.dependencies.finishJob({
       jobId: reservation.jobId,

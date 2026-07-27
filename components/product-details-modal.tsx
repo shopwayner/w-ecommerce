@@ -841,7 +841,14 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
       cancelTitleAi();
       onProductUpdated(refreshed);
       setEditing(false);
-      if (["UPDATED", "UNCHANGED"].includes(syncResult.status)) {
+      if (
+        [
+          "UPDATED",
+          "UPDATED_WITH_WARNINGS",
+          "UNCHANGED",
+          "UP_TO_DATE_WITH_WARNINGS"
+        ].includes(syncResult.status)
+      ) {
         setFeedback(syncResult.message);
       } else {
         setError(syncResult.message);

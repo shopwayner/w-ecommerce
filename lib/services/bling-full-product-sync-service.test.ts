@@ -2,45 +2,59 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import type { BlingFullProductLocalValues } from "@/lib/bling-full-product-sync-schema";
 import {
+  createBlingFullProductSyncPlan,
+  fingerprintBlingFullProductValue,
+  type BlingFullProductLocalValues
+} from "@/lib/bling-full-product-sync-schema";
+import {
+  BLING_FULL_PRODUCT_UNSUPPORTED_LOCAL_FIELDS,
   BlingFullProductSyncService,
   hasMeaningfulProductStructure,
   verifyBlingFullProductSyncPlan,
   type FullSyncContext,
   type FullSyncDependencies
 } from "./bling-full-product-sync-service";
-import { createBlingFullProductSyncPlan, fingerprintBlingFullProductValue } from "@/lib/bling-full-product-sync-schema";
 
 process.env.APP_ENCRYPTION_KEY = "test-full-product-sync-key";
 
-function local(overrides: Partial<BlingFullProductLocalValues> = {}): BlingFullProductLocalValues {
+function local(
+  overrides: Partial<BlingFullProductLocalValues> = {}
+): BlingFullProductLocalValues {
   return {
     productId: "product_1",
     externalProductId: "123456789",
     name: "Produto Matrix",
-    brand: "T-Mac",
     sku: "SKU-1",
-    gtin: "7891234567895",
-    unit: "UN",
-    category: null,
-    cost: 10,
+    format: null,
+    type: null,
+    situation: null,
     price: 20,
-    stock: 3,
+    unit: "UN",
+    condition: "NEW",
+    brand: "T-Mac",
+    productionType: null,
+    expirationDate: null,
+    freeShipping: null,
     weight: 1,
     grossWeight: 1.2,
-    condition: "NEW",
-    height: 2,
     width: 3,
+    height: 2,
     depth: 4,
+    volumes: null,
+    itemsPerBox: null,
     dimensionUnit: "CENTIMETER",
-    description: "Descricao",
+    gtin: "7891234567895",
+    packagingGtin: null,
     images: [{ id: "a", position: 0, url: "https://cdn.example.com/a.jpg" }],
+    stock: 3,
     ...overrides
   };
 }
 
-function context(overrides: Partial<BlingFullProductLocalValues> = {}): FullSyncContext {
+function context(
+  overrides: Partial<BlingFullProductLocalValues> = {}
+): FullSyncContext {
   return {
     local: local(overrides),
     mapping: {
@@ -58,27 +72,33 @@ function remote(images: string[] = [], overrides: Record<string, unknown> = {}) 
   return {
     id: 123456789,
     nome: "Produto Matrix",
-    marca: "T-Mac",
     codigo: "SKU-1",
+    formato: "S",
+    tipo: "P",
+    situacao: "I",
     preco: 20,
-    gtin: "7891234567895",
     unidade: "UN",
-    descricaoComplementar: "Descricao",
+    condicao: 1,
+    marca: "T-Mac",
+    tipoProducao: "P",
+    dataValidade: null,
+    freteGratis: false,
     pesoLiquido: 1,
     pesoBruto: 1.2,
-    condicao: 1,
+    volumes: 1,
+    itensPorCaixa: 1,
+    gtin: "7891234567895",
+    gtinEmbalagem: null,
     dimensoes: { altura: 2, largura: 3, profundidade: 4, unidadeMedida: 1 },
     estoque: { saldoVirtualTotal: 3 },
-    fornecedor: { precoCusto: 10 },
     midia: {
       imagens: {
         externas: images.map((link) => ({ link })),
         internas: []
       }
     },
-    tipo: "P",
-    situacao: "I",
-    formato: "S",
+    variacoes: [],
+    estrutura: { componentes: [] },
     unknownProtectedField: "preservado",
     ...overrides
   };
@@ -89,6 +109,7 @@ function dependencies(input: {
   reserveState?: "NEW" | "IN_FLIGHT";
   failStock?: boolean;
   divergentAfter?: boolean;
+  protectedDivergenceAfter?: boolean;
   loadError?: Error;
   remoteBefore?: Record<string, unknown>;
   remoteAfter?: Record<string, unknown>;
@@ -117,27 +138,27 @@ function dependencies(input: {
       if (!afterWrite) {
         return input.remoteBefore ?? remote([], {
           nome: "Produto anterior",
-          marca: "Marca anterior",
           codigo: "SKU-ANTERIOR",
           preco: 19,
-          gtin: "7890000000000",
           unidade: "PC",
-          descricaoComplementar: "Descricao anterior",
+          condicao: 0,
+          marca: "Marca anterior",
           pesoLiquido: 0,
           pesoBruto: 0,
-          condicao: 0,
+          gtin: "7890000000000",
           dimensoes: { altura: 0, largura: 0, profundidade: 0, unidadeMedida: 0 },
-          estoque: { saldoVirtualTotal: 2 },
-          fornecedor: { precoCusto: 9 }
+          estoque: { saldoVirtualTotal: 2 }
         });
       }
       if (input.remoteAfter) return input.remoteAfter;
+      if (input.protectedDivergenceAfter) {
+        return remote(["https://cdn.example.com/a.jpg"], {
+          unknownProtectedField: "alterado"
+        });
+      }
       return input.divergentAfter
         ? remote(["https://cdn.example.com/a.jpg"], { nome: "Nome divergente" })
         : remote(["https://cdn.example.com/a.jpg"]);
-    },
-    async resolveCategory() {
-      return { status: "OMITTED" };
     },
     async resolveDepositId() {
       calls.resolveDeposit += 1;
@@ -145,10 +166,12 @@ function dependencies(input: {
     },
     async patchProduct(request) {
       calls.patch.push(request.payload);
+      return { status: 200 };
     },
     async postStock(request) {
       if (input.failStock) throw new Error("stock failed");
       calls.stock.push(request.payload);
+      return { status: 201 };
     },
     async reserveJob() {
       calls.reserve += 1;
@@ -168,14 +191,15 @@ function dependencies(input: {
   return { deps, calls };
 }
 
+const request = {
+  userId: "user_1",
+  organizationId: "org_1",
+  connectionId: "connection_1",
+  productId: "product_1",
+  idempotencyKey: "8ee6a493-2d85-46e4-b691-d9104e02de56"
+};
+
 async function previewAndExecute(service: BlingFullProductSyncService) {
-  const request = {
-    userId: "user_1",
-    organizationId: "org_1",
-    connectionId: "connection_1",
-    productId: "product_1",
-    idempotencyKey: "8ee6a493-2d85-46e4-b691-d9104e02de56"
-  };
   const preview = await service.preview(request);
   const previous = process.env.BLING_FULL_PRODUCT_SYNC_ENABLED;
   process.env.BLING_FULL_PRODUCT_SYNC_ENABLED = "true";
@@ -187,17 +211,24 @@ async function previewAndExecute(service: BlingFullProductSyncService) {
   }
 }
 
-test("a complete operation performs only allowlisted PATCH, stock POST and verification GET", async () => {
+test("a complete operation uses product PATCH, stock POST, image PATCH and one verification GET", async () => {
   const mocked = dependencies();
   const result = await previewAndExecute(new BlingFullProductSyncService(mocked.deps));
-  assert.equal(result.status, "UPDATED");
+  assert.equal(result.status, "UPDATED_WITH_WARNINGS");
   assert.equal(result.patchRequests, 2);
   assert.equal(result.postRequests, 1);
   assert.equal(result.putRequests, 0);
   assert.equal(result.retries, 0);
   assert.equal(mocked.calls.patch.length, 2);
   assert.equal(mocked.calls.stock.length, 1);
+  assert.equal(mocked.calls.get, 3);
   assert.equal(mocked.calls.record, 1);
+  assert.deepEqual(result.modules.map((item) => item.module), [
+    "PRODUCT_FIELDS",
+    "STOCK",
+    "IMAGES",
+    "VERIFICATION"
+  ]);
 });
 
 for (const flagValue of [undefined, "false", "TRUE", "1"]) {
@@ -209,11 +240,7 @@ for (const flagValue of [undefined, "false", "TRUE", "1"]) {
     try {
       await assert.rejects(
         new BlingFullProductSyncService(mocked.deps).execute({
-          userId: "user_1",
-          organizationId: "org_1",
-          connectionId: "connection_1",
-          productId: "product_1",
-          idempotencyKey: "8ee6a493-2d85-46e4-b691-d9104e02de56",
+          ...request,
           planConfirmation: "not-used"
         }),
         /temporariamente desativada/
@@ -235,6 +262,7 @@ test("a second in-flight click performs zero external writes", async () => {
   assert.equal(result.status, "IN_FLIGHT");
   assert.equal(result.patchRequests, 0);
   assert.equal(result.postRequests, 0);
+  assert.equal(result.putRequests, 0);
   assert.equal(mocked.calls.patch.length, 0);
   assert.equal(mocked.calls.stock.length, 0);
 });
@@ -248,12 +276,11 @@ test("a stock failure records partial completion and does not continue to images
   assert.equal(mocked.calls.patch.length, 1);
   assert.equal(mocked.calls.record, 0);
   assert.equal(mocked.calls.finish, 1);
-  assert.match(result.message, /salvo no W Ecommerce/);
   assert.equal(result.modules.find((item) => item.module === "STOCK")?.status, "FAILED");
   assert.equal(result.modules.find((item) => item.module === "IMAGES")?.status, "NOT_REQUESTED");
 });
 
-test("post-write verification detects a field mismatch", async () => {
+test("post-write verification detects a sent field mismatch", async () => {
   const mocked = dependencies({ divergentAfter: true });
   const result = await previewAndExecute(new BlingFullProductSyncService(mocked.deps));
   assert.equal(result.status, "PARTIAL");
@@ -265,12 +292,35 @@ test("post-write verification detects a field mismatch", async () => {
   );
 });
 
-test("cost uses the official stock field and verifies fornecedor.precoCusto", async () => {
+test("post-write verification detects a protected field change", async () => {
+  const mocked = dependencies({ protectedDivergenceAfter: true });
+  const result = await previewAndExecute(new BlingFullProductSyncService(mocked.deps));
+  assert.equal(result.status, "PARTIAL");
+  assert.ok(result.divergences.includes("protectedFields"));
+  assert.equal(mocked.calls.record, 0);
+});
+
+test("stock writes quantity without price or cost", async () => {
+  const mocked = dependencies();
+  await previewAndExecute(new BlingFullProductSyncService(mocked.deps));
+  assert.deepEqual(mocked.calls.stock[0], {
+    produto: { id: 123456789 },
+    deposito: { id: 7 },
+    operacao: "B",
+    quantidade: 3
+  });
+});
+
+test("module audit metadata is sanitized and contains hashes instead of payloads", async () => {
   const mocked = dependencies();
   const result = await previewAndExecute(new BlingFullProductSyncService(mocked.deps));
-  assert.equal(result.status, "UPDATED");
-  assert.equal(mocked.calls.stock[0]?.custo, 10);
-  assert.equal(result.divergences.includes("cost"), false);
+  const productAudit = result.moduleAudits.find(
+    (item) => item.module === "PRODUCT_FIELDS" && item.method === "PATCH"
+  );
+  assert.equal(productAudit?.httpStatus, 200);
+  assert.equal(productAudit?.attempt, 1);
+  assert.match(productAudit?.payloadHash ?? "", /^[a-f0-9]{64}$/);
+  assert.equal("payload" in (productAudit ?? {}), false);
 });
 
 test("a SKU change preserves the existing mapping identity by externalProductId", async () => {
@@ -281,22 +331,18 @@ test("a SKU change preserves the existing mapping identity by externalProductId"
     remoteAfter: remote(["https://cdn.example.com/a.jpg"], { codigo: "NOVO-01" })
   });
   const result = await previewAndExecute(new BlingFullProductSyncService(mocked.deps));
-  assert.equal(result.status, "UPDATED");
+  assert.equal(result.status, "UPDATED_WITH_WARNINGS");
   assert.equal(mocked.calls.patch[0]?.codigo, "NOVO-01");
   assert.deepEqual(mocked.calls.recordedMappingIds, ["mapping_1"]);
   assert.equal(stableContext.mapping.externalProductId, "123456789");
 });
 
-test("cross-organization access is blocked before any external write", async () => {
+test("cross-organization access is blocked before any external request", async () => {
   const mocked = dependencies({ loadError: new Error("Produto nao encontrado.") });
-  const service = new BlingFullProductSyncService(mocked.deps);
   await assert.rejects(
-    service.preview({
-      userId: "user_1",
-      organizationId: "org_other",
-      connectionId: "connection_1",
-      productId: "product_1",
-      idempotencyKey: "8ee6a493-2d85-46e4-b691-d9104e02de56"
+    new BlingFullProductSyncService(mocked.deps).preview({
+      ...request,
+      organizationId: "org_other"
     }),
     /Produto nao encontrado/
   );
@@ -304,167 +350,81 @@ test("cross-organization access is blocked before any external write", async () 
   assert.equal(mocked.calls.patch.length, 0);
 });
 
-test("a missing mapping is blocked before any external write", async () => {
-  const mocked = dependencies({ loadError: new Error("Este produto nao possui vinculo valido com a conta Bling.") });
+test("a missing mapping is blocked before any external request", async () => {
+  const mocked = dependencies({
+    loadError: new Error("Este produto nao possui vinculo valido com a conta Bling.")
+  });
   await assert.rejects(
-    new BlingFullProductSyncService(mocked.deps).preview({
-      userId: "user_1",
-      organizationId: "org_1",
-      connectionId: "connection_1",
-      productId: "product_1",
-      idempotencyKey: "8ee6a493-2d85-46e4-b691-d9104e02de56"
-    }),
+    new BlingFullProductSyncService(mocked.deps).preview(request),
     /vinculo valido/
   );
-  assert.equal(mocked.calls.patch.length, 0);
+  assert.equal(mocked.calls.get, 0);
 });
 
-test("an invalid connection is blocked before any external write", async () => {
+test("an invalid connection is blocked before any external request", async () => {
   const mocked = dependencies({ loadError: new Error("Reconecte a conta Bling para continuar.") });
   await assert.rejects(
-    new BlingFullProductSyncService(mocked.deps).preview({
-      userId: "user_1",
-      organizationId: "org_1",
-      connectionId: "connection_invalid",
-      productId: "product_1",
-      idempotencyKey: "8ee6a493-2d85-46e4-b691-d9104e02de56"
-    }),
+    new BlingFullProductSyncService(mocked.deps).preview(request),
     /Reconecte/
   );
-  assert.equal(mocked.calls.patch.length, 0);
+  assert.equal(mocked.calls.get, 0);
 });
 
-test("verification ignores omitted fields but protects unknown remote fields", () => {
-  const plan = createBlingFullProductSyncPlan(local({
-    brand: null,
-    sku: null,
-    gtin: null,
-    unit: null,
-    category: null,
-    cost: null,
-    price: null,
-    stock: null,
-    weight: null,
-    grossWeight: null,
-    condition: null,
-    height: null,
-    width: null,
-    depth: null,
-    dimensionUnit: null,
-    description: null,
-    images: []
-  }), {});
-  const before = remote([], { marca: "Marca remota preservada" });
-  const { nome: _sentName, ...protectedSnapshot } = structuredClone(before);
-  void _sentName;
-  const protectedFingerprint = fingerprintBlingFullProductValue(protectedSnapshot);
-  const verified = verifyBlingFullProductSyncPlan(plan, {
-    ...before,
-    nome: "Produto Matrix"
-  }, protectedFingerprint);
-  assert.equal(verified.matches, true);
+test("the nine model gaps are reported per field without a COST warning", async () => {
+  const mocked = dependencies();
+  const preview = await new BlingFullProductSyncService(mocked.deps).preview(request);
+  assert.deepEqual(
+    preview.unsupportedFields.map((item) => item.field),
+    BLING_FULL_PRODUCT_UNSUPPORTED_LOCAL_FIELDS.map((item) => item.field)
+  );
+  assert.equal(preview.unsupportedFields.length, 9);
+  assert.equal(preview.notices.some((item) => /custo|fornecedor/i.test(item)), false);
 });
 
-test("verification detects a change to an unknown protected remote field", () => {
+test("verification accepts normalized numbers, dates, enums and booleans", () => {
   const plan = createBlingFullProductSyncPlan(local({
-    category: null,
-    cost: null,
-    price: null,
-    stock: null,
-    images: []
+    format: "S",
+    type: "P",
+    situation: "I",
+    productionType: "P",
+    expirationDate: "2027-12-31",
+    freeShipping: false,
+    volumes: 1,
+    itemsPerBox: 2,
+    packagingGtin: "17891234567892",
+    images: [],
+    stock: null
   }), {});
   const before = remote();
-  const { nome: _sentName, marca: _sentBrand, codigo: _sentSku, gtin: _sentGtin,
-    unidade: _sentUnit, descricaoComplementar: _sentDescription, pesoLiquido: _sentWeight,
-    pesoBruto: _sentGrossWeight, condicao: _sentCondition, dimensoes: _sentDimensions,
-    ...protectedSnapshot } = structuredClone(before);
-  void _sentName;
-  void _sentBrand;
-  void _sentSku;
-  void _sentGtin;
-  void _sentUnit;
-  void _sentDescription;
-  void _sentWeight;
-  void _sentGrossWeight;
-  void _sentCondition;
-  void _sentDimensions;
+  const sent = new Set(Object.keys(plan.mainPayload));
+  const protectedSnapshot = Object.fromEntries(
+    Object.entries(before).filter(([key]) => !sent.has(key) && key !== "dimensoes")
+  );
   const protectedFingerprint = fingerprintBlingFullProductValue(protectedSnapshot);
   const verified = verifyBlingFullProductSyncPlan(plan, {
-    ...before,
-    unknownProtectedField: "alterado"
+    ...remote([], {
+      preco: "20.0000",
+      pesoLiquido: "1.000",
+      pesoBruto: "1.200",
+      volumes: "1",
+      itensPorCaixa: "2.0",
+      dataValidade: "2027-12-31T00:00:00.000Z",
+      gtinEmbalagem: "17891234567892"
+    }),
+    dimensoes: { altura: "2.000", largura: "3.0", profundidade: "4", unidadeMedida: "1" }
   }, protectedFingerprint);
-  assert.equal(verified.matches, false);
-  assert.ok(verified.divergences.includes("protectedFields"));
+  assert.equal(verified.matches, true, JSON.stringify(verified.divergences));
 });
 
-test("the edit modal saves locally before requesting the external dry-run", () => {
-  const source = readFileSync(path.join(process.cwd(), "components/product-details-modal.tsx"), "utf8");
-  const saveIndex = source.indexOf("savedProduct = await saveProduct");
-  const previewIndex = source.indexOf("const previewResponse = await fetch");
-  assert.ok(saveIndex >= 0);
-  assert.ok(previewIndex > saveIndex);
-  assert.match(source, /if \(!saveResponse\.ok \|\| !savePayload\.data\)[\s\S]*throw new Error/);
-});
-
-test("the new flow contains no PUT, retry or legacy combined operation", () => {
-  const source = readFileSync(path.join(process.cwd(), "lib/services/bling-full-product-sync-service.ts"), "utf8");
-  assert.doesNotMatch(source, /method:\s*"PUT"/);
-  assert.doesNotMatch(source, /NAME_AND_IMAGES/);
-  assert.doesNotMatch(source, /\bretry\b/i);
-  assert.match(source, /requestWithoutRefresh/);
-});
-
-test("external sync recording updates only the existing stable mapping", () => {
-  const source = readFileSync(
-    path.join(process.cwd(), "lib/services/bling-full-product-sync-service.ts"),
-    "utf8"
-  );
-  const start = source.indexOf("async function defaultRecordExternalSync");
-  const end = source.indexOf("const defaultDependencies", start);
-  const implementation = source.slice(start, end);
-  assert.match(implementation, /productExternalMapping\.updateMany/);
-  assert.match(implementation, /externalProductId:\s*input\.context\.mapping\.externalProductId/);
-  assert.doesNotMatch(implementation, /\.create\(/);
-  assert.doesNotMatch(implementation, /externalSku/);
-});
-
-test("missing structure is treated as simple", () => {
+test("missing, null and empty structures are simple while real components are blocked", () => {
   assert.equal(hasMeaningfulProductStructure({}), false);
-});
-
-test("null structure is treated as simple", () => {
   assert.equal(hasMeaningfulProductStructure({ estrutura: null }), false);
-});
-
-test("an empty structure object is treated as simple", () => {
-  assert.equal(hasMeaningfulProductStructure({ estrutura: {} }), false);
-});
-
-test("empty structure strings and components are treated as simple", () => {
-  assert.equal(hasMeaningfulProductStructure({
-    estrutura: {
-      tipoEstoque: "",
-      lancamentoEstoque: "   ",
-      componentes: []
-    }
-  }), false);
-});
-
-test("null and empty component records are ignored", () => {
+  assert.equal(hasMeaningfulProductStructure({ estrutura: { componentes: [] } }), false);
   assert.equal(hasMeaningfulProductStructure({
     estrutura: { componentes: [null, {}, { produto: {} }] }
   }), false);
-});
-
-test("a component with produto.id is meaningful", () => {
   assert.equal(hasMeaningfulProductStructure({
     estrutura: { componentes: [{ produto: { id: 123 } }] }
-  }), true);
-});
-
-test("a component with produto.codigo is meaningful", () => {
-  assert.equal(hasMeaningfulProductStructure({
-    estrutura: { componentes: [{ produto: { codigo: "COMP-1" } }] }
   }), true);
 });
 
@@ -472,52 +432,17 @@ test("a real variation remains blocked", async () => {
   const mocked = dependencies({
     remoteBefore: remote([], { variacoes: [{ id: 1 }] })
   });
-  const preview = await new BlingFullProductSyncService(mocked.deps).preview({
-    userId: "user_1",
-    organizationId: "org_1",
-    connectionId: "connection_1",
-    productId: "product_1",
-    idempotencyKey: "8ee6a493-2d85-46e4-b691-d9104e02de56"
-  });
+  const preview = await new BlingFullProductSyncService(mocked.deps).preview(request);
   assert.equal(preview.status, "BLOCKED");
   assert.match(preview.blockers[0], /variacoes ou composicao/);
 });
 
-test("an explicitly complex remote format remains blocked", async () => {
-  const mocked = dependencies({
-    remoteBefore: remote([], { formato: "E" })
-  });
-  const preview = await new BlingFullProductSyncService(mocked.deps).preview({
-    userId: "user_1",
-    organizationId: "org_1",
-    connectionId: "connection_1",
-    productId: "product_1",
-    idempotencyKey: "8ee6a493-2d85-46e4-b691-d9104e02de56"
-  });
-  assert.equal(preview.status, "BLOCKED");
-  assert.match(preview.blockers[0], /variacoes ou composicao/);
-});
-
-test("a no-op returns UNCHANGED without writes, job reservation or intent audit", async () => {
-  const matchingRemote = remote(["https://cdn.example.com/a.jpg"], {
-    estrutura: {
-      tipoEstoque: "",
-      lancamentoEstoque: "",
-      componentes: []
-    },
-    variacoes: []
-  });
+test("a no-op returns warning-only without intent, job or external write", async () => {
+  const matchingRemote = remote(["https://cdn.example.com/a.jpg"]);
   const mocked = dependencies({ remoteBefore: matchingRemote });
   const service = new BlingFullProductSyncService(mocked.deps);
-  const request = {
-    userId: "user_1",
-    organizationId: "org_1",
-    connectionId: "connection_1",
-    productId: "product_1",
-    idempotencyKey: "8ee6a493-2d85-46e4-b691-d9104e02de56"
-  };
   const preview = await service.preview(request);
-  assert.equal(preview.status, "ALREADY_UP_TO_DATE");
+  assert.equal(preview.status, "UP_TO_DATE_WITH_WARNINGS");
   assert.equal(preview.modules.find((item) => item.module === "PRODUCT_FIELDS")?.status, "NO_CHANGES");
   assert.equal(preview.modules.find((item) => item.module === "STOCK")?.status, "NO_CHANGES");
   assert.equal(preview.modules.find((item) => item.module === "IMAGES")?.status, "NO_CHANGES");
@@ -534,18 +459,52 @@ test("a no-op returns UNCHANGED without writes, job reservation or intent audit"
         intentAudits += 1;
       }
     });
-    assert.equal(result.status, "UNCHANGED");
-    assert.equal(result.patchRequests, 0);
-    assert.equal(result.postRequests, 0);
-    assert.equal(result.verificationGetExecuted, false);
+    assert.equal(result.status, "UP_TO_DATE_WITH_WARNINGS");
+    assert.equal(result.patchRequests + result.postRequests + result.putRequests, 0);
   } finally {
     if (previous === undefined) delete process.env.BLING_FULL_PRODUCT_SYNC_ENABLED;
     else process.env.BLING_FULL_PRODUCT_SYNC_ENABLED = previous;
   }
-  assert.equal(mocked.calls.patch.length, 0);
-  assert.equal(mocked.calls.stock.length, 0);
+  assert.equal(intentAudits, 0);
   assert.equal(mocked.calls.reserve, 0);
   assert.equal(mocked.calls.finish, 0);
   assert.equal(mocked.calls.record, 0);
-  assert.equal(intentAudits, 0);
+});
+
+test("the editor saves locally before requesting the external dry-run", () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "components/product-details-modal.tsx"),
+    "utf8"
+  );
+  const saveIndex = source.indexOf("savedProduct = await saveProduct");
+  const previewIndex = source.indexOf("const previewResponse = await fetch");
+  assert.ok(saveIndex >= 0);
+  assert.ok(previewIndex > saveIndex);
+  assert.match(source, /if \(!saveResponse\.ok \|\| !savePayload\.data\)[\s\S]*throw new Error/);
+});
+
+test("runtime allows PATCH and stock POST with zero PUT, supplier endpoint, refresh or retry", () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-full-product-sync-service.ts"),
+    "utf8"
+  );
+  assert.doesNotMatch(source, /produtos\/fornecedores/);
+  assert.doesNotMatch(source, /precoCusto/);
+  assert.doesNotMatch(source, /method:\s*["']PUT["']/);
+  assert.doesNotMatch(source, /requestReadOnly/);
+  assert.match(source, /requestWithoutRefresh/);
+  assert.match(source, /retries:\s*0/);
+});
+
+test("external sync recording updates only the existing stable mapping", () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-full-product-sync-service.ts"),
+    "utf8"
+  );
+  const start = source.indexOf("async function defaultRecordExternalSync");
+  const end = source.indexOf("const defaultDependencies", start);
+  const implementation = source.slice(start, end);
+  assert.match(implementation, /productExternalMapping\.updateMany/);
+  assert.match(implementation, /externalProductId:\s*input\.context\.mapping\.externalProductId/);
+  assert.doesNotMatch(implementation, /\.create\(/);
 });

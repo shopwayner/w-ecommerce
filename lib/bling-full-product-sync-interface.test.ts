@@ -59,10 +59,14 @@ test("the no-op preview is explicit and cannot enable the final command", () => 
     path.join(process.cwd(), "components/bling-full-product-sync-modal.tsx"),
     "utf8"
   );
-  assert.match(source, /preview\.status === "READY"/);
+  assert.match(source, /\["READY", "READY_TO_SYNC_WITH_WARNINGS"\]\.includes\(preview\.status\)/);
   assert.match(source, /item\.status === "NO_CHANGES"/);
+  assert.match(source, /preview\.unsupportedFields/);
+  assert.match(source, /Campos nao suportados/);
   assert.match(source, /Este produto ja esta atualizado no Bling\./);
   assert.match(source, /Nenhuma alteracao sera enviada\./);
+  assert.doesNotMatch(source, /Custo/);
+  assert.doesNotMatch(source, /Fornecedor/);
 });
 
 test("the route persists the dangerous intent only after the service confirms a real change", () => {
@@ -72,7 +76,7 @@ test("the route persists the dangerous intent only after the service confirms a 
   );
   const executeStart = source.indexOf("const result = await blingFullProductSyncService.execute");
   const intentStart = source.indexOf("onIntent:", executeStart);
-  const unchangedReturn = source.indexOf('if (result.status === "UNCHANGED")', intentStart);
+  const unchangedReturn = source.indexOf('if (result.status === "UNCHANGED" || result.status === "UP_TO_DATE_WITH_WARNINGS")', intentStart);
   const resultAudit = source.indexOf("await createAuditLog", unchangedReturn);
   assert.ok(executeStart >= 0);
   assert.ok(intentStart > executeStart);

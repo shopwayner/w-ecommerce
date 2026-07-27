@@ -102,7 +102,7 @@ export async function POST(
       productId,
       idempotencyKey: parsed.data.idempotencyKey,
       planConfirmation: parsed.data.planConfirmation,
-      onIntent: async () => {
+      onIntent: async ({ moduleIntents }) => {
         await logDangerousAction({
           authContext: auth.context,
           action: "BLING_FULL_PRODUCT_SYNC_INTENT",
@@ -118,7 +118,8 @@ export async function POST(
             operation: "FULL_PRODUCT_SYNC",
             connectionId: parsed.data.connectionId,
             correlationId,
-            idempotencyRef
+            idempotencyRef,
+            moduleIntents
           },
           request,
           requirePersist: true
@@ -126,7 +127,7 @@ export async function POST(
       }
     });
 
-    if (result.status === "UNCHANGED") {
+    if (result.status === "UNCHANGED" || result.status === "UP_TO_DATE_WITH_WARNINGS") {
       return NextResponse.json({ data: result });
     }
 
@@ -148,6 +149,7 @@ export async function POST(
         idempotencyRef,
         resultStatus: result.status,
         modules: result.modules,
+        moduleAudits: result.moduleAudits,
         patchRequests: result.patchRequests,
         postRequests: result.postRequests,
         putRequests: result.putRequests,
