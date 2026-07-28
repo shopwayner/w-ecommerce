@@ -8,6 +8,7 @@ import {
   createBlingFullProductSyncPlan,
   fingerprintBlingFullProductValue,
   normalizeBlingFullProductImages,
+  normalizeBlingFullProductNameForComparison,
   type BlingFullProductLocalValues,
   type BlingFullProductSyncModule,
   type BlingFullProductSyncPlanningStatus,
@@ -431,6 +432,13 @@ export function verifyBlingFullProductSyncPlan(
       if (actual !== expected) divergences.push(field);
     } else if (field === "expirationDate") {
       if (String(actual ?? "").slice(0, 10) !== expected) divergences.push(field);
+    } else if (field === "name") {
+      if (
+        normalizeBlingFullProductNameForComparison(actual)
+        !== normalizeBlingFullProductNameForComparison(expected)
+      ) {
+        divergences.push(field);
+      }
     } else if (normalizeComparableText(actual) !== normalizeComparableText(expected)) {
       divergences.push(field);
     }

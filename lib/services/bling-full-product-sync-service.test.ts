@@ -495,6 +495,121 @@ test("a no-op returns unchanged without intent, job or external write", async ()
   assert.equal(mocked.calls.record, 0);
 });
 
+test("an identical product name remains unchanged", () => {
+  const plan = createBlingFullProductSyncPlan(local(), {
+    remoteProduct: remote(["https://cdn.example.com/a.jpg"]),
+    remoteImageUrls: ["https://cdn.example.com/a.jpg"]
+  });
+
+  assert.equal(plan.moduleStatuses.PRODUCT_FIELDS, "NO_CHANGES");
+  assert.equal("nome" in plan.mainPayload, false);
+});
+
+test("product name comparison preserves capitalization and emits only nome", () => {
+  const name = "Capacete ASX City Start Brilho Preto/Turq/Rosa 60";
+  const plan = createBlingFullProductSyncPlan(local({ name }), {
+    remoteProduct: remote(["https://cdn.example.com/a.jpg"], {
+      nome: "CAPACETE ASX CITY START BRILHO PRETO/TURQ/ROSA 60"
+    }),
+    remoteImageUrls: ["https://cdn.example.com/a.jpg"]
+  });
+
+  assert.equal(plan.moduleStatuses.PRODUCT_FIELDS, "PENDING");
+  assert.deepEqual(plan.mainPayload, { nome: name });
+  assert.equal(plan.moduleStatuses.STOCK, "NO_CHANGES");
+  assert.equal(plan.moduleStatuses.IMAGES, "NO_CHANGES");
+});
+
+test("external whitespace around a product name remains equivalent", () => {
+  const plan = createBlingFullProductSyncPlan(local(), {
+    remoteProduct: remote(["https://cdn.example.com/a.jpg"], {
+      nome: "  Produto Matrix  "
+    }),
+    remoteImageUrls: ["https://cdn.example.com/a.jpg"]
+  });
+
+  assert.equal(plan.moduleStatuses.PRODUCT_FIELDS, "NO_CHANGES");
+  assert.equal("nome" in plan.mainPayload, false);
+});
+
+for (const [label, localName, remoteName] of [
+  ["accent", "Capacete \u00c1SX City", "Capacete ASX City"],
+  ["punctuation", "Capacete ASX City!", "Capacete ASX City"],
+  ["slash", "Capacete Preto/Turquesa", "Capacete Preto Turquesa"]
+] as const) {
+  test(`a product name ${label} difference remains pending`, () => {
+    const plan = createBlingFullProductSyncPlan(local({ name: localName }), {
+      remoteProduct: remote(["https://cdn.example.com/a.jpg"], { nome: remoteName }),
+      remoteImageUrls: ["https://cdn.example.com/a.jpg"]
+    });
+
+    assert.equal(plan.moduleStatuses.PRODUCT_FIELDS, "PENDING");
+    assert.deepEqual(plan.mainPayload, { nome: localName });
+  });
+}
+
+test("post-write verification rejects a capitalization mismatch in nome", () => {
+  const name = "Capacete ASX City";
+  const remoteBefore = remote(["https://cdn.example.com/a.jpg"], {
+    nome: "CAPACETE ASX CITY"
+  });
+  const plan = createBlingFullProductSyncPlan(local({ name }), {
+    remoteProduct: remoteBefore,
+    remoteImageUrls: ["https://cdn.example.com/a.jpg"]
+  });
+  const protectedRemote: Record<string, unknown> = structuredClone(remoteBefore);
+  delete protectedRemote.nome;
+
+  const verified = verifyBlingFullProductSyncPlan(
+    plan,
+    remoteBefore,
+    fingerprintBlingFullProductValue(protectedRemote)
+  );
+
+  assert.equal(verified.matches, false);
+  assert.deepEqual(verified.divergences, ["name"]);
+});
+
+test("unit and official enum codes keep their existing normalization", () => {
+  const plan = createBlingFullProductSyncPlan(local({
+    format: "S",
+    type: "P",
+    situation: "I",
+    productionType: "P"
+  }), {
+    remoteProduct: remote(["https://cdn.example.com/a.jpg"], {
+      unidade: "un",
+      formato: "s",
+      tipo: "p",
+      situacao: "i",
+      tipoProducao: "p"
+    }),
+    remoteImageUrls: ["https://cdn.example.com/a.jpg"]
+  });
+
+  assert.equal(plan.moduleStatuses.PRODUCT_FIELDS, "NO_CHANGES");
+  for (const field of ["unidade", "formato", "tipo", "situacao", "tipoProducao"]) {
+    assert.equal(field in plan.mainPayload, false);
+  }
+});
+
+test("a capitalization-only dry-run plans nome without executing PATCH", async () => {
+  const name = "Capacete ASX City Start Brilho Preto/Turq/Rosa 60";
+  const mocked = dependencies({
+    context: context({ name }),
+    remoteBefore: remote(["https://cdn.example.com/a.jpg"], {
+      nome: "CAPACETE ASX CITY START BRILHO PRETO/TURQ/ROSA 60"
+    })
+  });
+
+  const preview = await new BlingFullProductSyncService(mocked.deps).preview(request);
+
+  assert.equal(preview.modules.find((item) => item.module === "PRODUCT_FIELDS")?.status, "PENDING");
+  assert.deepEqual(preview.payloads.productFields, { nome: name });
+  assert.equal(mocked.calls.patch.length, 0);
+  assert.equal(mocked.calls.stock.length, 0);
+});
+
 test("the editor saves locally before requesting the external dry-run", () => {
   const source = readFileSync(
     path.join(process.cwd(), "components/product-details-modal.tsx"),

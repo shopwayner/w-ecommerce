@@ -223,6 +223,12 @@ function comparableText(value: unknown) {
     .toLowerCase() ?? "";
 }
 
+export function normalizeBlingFullProductNameForComparison(value: unknown) {
+  return typeof value === "string" || typeof value === "number"
+    ? String(value).trim()
+    : "";
+}
+
 function comparableDate(value: unknown) {
   if (typeof value !== "string") return "";
   return value.trim().slice(0, 10);
@@ -233,6 +239,10 @@ function mainFieldMatchesRemote(
   expected: unknown,
   remote: Record<string, unknown>
 ) {
+  if (field === "nome") {
+    return normalizeBlingFullProductNameForComparison(remote[field])
+      === normalizeBlingFullProductNameForComparison(expected);
+  }
   if (field === "dimensoes") {
     const expectedDimensions = record(expected);
     const remoteDimensions = record(remote.dimensoes);
