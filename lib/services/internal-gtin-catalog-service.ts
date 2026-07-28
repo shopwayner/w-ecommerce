@@ -1,4 +1,6 @@
 import { Prisma } from "@prisma/client";
+import { assertGlobalGtinAdminContext } from "@/lib/auth/global-gtin-admin";
+import type { TenantContext } from "@/lib/auth/server";
 import { prisma } from "@/lib/prisma";
 import { sanitizeLogPayload } from "@/lib/utils";
 
@@ -471,39 +473,39 @@ export async function listCatalogEntries(input: { query?: string; take?: number 
   });
 }
 
-export async function createCatalogEntry(input: CatalogEntryInput & { organizationId?: string; userId?: string }) {
+export async function createCatalogEntry(input: CatalogEntryInput & { authContext: TenantContext }) {
+  assertGlobalGtinAdminContext(input.authContext);
+
   const entry = await prisma.internalGtinCatalog.create({
     data: catalogData(input)
   });
 
-  if (input.organizationId) {
-    await audit({
-      organizationId: input.organizationId,
-      userId: input.userId,
-      action: "INTERNAL_GTIN_CATALOG_CREATE",
-      entityId: entry.id,
-      metadata: { normalizedGtin: entry.normalizedGtin, approved: entry.approved }
-    });
-  }
+  await audit({
+    organizationId: input.authContext.organizationId,
+    userId: input.authContext.user.id,
+    action: "INTERNAL_GTIN_CATALOG_CREATE",
+    entityId: entry.id,
+    metadata: { normalizedGtin: entry.normalizedGtin, approved: entry.approved }
+  });
 
   return serializeCatalogEntry(entry);
 }
 
-export async function updateCatalogEntry(id: string, input: CatalogEntryInput & { organizationId?: string; userId?: string }) {
+export async function updateCatalogEntry(id: string, input: CatalogEntryInput & { authContext: TenantContext }) {
+  assertGlobalGtinAdminContext(input.authContext);
+
   const entry = await prisma.internalGtinCatalog.update({
     where: { id },
     data: catalogData(input)
   });
 
-  if (input.organizationId) {
-    await audit({
-      organizationId: input.organizationId,
-      userId: input.userId,
-      action: "INTERNAL_GTIN_CATALOG_UPDATE",
-      entityId: entry.id,
-      metadata: { normalizedGtin: entry.normalizedGtin, approved: entry.approved }
-    });
-  }
+  await audit({
+    organizationId: input.authContext.organizationId,
+    userId: input.authContext.user.id,
+    action: "INTERNAL_GTIN_CATALOG_UPDATE",
+    entityId: entry.id,
+    metadata: { normalizedGtin: entry.normalizedGtin, approved: entry.approved }
+  });
 
   return serializeCatalogEntry(entry);
 }
@@ -600,10 +602,11 @@ export async function checkProductAgainstInternalGtinCatalog(input: { organizati
 }
 
 export async function syncInternalGtinCatalogFromProducts(input: {
-  organizationId: string;
-  userId?: string | null;
+  authContext: TenantContext;
   options: SyncCatalogFromProductsOptions;
 }) {
+  assertGlobalGtinAdminContext(input.authContext);
+
   const limit = positiveInt(input.options.limit, input.options.mode === "selected" ? 100 : 100, 500);
   const productIds = Array.from(new Set((input.options.productIds ?? []).map((id) => id.trim()).filter(Boolean))).slice(0, limit);
   if (input.options.mode === "selected" && !productIds.length) {
@@ -612,7 +615,7 @@ export async function syncInternalGtinCatalogFromProducts(input: {
 
   const products = await prisma.product.findMany({
     where: {
-      organizationId: input.organizationId,
+      organizationId: input.authContext.organizationId,
       ...(input.options.mode === "selected" ? { id: { in: productIds } } : {}),
       NOT: [{ ean: null }, { ean: "" }]
     },
@@ -759,8 +762,8 @@ export async function syncInternalGtinCatalogFromProducts(input: {
   };
 
   await audit({
-    organizationId: input.organizationId,
-    userId: input.userId,
+    organizationId: input.authContext.organizationId,
+    userId: input.authContext.user.id,
     action: "INTERNAL_GTIN_CATALOG_SYNC_FROM_PRODUCTS",
     metadata: {
       mode: input.options.mode,
@@ -831,7 +834,9 @@ export async function previewGlobalGtinCleanup() {
   };
 }
 
-export async function applyGlobalGtinCleanup(input: { organizationId: string; userId?: string | null }) {
+export async function applyGlobalGtinCleanup(input: { authContext: TenantContext }) {
+  assertGlobalGtinAdminContext(input.authContext);
+
   const before = await previewGlobalGtinCleanup();
   const removable = await prisma.internalGtinCatalog.findMany({
     select: { id: true, imageUrl: true, imagesJson: true }
@@ -844,8 +849,8 @@ export async function applyGlobalGtinCleanup(input: { organizationId: string; us
   const after = await previewGlobalGtinCleanup();
 
   await audit({
-    organizationId: input.organizationId,
-    userId: input.userId,
+    organizationId: input.authContext.organizationId,
+    userId: input.authContext.user.id,
     action: "GTIN_GLOBAL_CATALOG_CLEANUP",
     metadata: {
       mode: "KEEP_ONLY_WITH_IMAGE",

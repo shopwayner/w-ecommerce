@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireApiAuth } from "@/lib/auth/api";
+import { requireApiGlobalGtinAdmin } from "@/lib/auth/api";
 import { ConfirmationError, requireConfirmation } from "@/lib/security/confirmation";
 import { createCatalogEntry, findByGtin, isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { logDangerousAction } from "@/lib/services/audit-log-service";
@@ -19,15 +19,11 @@ function optionalNumber(value: unknown) {
 }
 
 export async function POST(request: Request) {
-  const auth = await requireApiAuth("products:write");
+  const auth = await requireApiGlobalGtinAdmin();
   if (!auth.ok) return auth.response;
 
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
   const normalizedGtin = normalizeGtin(optionalText(body.gtin));
-
-  if (auth.context.role !== "OWNER") {
-    return NextResponse.json({ error: "Somente conta MASTER/OWNER pode cadastrar GTIN global." }, { status: 403 });
-  }
 
   try {
     requireConfirmation(body.confirm, confirmationText);
@@ -88,8 +84,7 @@ export async function POST(request: Request) {
     source: "MANUAL",
     confidenceScore: imageUrl ? 80 : 65,
     approved: true,
-    organizationId: auth.context.organizationId,
-    userId: auth.context.user.id
+    authContext: auth.context
   });
 
   await logDangerousAction({

@@ -1,4 +1,6 @@
 import { Prisma } from "@prisma/client";
+import { assertGlobalGtinAdminContext } from "@/lib/auth/global-gtin-admin";
+import type { TenantContext } from "@/lib/auth/server";
 import { parseDecimalPrice } from "@/lib/decimal-price";
 import { prisma } from "@/lib/prisma";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
@@ -543,10 +545,11 @@ function applyAcceptedConflictFields(
 export async function applyGtinImportFromCsv(input: {
   csv: string;
   confirm: string;
-  organizationId: string;
-  userId?: string | null;
+  authContext: TenantContext;
   conflictResolutions?: ConflictResolutionInput[];
 }) {
+  assertGlobalGtinAdminContext(input.authContext);
+
   if (input.confirm !== applyConfirmationText) {
     throw new Error(`Confirmacao obrigatoria: ${applyConfirmationText}`);
   }
@@ -650,8 +653,8 @@ export async function applyGtinImportFromCsv(input: {
 
   await prisma.auditLog.create({
     data: {
-      organizationId: input.organizationId,
-      userId: input.userId ?? null,
+      organizationId: input.authContext.organizationId,
+      userId: input.authContext.user.id,
       action: "INTERNAL_GTIN_IMPORT_APPLY",
       entity: "InternalGtinCatalog",
       metadata: sanitizeLogPayload({

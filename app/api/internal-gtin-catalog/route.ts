@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
-import { requireApiAuth } from "@/lib/auth/api";
+import { requireApiAuth, requireApiGlobalGtinAdmin } from "@/lib/auth/api";
 import { createCatalogEntry, findByGtin, listCatalogEntries } from "@/lib/services/internal-gtin-catalog-service";
 import { internalGtinCatalogSchema } from "@/lib/validation";
 
@@ -20,10 +20,7 @@ function serializeListEntry(entry: Awaited<ReturnType<typeof listCatalogEntries>
     height: entry.height?.toString() ?? null,
     width: entry.width?.toString() ?? null,
     depth: entry.depth?.toString() ?? null,
-    attributesJson: entry.attributesJson,
     imagesJson: entry.imagesJson,
-    source: entry.source,
-    sourceUrl: entry.sourceUrl,
     confidenceScore: entry.confidenceScore,
     approved: entry.approved,
     createdAt: entry.createdAt,
@@ -48,12 +45,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const auth = await requireApiAuth("settings:write");
+  const auth = await requireApiGlobalGtinAdmin();
   if (!auth.ok) return auth.response;
-
-  if (auth.context.role !== "OWNER") {
-    return NextResponse.json({ error: "Somente conta MASTER/OWNER pode cadastrar GTIN global." }, { status: 403 });
-  }
 
   const parsed = internalGtinCatalogSchema.safeParse(await request.json());
   if (!parsed.success) {
@@ -63,8 +56,7 @@ export async function POST(request: Request) {
   try {
     const entry = await createCatalogEntry({
       ...parsed.data,
-      organizationId: auth.context.organizationId,
-      userId: auth.context.user.id
+      authContext: auth.context
     });
     return NextResponse.json({ data: entry, status: "created" }, { status: 201 });
   } catch (error) {

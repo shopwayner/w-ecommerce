@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireApiAuth } from "@/lib/auth/api";
+import { requireApiGlobalGtinAdmin } from "@/lib/auth/api";
 import { ConfirmationError, requireConfirmation } from "@/lib/security/confirmation";
 import { applyGlobalGtinCleanup } from "@/lib/services/internal-gtin-catalog-service";
 import { logDangerousAction } from "@/lib/services/audit-log-service";
@@ -8,14 +8,10 @@ const confirmationText = "DELETE_GTINS_WITHOUT_IMAGE_FROM_GLOBAL_CATALOG";
 const cleanupMode = "KEEP_ONLY_WITH_IMAGE";
 
 export async function POST(request: Request) {
-  const auth = await requireApiAuth("products:write");
+  const auth = await requireApiGlobalGtinAdmin();
   if (!auth.ok) return auth.response;
 
   const body = (await request.json().catch(() => ({}))) as { mode?: unknown; confirm?: unknown };
-
-  if (auth.context.role !== "OWNER") {
-    return NextResponse.json({ error: "Somente conta MASTER/OWNER pode limpar o banco GTIN global." }, { status: 403 });
-  }
 
   if (body.mode !== cleanupMode) {
     return NextResponse.json({ error: "Modo de limpeza invalido.", requiredMode: cleanupMode }, { status: 400 });
@@ -56,8 +52,7 @@ export async function POST(request: Request) {
   }
 
   const report = await applyGlobalGtinCleanup({
-    organizationId: auth.context.organizationId,
-    userId: auth.context.user.id
+    authContext: auth.context
   });
 
   await logDangerousAction({

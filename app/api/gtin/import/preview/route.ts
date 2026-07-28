@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { requireApiAuth } from "@/lib/auth/api";
+import { requireApiGlobalGtinAdmin } from "@/lib/auth/api";
 import { previewGtinImportFromCsv } from "@/lib/services/gtin-import-service";
 
 export async function POST(request: Request) {
-  const auth = await requireApiAuth("products:read");
+  const auth = await requireApiGlobalGtinAdmin();
   if (!auth.ok) return auth.response;
 
   const formData = await request.formData().catch(() => null);

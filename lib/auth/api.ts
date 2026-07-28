@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireGlobalGtinAdmin } from "@/lib/auth/global-gtin-admin";
 import { AuthError, getTenantContext, requirePermission, type TenantContext } from "@/lib/auth/server";
 import type { PermissionAction } from "@/lib/auth/permissions";
 
@@ -13,6 +14,24 @@ export async function requireApiAuth(action?: PermissionAction): Promise<ApiAuth
       return {
         ok: false,
         response: NextResponse.json({ error: error.status === 403 ? "Permissao insuficiente" : "Nao autenticado" }, { status: error.status })
+      };
+    }
+
+    return { ok: false, response: NextResponse.json({ error: "Erro interno" }, { status: 500 }) };
+  }
+}
+
+export async function requireApiGlobalGtinAdmin(): Promise<ApiAuthResult> {
+  try {
+    return { ok: true, context: await requireGlobalGtinAdmin() };
+  } catch (error) {
+    if (error instanceof AuthError) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          { error: error.status === 403 ? "Permissao insuficiente" : "Nao autenticado" },
+          { status: error.status }
+        )
       };
     }
 

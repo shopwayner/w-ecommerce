@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
+import { isGlobalGtinAdminContext } from "@/lib/auth/global-gtin-admin";
 import { findByGtin, isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 
 function imageUrlsFromJson(value: unknown) {
@@ -42,11 +43,11 @@ function serializeFoundEntry(entry: NonNullable<Awaited<ReturnType<typeof findBy
     width: entry.width?.toString() ?? null,
     depth: entry.depth?.toString() ?? null,
     imageUrls: allImageUrls,
-    attributes: entry.attributesJson,
+    attributes: null,
     confidenceScore: entry.confidenceScore,
     approved: entry.approved,
     source: "INTERNAL_GTIN_CATALOG",
-    catalogSource: entry.source,
+    catalogSource: null,
     lastUpdatedAt: entry.updatedAt
   };
 }
@@ -80,7 +81,7 @@ export async function GET(request: Request) {
   return NextResponse.json({
     ...serializeFoundEntry(entry),
     permissions: {
-      canEditGlobalGtin: auth.context.role === "OWNER"
+      canEditGlobalGtin: isGlobalGtinAdminContext(auth.context)
     }
   });
 }

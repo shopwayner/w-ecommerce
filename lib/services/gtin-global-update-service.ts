@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
-import { requireApiAuth } from "@/lib/auth/api";
+import { requireApiGlobalGtinAdmin } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
 import { ConfirmationError, requireConfirmation } from "@/lib/security/confirmation";
 import { logDangerousAction } from "@/lib/services/audit-log-service";
@@ -78,28 +78,10 @@ function patchBodyToCatalogInput(body: Record<string, unknown>, existing: NonNul
 }
 
 export async function updateGlobalGtinRecord(request: Request, id: string, route: string) {
-  const auth = await requireApiAuth("products:read");
+  const auth = await requireApiGlobalGtinAdmin();
   if (!auth.ok) return auth.response;
 
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-
-  if (auth.context.role !== "OWNER") {
-    await logDangerousAction({
-      authContext: auth.context,
-      action: "GTIN_GLOBAL_RECORD_UPDATE",
-      entityType: "InternalGtinCatalog",
-      entityId: id,
-      route,
-      method: "PATCH",
-      confirmation: body.confirm,
-      status: "BLOCKED",
-      riskLevel: "HIGH",
-      summary: "Edicao de GTIN global bloqueada para usuario nao OWNER.",
-      metadata: { externalWrite: false, productWrite: false, reason: "OWNER_REQUIRED" },
-      request
-    });
-    return NextResponse.json({ error: "Somente conta MASTER/OWNER pode editar o banco GTIN global." }, { status: 403 });
-  }
 
   try {
     requireConfirmation(body.confirm, confirmationText);
@@ -140,8 +122,7 @@ export async function updateGlobalGtinRecord(request: Request, id: string, route
   try {
     const entry = await updateCatalogEntry(id, {
       ...parsed.data,
-      organizationId: auth.context.organizationId,
-      userId: auth.context.user.id
+      authContext: auth.context
     });
     await logDangerousAction({
       authContext: auth.context,

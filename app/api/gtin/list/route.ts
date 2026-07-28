@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
+import { isGlobalGtinAdminContext } from "@/lib/auth/global-gtin-admin";
 import { prisma } from "@/lib/prisma";
 
 function imageUrlsFromJson(value: unknown) {
@@ -105,7 +106,7 @@ export async function GET(request: Request) {
       pages: Math.max(Math.ceil(total / limit), 1)
     },
     permissions: {
-      canEditGlobalGtin: auth.context.role === "OWNER"
+      canEditGlobalGtin: isGlobalGtinAdminContext(auth.context)
     },
     readOnly: true,
     externalLookup: false

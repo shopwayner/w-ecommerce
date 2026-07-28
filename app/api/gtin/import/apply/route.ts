@@ -1,15 +1,11 @@
 import { NextResponse } from "next/server";
-import { requireApiAuth } from "@/lib/auth/api";
+import { requireApiGlobalGtinAdmin } from "@/lib/auth/api";
 import { logDangerousAction } from "@/lib/services/audit-log-service";
 import { applyGtinImportFromCsv } from "@/lib/services/gtin-import-service";
 
 export async function POST(request: Request) {
-  const auth = await requireApiAuth("products:write");
+  const auth = await requireApiGlobalGtinAdmin();
   if (!auth.ok) return auth.response;
-
-  if (auth.context.role !== "OWNER") {
-    return NextResponse.json({ error: "Somente conta MASTER/OWNER pode importar registros no banco GTIN global." }, { status: 403 });
-  }
 
   const formData = await request.formData().catch(() => null);
   const file = formData?.get("file");
@@ -27,8 +23,7 @@ export async function POST(request: Request) {
     const report = await applyGtinImportFromCsv({
       csv: await file.text(),
       confirm: typeof confirm === "string" ? confirm : "",
-      organizationId: auth.context.organizationId,
-      userId: auth.context.user.id,
+      authContext: auth.context,
       conflictResolutions: Array.isArray(conflictResolutions) ? conflictResolutions : undefined
     });
     await logDangerousAction({
