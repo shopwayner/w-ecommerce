@@ -260,8 +260,8 @@ test("the photo endpoint is organization-scoped, read-only and creates no local 
 
 test("applying search photos changes modal state only and persistence stays in the main save action", () => {
   const source = readFileSync(new URL("../components/product-details-modal.tsx", import.meta.url), "utf8");
-  const applyStart = source.indexOf("function applyMercadoLivrePhotos");
-  const applyEnd = source.indexOf("function beginEditing", applyStart);
+  const applyStart = source.indexOf("const applyMercadoLivrePhotos = useCallback");
+  const applyEnd = source.indexOf("const beginEditing = useCallback", applyStart);
   const applySource = source.slice(applyStart, applyEnd);
   const saveStart = source.indexOf("async function confirmSave");
   const saveEnd = source.indexOf("return (", saveStart);

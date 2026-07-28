@@ -338,7 +338,10 @@ test("the modal renders the same field contract in view and edit without a separ
   assert.match(source, /field\.options\.map/);
   assert.match(source, /sm:grid-cols-2 xl:grid-cols-3/);
   assert.match(source, /formFromProduct\(currentProduct\)/);
-  assert.match(source, /setForm\(formFromProduct\(currentProduct\)\)/);
+  assert.match(source, /const nextForm = formFromProduct\(currentProduct\)/);
+  assert.match(source, /setForm\(nextForm\)/);
+  assert.match(source, /dirtyFields\.size > 0/);
+  assert.doesNotMatch(source, /JSON\.stringify\(form\)/);
   assert.doesNotMatch(source, /NEXT_PUBLIC.*BLING|requestWithoutRefresh/);
 });
 

@@ -1,6 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject
+} from "react";
 import Image from "next/image";
 import {
   AlertTriangle,
@@ -228,6 +237,40 @@ const productionTypeLabels: Record<string, string> = {
   THIRD_PARTY: "Terceiros"
 };
 
+const productDetailsCardClass = "rounded-lg border border-matrix-border bg-matrix-panel2/65 p-3";
+const productDetailsInputClass = "mt-2 h-10 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 text-sm font-semibold text-matrix-fg outline-none transition focus:border-matrix-gold/70 focus:ring-2 focus:ring-matrix-gold/20";
+
+const productDetailsIcons: Record<ProductDetailsFieldId, typeof Package> = {
+  name: Package,
+  brand: Factory,
+  sku: Tag,
+  ean: Barcode,
+  unit: ClipboardList,
+  category: Folder,
+  origin: Globe2,
+  blingStatus: ShieldCheck,
+  format: Package,
+  productType: Tag,
+  commercialStatus: ShieldCheck,
+  costPrice: DollarSign,
+  salePrice: Tag,
+  stock: Box,
+  weight: Scale,
+  grossWeight: Scale,
+  condition: ShieldCheck,
+  height: Ruler,
+  width: Ruler,
+  depth: Ruler,
+  productionType: Factory,
+  expirationDate: CalendarDays,
+  freeShipping: Globe2,
+  volumes: Box,
+  itemsPerBox: Package,
+  dimensionUnit: Ruler,
+  packagingGtin: Barcode,
+  updatedAt: CalendarDays
+};
+
 const dimensionUnitLabels: Record<string, string> = {
   METER: "Metro",
   CENTIMETER: "Centimetro",
@@ -300,6 +343,338 @@ function getBlingStatusLabel(status: string | null | undefined) {
   return "Status do Bling nao confirmado";
 }
 
+const ProductNameEditor = memo(forwardRef<HTMLInputElement, {
+  disabled: boolean;
+  initialValue: string;
+  onDraftChange: (value: string) => void;
+  resetKey: number;
+}>(function ProductNameEditor({
+  disabled,
+  initialValue,
+  onDraftChange,
+  resetKey
+}, ref) {
+  const [value, setValue] = useState(initialValue);
+
+  useEffect(() => {
+    setValue(initialValue);
+  }, [initialValue, resetKey]);
+
+  return (
+    <>
+      <input
+        className={productDetailsInputClass}
+        disabled={disabled}
+        id="product-details-name"
+        maxLength={PRODUCT_DETAILS_NAME_MAX_LENGTH}
+        onChange={(event) => {
+          const nextValue = event.target.value;
+          setValue(nextValue);
+          onDraftChange(nextValue);
+        }}
+        ref={ref}
+        type="text"
+        value={value}
+      />
+      <span className={`mt-1 block text-right text-xs ${value.length >= 55 ? "text-matrix-goldDark" : "text-matrix-muted"}`}>
+        {value.length}/{PRODUCT_DETAILS_NAME_MAX_LENGTH}
+      </span>
+    </>
+  );
+}));
+
+const ProductTitleAiTrigger = memo(function ProductTitleAiTrigger({
+  disabled,
+  loading,
+  onClick
+}: {
+  disabled: boolean;
+  loading: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <span className="group/title-ai relative inline-flex shrink-0">
+      <button
+        aria-describedby="product-title-ai-tooltip"
+        aria-label="Melhorar título com IA"
+        className="inline-flex h-8 min-w-[3.5rem] shrink-0 items-center justify-center rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/25 px-2.5 text-xs font-bold text-matrix-goldDark transition hover:border-matrix-gold/70 hover:bg-matrix-goldSoft/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold disabled:cursor-not-allowed disabled:opacity-55"
+        disabled={disabled}
+        onClick={onClick}
+        title="Melhorar título com IA"
+        type="button"
+      >
+        {loading ? "✦ IA..." : "✦ IA"}
+      </button>
+      <span
+        className="pointer-events-none invisible absolute right-0 top-full z-30 mt-2 w-max max-w-[min(15rem,calc(100vw-2rem))] rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-medium text-matrix-fg opacity-0 shadow-glow transition group-hover/title-ai:visible group-hover/title-ai:opacity-100 group-focus-within/title-ai:visible group-focus-within/title-ai:opacity-100"
+        id="product-title-ai-tooltip"
+        role="tooltip"
+      >
+        Melhorar título com IA
+      </span>
+    </span>
+  );
+});
+
+const ProductDetailsFieldsGrid = memo(function ProductDetailsFieldsGrid({
+  aiDisabled,
+  aiLoading,
+  canEditProduct,
+  detailValues,
+  editing,
+  form,
+  nameInputRef,
+  nameResetKey,
+  onFieldChange,
+  onNameDraftChange,
+  onOpenTitleAi
+}: {
+  aiDisabled: boolean;
+  aiLoading: boolean;
+  canEditProduct: boolean;
+  detailValues: Record<ProductDetailsFieldId, string | number | null | undefined>;
+  editing: boolean;
+  form: ProductDetailsEditForm;
+  nameInputRef: MutableRefObject<HTMLInputElement | null>;
+  nameResetKey: number;
+  onFieldChange: (key: keyof ProductDetailsEditForm, value: string) => void;
+  onNameDraftChange: (value: string) => void;
+  onOpenTitleAi: () => void;
+}) {
+  return (
+    <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+      {productDetailsFieldDefinitions.map((field) => {
+        const Icon = productDetailsIcons[field.id];
+        if (editing && field.editable) {
+          const formKey = field.id as keyof ProductDetailsEditForm;
+          const inputId = `product-details-${field.id}`;
+          return (
+            <div key={field.id} className="contents">
+              {field.sectionTitle ? <h3 className="mt-2 text-xs font-semibold uppercase text-matrix-goldDark sm:col-span-2 xl:col-span-3">{field.sectionTitle}</h3> : null}
+              <div className={productDetailsCardClass}>
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <label className="flex min-w-0 items-center gap-2 text-xs text-matrix-muted" htmlFor={inputId}><Icon className="h-4 w-4 shrink-0 text-matrix-goldDark" />{field.label}</label>
+                  {field.id === "name" ? <ProductTitleAiTrigger disabled={aiDisabled} loading={aiLoading} onClick={onOpenTitleAi} /> : null}
+                </div>
+                {field.id === "name" ? (
+                  <ProductNameEditor
+                    disabled={false}
+                    initialValue={form.name}
+                    onDraftChange={onNameDraftChange}
+                    ref={nameInputRef}
+                    resetKey={nameResetKey}
+                  />
+                ) : field.id === "condition" ? (
+                  <select className={productDetailsInputClass} id={inputId} onChange={(event) => onFieldChange("condition", event.target.value)} value={form.condition}>
+                    <option value="">Nao informado</option>
+                    <option value="NEW">Novo</option>
+                    <option value="USED">Usado</option>
+                    <option value="UNSPECIFIED">Nao especificado</option>
+                  </select>
+                ) : field.options ? (
+                  <select
+                    className={productDetailsInputClass}
+                    id={inputId}
+                    onChange={(event) => onFieldChange(formKey, event.target.value)}
+                    value={form[formKey]}
+                  >
+                    {field.options.map((option) => (
+                      <option key={option.value || "empty"} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    className={productDetailsInputClass}
+                    id={inputId}
+                    inputMode={field.inputMode}
+                    maxLength={field.id === "brand"
+                      ? 120
+                      : field.id === "packagingGtin"
+                        ? 13
+                        : undefined}
+                    min={field.inputType === "number" ? 0 : undefined}
+                    onChange={(event) => onFieldChange(formKey, event.target.value)}
+                    placeholder={field.placeholder}
+                    step={field.id === "volumes" ? 1 : field.inputType === "number" ? "any" : undefined}
+                    type={field.inputType ?? "text"}
+                    value={form[formKey]}
+                  />
+                )}
+              </div>
+            </div>
+          );
+        }
+        return (
+          <div key={field.id} className="contents">
+            {field.sectionTitle ? <h3 className="mt-2 text-xs font-semibold uppercase text-matrix-goldDark sm:col-span-2 xl:col-span-3">{field.sectionTitle}</h3> : null}
+            <div className={productDetailsCardClass}>
+              <div className="flex gap-3">
+                <Icon className="mt-0.5 h-4 w-4 shrink-0 text-matrix-goldDark" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-start justify-between gap-2">
+                    <p className="min-w-0 text-xs text-matrix-muted">{field.label}</p>
+                    {field.id === "name" && canEditProduct ? <ProductTitleAiTrigger disabled={aiDisabled} loading={aiLoading} onClick={onOpenTitleAi} /> : null}
+                  </div>
+                  <p className="mt-1 break-words text-sm font-semibold">{displayText(detailValues[field.id], field.placeholder)}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
+const ProductMainImage = memo(function ProductMainImage({
+  image,
+  productName
+}: {
+  image: ProductDetailsImage | null;
+  productName: string;
+}) {
+  return (
+    <div className="grid aspect-[4/3] max-h-[52dvh] w-full place-items-center overflow-hidden rounded-lg border border-matrix-border bg-white text-matrix-muted">
+      {image ? (
+        <Image
+          alt={productName}
+          className="h-full w-full object-contain"
+          decoding="async"
+          height={720}
+          priority
+          src={image.url}
+          unoptimized
+          width={960}
+        />
+      ) : (
+        <div className="px-6 py-12 text-center"><ImageIcon className="mx-auto h-10 w-10 text-matrix-goldDark" /><p className="mt-3 font-semibold">Produto sem imagem</p></div>
+      )}
+    </div>
+  );
+});
+
+const ProductGallery = memo(function ProductGallery({
+  dragOverImageId,
+  draggedImageId,
+  editing,
+  images,
+  onMakePrimary,
+  onMoveImage,
+  onOpenPhotoSearch,
+  onRemoveImage,
+  onReorderImage,
+  onSelectImage,
+  pointerDragImageId,
+  productName,
+  selectedImageId,
+  setDragOverImageId,
+  setDraggedImageId
+}: {
+  dragOverImageId: string | null;
+  draggedImageId: string | null;
+  editing: boolean;
+  images: ProductDetailsImage[];
+  onMakePrimary: (imageId: string) => void;
+  onMoveImage: (imageId: string, offset: number) => void;
+  onOpenPhotoSearch: () => void;
+  onRemoveImage: (imageId: string) => void;
+  onReorderImage: (fromId: string, toId: string) => void;
+  onSelectImage: (imageId: string) => void;
+  pointerDragImageId: MutableRefObject<string | null>;
+  productName: string;
+  selectedImageId: string | null;
+  setDragOverImageId: (imageId: string | null) => void;
+  setDraggedImageId: (imageId: string | null) => void;
+}) {
+  const selectedImage = images.find((image) => image.id === selectedImageId) ?? images[0] ?? null;
+
+  return (
+    <section className="order-2 min-w-0 lg:order-1">
+      <ProductMainImage image={selectedImage} productName={productName} />
+
+      {images.length ? (
+        <div className="matrix-scroll mt-2 flex gap-2 overflow-x-auto pb-2" aria-label="Galeria de imagens">
+          {images.map((image, index) => (
+            <div
+              key={image.id}
+              className={`group relative w-[76px] shrink-0 rounded-lg border-2 bg-white p-1 transition ${selectedImageId === image.id ? "border-matrix-gold" : "border-matrix-border"} ${dragOverImageId === image.id ? "ring-2 ring-matrix-gold" : ""} ${draggedImageId === image.id ? "opacity-45" : ""}`}
+              draggable={editing}
+              onDragEnd={() => {
+                pointerDragImageId.current = null;
+                setDraggedImageId(null);
+                setDragOverImageId(null);
+              }}
+              onDragOver={(event) => {
+                if (!editing) return;
+                event.preventDefault();
+                setDragOverImageId(image.id);
+              }}
+              onDragStart={(event) => {
+                if (!editing) return;
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", image.id);
+                pointerDragImageId.current = image.id;
+                setDraggedImageId(image.id);
+              }}
+              onPointerEnter={() => {
+                if (pointerDragImageId.current) setDragOverImageId(image.id);
+              }}
+              onPointerUp={() => {
+                const sourceImageId = pointerDragImageId.current;
+                if (sourceImageId) onReorderImage(sourceImageId, image.id);
+                pointerDragImageId.current = null;
+                setDraggedImageId(null);
+                setDragOverImageId(null);
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                const sourceImageId = event.dataTransfer.getData("text/plain") || pointerDragImageId.current || draggedImageId;
+                if (sourceImageId) onReorderImage(sourceImageId, image.id);
+                pointerDragImageId.current = null;
+                setDraggedImageId(null);
+                setDragOverImageId(null);
+              }}
+            >
+              <button aria-label={`Visualizar imagem ${index + 1}`} className={`block h-16 w-full overflow-hidden rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold ${editing ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"}`} onClick={() => onSelectImage(image.id)} type="button">
+                <Image alt={`Imagem ${index + 1} de ${productName}`} className="h-full w-full object-contain" decoding="async" height={72} loading="lazy" src={image.url} unoptimized width={72} />
+              </button>
+              {index === 0 ? <span className="absolute bottom-1 left-1 rounded bg-matrix-gold px-1.5 py-0.5 text-[9px] font-bold text-black">Principal</span> : null}
+              {editing ? (
+                <>
+                  <button aria-label="Remover imagem" className="absolute right-1 top-1 grid h-7 w-7 place-items-center rounded-md bg-red-600 text-white opacity-100 shadow transition md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100" onClick={(event) => { event.stopPropagation(); onRemoveImage(image.id); }} type="button"><X className="h-4 w-4" /></button>
+                  <div className="mt-1 flex items-center justify-center gap-1 bg-white">
+                    <button aria-label={`Mover imagem ${index + 1} para a esquerda`} className="grid h-7 w-7 place-items-center rounded border border-zinc-300 text-zinc-700 disabled:opacity-30" disabled={index === 0} onClick={() => onMoveImage(image.id, -1)} type="button"><ChevronLeft className="h-4 w-4" /></button>
+                    <button
+                      aria-label={`Arrastar imagem ${index + 1}`}
+                      className="grid h-7 w-5 touch-none cursor-grab place-items-center text-zinc-500 active:cursor-grabbing"
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        pointerDragImageId.current = image.id;
+                        setDraggedImageId(image.id);
+                        setDragOverImageId(image.id);
+                      }}
+                      type="button"
+                    >
+                      <GripVertical className="h-4 w-4" aria-hidden="true" />
+                    </button>
+                    <button aria-label={`Mover imagem ${index + 1} para a direita`} className="grid h-7 w-7 place-items-center rounded border border-zinc-300 text-zinc-700 disabled:opacity-30" disabled={index === images.length - 1} onClick={() => onMoveImage(image.id, 1)} type="button"><ChevronRight className="h-4 w-4" /></button>
+                  </div>
+                </>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {editing ? (
+        <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          <Button onClick={onOpenPhotoSearch} type="button" variant="secondary"><ImagePlus className="h-4 w-4" />Buscar fotos no Mercado Livre</Button>
+          {selectedImage && images[0]?.id !== selectedImage.id ? <Button onClick={() => onMakePrimary(selectedImage.id)} type="button" variant="secondary">Definir como principal</Button> : <span className="hidden sm:block" />}
+        </div>
+      ) : null}
+    </section>
+  );
+});
+
 export function ProductDetailsModal<T extends ProductDetailsProduct>({
   product,
   onClose,
@@ -321,6 +696,12 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<ProductDetailsEditForm>(() => formFromProduct(product));
+  const [dirtyFields, setDirtyFields] = useState<Set<keyof ProductDetailsEditForm>>(() => new Set());
+  const [nameEditorResetKey, setNameEditorResetKey] = useState(0);
+  const [nameIsValid, setNameIsValid] = useState(() => {
+    const length = formFromProduct(product).name.trim().length;
+    return length >= 2 && length <= PRODUCT_DETAILS_NAME_MAX_LENGTH;
+  });
   const [images, setImages] = useState<ProductDetailsImage[]>(() => orderedImages(product));
   const [baselineImageIds, setBaselineImageIds] = useState<string[]>(() => (product.images ?? []).map((image) => image.id));
   const [baselineImageKeys, setBaselineImageKeys] = useState<string[]>(() => orderedImages(product).map(imageStateKey));
@@ -343,6 +724,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   const pointerDragImageId = useRef<string | null>(null);
   const titleAiRequest = useRef<AbortController | null>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const nameDraftRef = useRef(form.name);
   const cancelTitleAi = useCallback(() => {
     titleAiRequest.current?.abort();
     titleAiRequest.current = null;
@@ -355,9 +737,8 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   const baselineForm = useMemo(() => formFromProduct(currentProduct), [currentProduct]);
   const currentImageKeys = useMemo(() => images.map(imageStateKey), [images]);
   const hasPendingChanges = editing && (
-    JSON.stringify(form) !== JSON.stringify(baselineForm) || !arraysEqual(currentImageKeys, baselineImageKeys)
+    dirtyFields.size > 0 || !arraysEqual(currentImageKeys, baselineImageKeys)
   );
-  const selectedImage = images.find((image) => image.id === selectedImageId) ?? images[0] ?? null;
 
   const requestClose = useCallback(() => {
     if (saving) return;
@@ -395,8 +776,13 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
         }
         if (!active) return;
         const nextImages = orderedImages(nextProduct);
+        const nextForm = formFromProduct(nextProduct);
         setCurrentProduct(nextProduct);
-        setForm(formFromProduct(nextProduct));
+        setForm(nextForm);
+        nameDraftRef.current = nextForm.name;
+        setDirtyFields(new Set());
+        setNameEditorResetKey((current) => current + 1);
+        setNameIsValid(nextForm.name.trim().length >= 2 && nextForm.name.trim().length <= PRODUCT_DETAILS_NAME_MAX_LENGTH);
         setImages(nextImages);
         setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
         setBaselineImageKeys(nextImages.map(imageStateKey));
@@ -448,41 +834,9 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   const description = editing ? form.description : sanitizeDescription(currentProduct.description);
   const canToggleDescription = !editing && (description.length > 360 || description.split(/\r?\n/).length > 4);
   const descriptionCollapsed = canToggleDescription && !descriptionExpanded;
-  const cardClass = "rounded-lg border border-matrix-border bg-matrix-panel2/65 p-3";
-  const inputClass = "mt-2 h-10 w-full rounded-md border border-matrix-border bg-matrix-panel px-3 text-sm font-semibold text-matrix-fg outline-none transition focus:border-matrix-gold/70 focus:ring-2 focus:ring-matrix-gold/20";
   const dimensionUnit = dimensionUnitAbbreviation(currentProduct.dimensionUnit);
 
-  const detailIcons: Record<ProductDetailsFieldId, typeof Package> = {
-    name: Package,
-    brand: Factory,
-    sku: Tag,
-    ean: Barcode,
-    unit: ClipboardList,
-    category: Folder,
-    origin: Globe2,
-    blingStatus: ShieldCheck,
-    format: Package,
-    productType: Tag,
-    commercialStatus: ShieldCheck,
-    costPrice: DollarSign,
-    salePrice: Tag,
-    stock: Box,
-    weight: Scale,
-    grossWeight: Scale,
-    condition: ShieldCheck,
-    height: Ruler,
-    width: Ruler,
-    depth: Ruler,
-    productionType: Factory,
-    expirationDate: CalendarDays,
-    freeShipping: Globe2,
-    volumes: Box,
-    itemsPerBox: Package,
-    dimensionUnit: Ruler,
-    packagingGtin: Barcode,
-    updatedAt: CalendarDays
-  };
-  const detailValues: Record<ProductDetailsFieldId, string | number | null | undefined> = {
+  const detailValues = useMemo<Record<ProductDetailsFieldId, string | number | null | undefined>>(() => ({
     name: currentProduct.name,
     brand: currentProduct.brand,
     sku: currentProduct.sku,
@@ -521,15 +875,40 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
       : null,
     packagingGtin: currentProduct.packagingGtin,
     updatedAt: formatDate(currentProduct.updatedAt)
-  };
+  }), [currentProduct, dimensionUnit, originText]);
 
-  function updateField(key: keyof ProductDetailsEditForm, value: string) {
+  const updateDirtyField = useCallback((key: keyof ProductDetailsEditForm, value: string) => {
+    setDirtyFields((current) => {
+      const isDirty = value !== baselineForm[key];
+      if (current.has(key) === isDirty) return current;
+      const next = new Set(current);
+      if (isDirty) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  }, [baselineForm]);
+
+  const updateField = useCallback((key: keyof ProductDetailsEditForm, value: string) => {
     setForm((current) => ({ ...current, [key]: value }));
+    updateDirtyField(key, value);
     setError(null);
     setFeedback(null);
-  }
+  }, [updateDirtyField]);
 
-  async function generateTitleSuggestions() {
+  const updateNameDraft = useCallback((value: string) => {
+    nameDraftRef.current = value;
+    updateDirtyField("name", value);
+    const length = value.trim().length;
+    setNameIsValid((current) => {
+      const next = length >= 2 && length <= PRODUCT_DETAILS_NAME_MAX_LENGTH;
+      return current === next ? current : next;
+    });
+    setError(null);
+    setFeedback(null);
+  }, [updateDirtyField]);
+  const openPhotoSearch = useCallback(() => setSearchingMercadoLivrePhotos(true), []);
+
+  const generateTitleSuggestions = useCallback(async () => {
     if (titleAiLoading) return;
     titleAiRequest.current?.abort();
     const controller = new AbortController();
@@ -573,23 +952,28 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
         setTitleAiLoading(false);
       }
     }
-  }
+  }, [currentProduct.id, titleAiLoading]);
 
-  function applyTitleSuggestion(title: string) {
-    const result = applyProductTitleSuggestion(form, title);
+  const applyTitleSuggestion = useCallback((title: string) => {
+    const latestForm = form.name === nameDraftRef.current ? form : { ...form, name: nameDraftRef.current };
+    const result = applyProductTitleSuggestion(latestForm, title);
     if ("error" in result) {
       setTitleAiError(result.error);
       return;
     }
+    nameDraftRef.current = result.form.name;
     setForm(result.form);
+    updateDirtyField("name", result.form.name);
+    setNameIsValid(true);
+    setNameEditorResetKey((current) => current + 1);
     setTitleAiOpen(false);
     setTitleAiSuggestions([]);
     setTitleAiError(null);
     setError(null);
     setFeedback("Titulo aplicado ao formulario. Revise e salve as alteracoes quando estiver pronto.");
-  }
+  }, [form, updateDirtyField]);
 
-  function reorderImage(fromId: string, toId: string) {
+  const reorderImage = useCallback((fromId: string, toId: string) => {
     if (!editing || fromId === toId) return;
     setImages((current) => {
       const fromIndex = current.findIndex((image) => image.id === fromId);
@@ -600,24 +984,24 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
       next.splice(toIndex, 0, moved);
       return next.map((image, position) => ({ ...image, position }));
     });
-  }
+  }, [editing]);
 
-  function moveImage(imageId: string, offset: number) {
+  const moveImage = useCallback((imageId: string, offset: number) => {
     const index = images.findIndex((image) => image.id === imageId);
     const target = images[index + offset];
     if (!target) return;
     reorderImage(imageId, target.id);
     setSelectedImageId(imageId);
-  }
+  }, [images, reorderImage]);
 
-  function makePrimary(imageId: string) {
+  const makePrimary = useCallback((imageId: string) => {
     const first = images[0];
     if (!first || first.id === imageId) return;
     reorderImage(imageId, first.id);
     setSelectedImageId(imageId);
-  }
+  }, [images, reorderImage]);
 
-  function removeImage(imageId: string) {
+  const removeImage = useCallback((imageId: string) => {
     setImages((current) => {
       const next = current.filter((image) => image.id !== imageId).map((image, position) => ({ ...image, position }));
       if (selectedImageId === imageId) setSelectedImageId(next[0]?.id ?? null);
@@ -625,9 +1009,9 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     });
     setError(null);
     setFeedback(null);
-  }
+  }, [selectedImageId]);
 
-  function applyMercadoLivrePhotos(urls: string[]) {
+  const applyMercadoLivrePhotos = useCallback((urls: string[]) => {
     const seen = new Set(
       images
         .map((image) => normalizeMercadoLivreReferenceImageUrl(image.url))
@@ -652,10 +1036,15 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     }
     setSearchingMercadoLivrePhotos(false);
     setError(null);
-  }
+  }, [images]);
 
-  function beginEditing() {
-    setForm(formFromProduct(currentProduct));
+  const beginEditing = useCallback(() => {
+    const nextForm = formFromProduct(currentProduct);
+    setForm(nextForm);
+    nameDraftRef.current = nextForm.name;
+    setDirtyFields(new Set());
+    setNameEditorResetKey((current) => current + 1);
+    setNameIsValid(nextForm.name.trim().length >= 2 && nextForm.name.trim().length <= PRODUCT_DETAILS_NAME_MAX_LENGTH);
     const nextImages = orderedImages(currentProduct);
     setImages(nextImages);
     setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
@@ -665,42 +1054,22 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     setEditing(true);
     setFeedback(null);
     setError(null);
-  }
+  }, [cancelTitleAi, currentProduct]);
 
-  function openTitleAiExperience() {
+  const openTitleAiExperience = useCallback(() => {
     if (!editing) beginEditing();
     requestAnimationFrame(() => nameInputRef.current?.focus());
     void generateTitleSuggestions();
-  }
+  }, [beginEditing, editing, generateTitleSuggestions]);
 
-  function renderTitleAiTrigger() {
-    return (
-      <span className="group/title-ai relative inline-flex shrink-0">
-        <button
-          aria-describedby="product-title-ai-tooltip"
-          aria-label="Melhorar título com IA"
-          className="inline-flex h-8 min-w-[3.5rem] shrink-0 items-center justify-center rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/25 px-2.5 text-xs font-bold text-matrix-goldDark transition hover:border-matrix-gold/70 hover:bg-matrix-goldSoft/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold disabled:cursor-not-allowed disabled:opacity-55"
-          disabled={saving || titleAiLoading || !canEditProduct || !detailsLoaded || detailsLoading}
-          onClick={openTitleAiExperience}
-          title="Melhorar título com IA"
-          type="button"
-        >
-          {titleAiLoading ? "✦ IA..." : "✦ IA"}
-        </button>
-        <span
-          className="pointer-events-none invisible absolute right-0 top-full z-30 mt-2 w-max max-w-[min(15rem,calc(100vw-2rem))] rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-medium text-matrix-fg opacity-0 shadow-glow transition group-hover/title-ai:visible group-hover/title-ai:opacity-100 group-focus-within/title-ai:visible group-focus-within/title-ai:opacity-100"
-          id="product-title-ai-tooltip"
-          role="tooltip"
-        >
-          Melhorar título com IA
-        </span>
-      </span>
-    );
-  }
-
-  function cancelEdit() {
+  const cancelEdit = useCallback(() => {
     const nextImages = orderedImages(currentProduct);
-    setForm(formFromProduct(currentProduct));
+    const nextForm = formFromProduct(currentProduct);
+    setForm(nextForm);
+    nameDraftRef.current = nextForm.name;
+    setDirtyFields(new Set());
+    setNameEditorResetKey((current) => current + 1);
+    setNameIsValid(nextForm.name.trim().length >= 2 && nextForm.name.trim().length <= PRODUCT_DETAILS_NAME_MAX_LENGTH);
     setImages(nextImages);
     setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
     setBaselineImageKeys(nextImages.map(imageStateKey));
@@ -710,10 +1079,11 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     setConfirmingSave(false);
     setError(null);
     setFeedback(null);
-  }
+  }, [cancelTitleAi, currentProduct]);
 
   function buildPayload() {
-    const fieldsResult = buildProductDetailsPatch(baselineForm, form);
+    const latestForm = form.name === nameDraftRef.current ? form : { ...form, name: nameDraftRef.current };
+    const fieldsResult = buildProductDetailsPatch(baselineForm, latestForm);
     if ("error" in fieldsResult) return fieldsResult;
     const keptImageIds = images.filter((image) => !image.pending).map((image) => image.id);
     const keptImageSet = new Set(keptImageIds);
@@ -779,8 +1149,13 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
         nextProduct = payload.data;
       }
       const nextImages = orderedImages(nextProduct);
+      const nextForm = formFromProduct(nextProduct);
       setCurrentProduct(nextProduct);
-      setForm(formFromProduct(nextProduct));
+      setForm(nextForm);
+      nameDraftRef.current = nextForm.name;
+      setDirtyFields(new Set());
+      setNameEditorResetKey((current) => current + 1);
+      setNameIsValid(nextForm.name.trim().length >= 2 && nextForm.name.trim().length <= PRODUCT_DETAILS_NAME_MAX_LENGTH);
       setImages(nextImages);
       setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
       setBaselineImageKeys(nextImages.map(imageStateKey));
@@ -807,92 +1182,30 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
           {feedback ? <div className="mb-3 flex items-center gap-2 rounded-lg border border-green-500/25 bg-green-500/10 px-3 py-2 text-sm font-semibold text-green-700"><CheckCircle2 className="h-4 w-4" />{feedback}</div> : null}
           {error ? <div className="mb-3 flex items-center gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-sm font-semibold text-red-700"><AlertTriangle className="h-4 w-4" />{error}</div> : null}
 
+          {detailsLoaded ? (
+            <>
           <div className="grid items-start gap-5 lg:grid-cols-[minmax(320px,0.78fr)_minmax(0,1.35fr)]">
-            <section className="order-2 min-w-0 lg:order-1">
-              <div className="grid aspect-[4/3] max-h-[52dvh] w-full place-items-center overflow-hidden rounded-lg border border-matrix-border bg-white text-matrix-muted">
-                {selectedImage ? <Image alt={currentProduct.name} className="h-full w-full object-contain" height={720} src={selectedImage.url} unoptimized width={960} /> : <div className="px-6 py-12 text-center"><ImageIcon className="mx-auto h-10 w-10 text-matrix-goldDark" /><p className="mt-3 font-semibold">Produto sem imagem</p></div>}
-              </div>
-
-              {images.length ? (
-                <div className="matrix-scroll mt-2 flex gap-2 overflow-x-auto pb-2" aria-label="Galeria de imagens">
-                  {images.map((image, index) => (
-                    <div
-                      key={image.id}
-                      className={`group relative w-[76px] shrink-0 rounded-lg border-2 bg-white p-1 transition ${selectedImageId === image.id ? "border-matrix-gold" : "border-matrix-border"} ${dragOverImageId === image.id ? "ring-2 ring-matrix-gold" : ""} ${draggedImageId === image.id ? "opacity-45" : ""}`}
-                      draggable={editing}
-                      onDragEnd={() => {
-                        pointerDragImageId.current = null;
-                        setDraggedImageId(null);
-                        setDragOverImageId(null);
-                      }}
-                      onDragOver={(event) => { if (!editing) return; event.preventDefault(); setDragOverImageId(image.id); }}
-                      onDragStart={(event) => {
-                        if (!editing) return;
-                        event.dataTransfer.effectAllowed = "move";
-                        event.dataTransfer.setData("text/plain", image.id);
-                        pointerDragImageId.current = image.id;
-                        setDraggedImageId(image.id);
-                      }}
-                      onPointerEnter={() => {
-                        if (pointerDragImageId.current) setDragOverImageId(image.id);
-                      }}
-                      onPointerUp={() => {
-                        const sourceImageId = pointerDragImageId.current;
-                        if (sourceImageId) reorderImage(sourceImageId, image.id);
-                        pointerDragImageId.current = null;
-                        setDraggedImageId(null);
-                        setDragOverImageId(null);
-                      }}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        const sourceImageId = event.dataTransfer.getData("text/plain") || pointerDragImageId.current || draggedImageId;
-                        if (sourceImageId) reorderImage(sourceImageId, image.id);
-                        pointerDragImageId.current = null;
-                        setDraggedImageId(null);
-                        setDragOverImageId(null);
-                      }}
-                    >
-                      <button aria-label={`Visualizar imagem ${index + 1}`} className={`block h-16 w-full overflow-hidden rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold ${editing ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"}`} onClick={() => setSelectedImageId(image.id)} type="button">
-                        <Image alt={`Imagem ${index + 1} de ${currentProduct.name}`} className="h-full w-full object-contain" height={72} src={image.url} unoptimized width={72} />
-                      </button>
-                      {index === 0 ? <span className="absolute bottom-1 left-1 rounded bg-matrix-gold px-1.5 py-0.5 text-[9px] font-bold text-black">Principal</span> : null}
-                      {editing ? (
-                        <>
-                          <button aria-label="Remover imagem" className="absolute right-1 top-1 grid h-7 w-7 place-items-center rounded-md bg-red-600 text-white opacity-100 shadow transition md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100" onClick={(event) => { event.stopPropagation(); removeImage(image.id); }} type="button"><X className="h-4 w-4" /></button>
-                          <div className="mt-1 flex items-center justify-center gap-1 bg-white">
-                            <button aria-label={`Mover imagem ${index + 1} para a esquerda`} className="grid h-7 w-7 place-items-center rounded border border-zinc-300 text-zinc-700 disabled:opacity-30" disabled={index === 0} onClick={() => moveImage(image.id, -1)} type="button"><ChevronLeft className="h-4 w-4" /></button>
-                            <button
-                              aria-label={`Arrastar imagem ${index + 1}`}
-                              className="grid h-7 w-5 touch-none cursor-grab place-items-center text-zinc-500 active:cursor-grabbing"
-                              onPointerDown={(event) => {
-                                event.preventDefault();
-                                pointerDragImageId.current = image.id;
-                                setDraggedImageId(image.id);
-                                setDragOverImageId(image.id);
-                              }}
-                              type="button"
-                            >
-                              <GripVertical className="h-4 w-4" aria-hidden="true" />
-                            </button>
-                            <button aria-label={`Mover imagem ${index + 1} para a direita`} className="grid h-7 w-7 place-items-center rounded border border-zinc-300 text-zinc-700 disabled:opacity-30" disabled={index === images.length - 1} onClick={() => moveImage(image.id, 1)} type="button"><ChevronRight className="h-4 w-4" /></button>
-                          </div>
-                        </>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-              {editing ? (
-                <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                  <Button onClick={() => setSearchingMercadoLivrePhotos(true)} type="button" variant="secondary"><ImagePlus className="h-4 w-4" />Buscar fotos no Mercado Livre</Button>
-                  {selectedImage && images[0]?.id !== selectedImage.id ? <Button onClick={() => makePrimary(selectedImage.id)} type="button" variant="secondary">Definir como principal</Button> : <span className="hidden sm:block" />}
-                </div>
-              ) : null}
-            </section>
+            <ProductGallery
+              dragOverImageId={dragOverImageId}
+              draggedImageId={draggedImageId}
+              editing={editing}
+              images={images}
+              onMakePrimary={makePrimary}
+              onMoveImage={moveImage}
+              onOpenPhotoSearch={openPhotoSearch}
+              onRemoveImage={removeImage}
+              onReorderImage={reorderImage}
+              onSelectImage={setSelectedImageId}
+              pointerDragImageId={pointerDragImageId}
+              productName={currentProduct.name}
+              selectedImageId={selectedImageId}
+              setDragOverImageId={setDragOverImageId}
+              setDraggedImageId={setDraggedImageId}
+            />
 
             <section className="relative order-1 min-w-0 pr-14 lg:order-2 lg:flex lg:min-h-full lg:flex-col lg:justify-center lg:py-8 lg:pr-16">
               <p className="text-xs font-semibold uppercase text-matrix-goldDark">Ver produto</p>
-              <h2 className="mt-2 max-w-5xl break-words text-2xl font-bold leading-tight sm:text-3xl lg:text-4xl">{editing ? form.name || currentProduct.name : currentProduct.name}</h2>
+              <h2 className="mt-2 max-w-5xl break-words text-2xl font-bold leading-tight sm:text-3xl lg:text-4xl">{currentProduct.name}</h2>
               <button aria-label="Fechar detalhes do produto" className="absolute right-0 top-0 grid h-11 w-11 place-items-center rounded-lg border border-matrix-border bg-matrix-panel2 text-matrix-muted transition hover:border-matrix-gold/70 hover:text-matrix-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold" onClick={requestClose} type="button"><X className="h-6 w-6" /></button>
               <div className="mt-4 flex flex-wrap gap-2 text-xs">
                 <span className="inline-flex items-center gap-2 rounded-md border border-matrix-gold/30 bg-matrix-goldSoft/35 px-2.5 py-1.5 font-semibold text-matrix-goldDark"><span className="h-2 w-2 rounded-full bg-matrix-gold" />{statusText}</span>
@@ -903,82 +1216,19 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
             </section>
           </div>
 
-          <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {productDetailsFieldDefinitions.map((field) => {
-              const Icon = detailIcons[field.id];
-              if (editing && field.editable) {
-                const formKey = field.id as keyof ProductDetailsEditForm;
-                const inputId = `product-details-${field.id}`;
-                return (
-                  <div key={field.id} className="contents">
-                    {field.sectionTitle ? <h3 className="mt-2 text-xs font-semibold uppercase text-matrix-goldDark sm:col-span-2 xl:col-span-3">{field.sectionTitle}</h3> : null}
-                    <div className={cardClass}>
-                      <div className="flex min-w-0 items-center justify-between gap-2">
-                        <label className="flex min-w-0 items-center gap-2 text-xs text-matrix-muted" htmlFor={inputId}><Icon className="h-4 w-4 shrink-0 text-matrix-goldDark" />{field.label}</label>
-                        {field.id === "name" ? renderTitleAiTrigger() : null}
-                      </div>
-                      {field.id === "condition" ? (
-                        <select className={inputClass} id={inputId} onChange={(event) => updateField("condition", event.target.value)} value={form.condition}>
-                          <option value="">Nao informado</option>
-                          <option value="NEW">Novo</option>
-                          <option value="USED">Usado</option>
-                          <option value="UNSPECIFIED">Nao especificado</option>
-                        </select>
-                      ) : field.options ? (
-                        <select
-                          className={inputClass}
-                          id={inputId}
-                          onChange={(event) => updateField(formKey, event.target.value)}
-                          value={form[formKey]}
-                        >
-                          {field.options.map((option) => (
-                            <option key={option.value || "empty"} value={option.value}>{option.label}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <input
-                          className={inputClass}
-                          id={inputId}
-                          inputMode={field.inputMode}
-                          maxLength={field.id === "name" ? PRODUCT_DETAILS_NAME_MAX_LENGTH
-                            : field.id === "brand"
-                              ? 120
-                              : field.id === "packagingGtin"
-                                ? 13
-                                : undefined}
-                          min={field.inputType === "number" ? 0 : undefined}
-                          onChange={(event) => updateField(formKey, event.target.value)}
-                          placeholder={field.placeholder}
-                          ref={field.id === "name" ? nameInputRef : undefined}
-                          step={field.id === "volumes" ? 1 : field.inputType === "number" ? "any" : undefined}
-                          type={field.inputType ?? "text"}
-                          value={form[formKey]}
-                        />
-                      )}
-                      {field.id === "name" ? <span className={`mt-1 block text-right text-xs ${form.name.length >= 55 ? "text-matrix-goldDark" : "text-matrix-muted"}`}>{form.name.length}/{PRODUCT_DETAILS_NAME_MAX_LENGTH}</span> : null}
-                    </div>
-                  </div>
-                );
-              }
-              return (
-                <div key={field.id} className="contents">
-                  {field.sectionTitle ? <h3 className="mt-2 text-xs font-semibold uppercase text-matrix-goldDark sm:col-span-2 xl:col-span-3">{field.sectionTitle}</h3> : null}
-                  <div className={cardClass}>
-                    <div className="flex gap-3">
-                      <Icon className="mt-0.5 h-4 w-4 shrink-0 text-matrix-goldDark" />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex min-w-0 items-start justify-between gap-2">
-                          <p className="min-w-0 text-xs text-matrix-muted">{field.label}</p>
-                          {field.id === "name" && canEditProduct ? renderTitleAiTrigger() : null}
-                        </div>
-                        <p className="mt-1 break-words text-sm font-semibold">{displayText(detailValues[field.id], field.placeholder)}</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          <ProductDetailsFieldsGrid
+            aiDisabled={saving || titleAiLoading || !canEditProduct || !detailsLoaded || detailsLoading}
+            aiLoading={titleAiLoading}
+            canEditProduct={canEditProduct}
+            detailValues={detailValues}
+            editing={editing}
+            form={form}
+            nameInputRef={nameInputRef}
+            nameResetKey={nameEditorResetKey}
+            onFieldChange={updateField}
+            onNameDraftChange={updateNameDraft}
+            onOpenTitleAi={openTitleAiExperience}
+          />
 
           {editing && titleAiOpen ? (
             <section className="mt-3 rounded-lg border border-matrix-gold/35 bg-matrix-panel2/65 p-4" aria-label="Sugestões de título com IA">
@@ -1042,17 +1292,19 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
             </section>
           ) : null}
 
-          <section className="mt-3 rounded-lg border border-matrix-border bg-matrix-panel2/65 p-4">
+          <section className="mt-3 rounded-lg border border-matrix-border bg-matrix-panel2/65 p-4 [content-visibility:auto] [contain-intrinsic-size:auto_14rem]">
             <div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2 text-sm font-semibold"><FileText className="h-4 w-4 text-matrix-goldDark" />Descricao</div>{canToggleDescription ? <button aria-expanded={descriptionExpanded} className="inline-flex items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-semibold text-matrix-goldDark" onClick={() => setDescriptionExpanded((current) => !current)} type="button">{descriptionExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}{descriptionExpanded ? "Recolher" : "Expandir"}</button> : null}</div>
             {editing ? <textarea className="mt-3 min-h-44 w-full resize-y rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm leading-6 outline-none focus:border-matrix-gold/70 focus:ring-2 focus:ring-matrix-gold/20" onChange={(event) => updateField("description", event.target.value)} value={form.description} /> : <div className={`relative mt-3 ${descriptionCollapsed ? "max-h-28 overflow-hidden" : ""}`}><p className="whitespace-pre-line break-words text-sm leading-6">{description || "Nao informado"}</p>{descriptionCollapsed ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-matrix-panel2 to-transparent" /> : null}</div>}
           </section>
+            </>
+          ) : null}
         </main>
 
         <footer className="z-10 flex shrink-0 flex-col gap-3 border-t border-matrix-border bg-matrix-panel px-4 py-3 shadow-[0_-12px_32px_rgb(0_0_0/0.2)] sm:flex-row sm:items-center sm:justify-between sm:px-6">
           <p className="text-xs text-matrix-muted">{editing ? "As mudancas permanecem locais ate a confirmacao do salvamento." : permissionChecked && !canEditProduct ? "Seu usuario pode visualizar, mas nao editar produtos." : "Visualizacao do cadastro local do W Ecommerce."}</p>
           <div className="grid grid-cols-2 gap-2 sm:flex sm:justify-end">
             {editing ? (
-              <><Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">Cancelar</Button><Button disabled={saving || !hasPendingChanges || form.name.trim().length < 2 || form.name.trim().length > PRODUCT_DETAILS_NAME_MAX_LENGTH} onClick={requestSave} type="button"><Save className="h-4 w-4" />{saving ? "Salvando produto..." : "Salvar produto"}</Button></>
+              <><Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">Cancelar</Button><Button disabled={saving || !hasPendingChanges || !nameIsValid} onClick={requestSave} type="button"><Save className="h-4 w-4" />{saving ? "Salvando produto..." : "Salvar produto"}</Button></>
             ) : <><Button onClick={requestClose} type="button" variant="secondary">Fechar</Button>{canEditProduct ? <Button disabled={!detailsLoaded || detailsLoading} onClick={beginEditing} type="button"><Edit3 className="h-4 w-4" />Editar</Button> : null}</>}
           </div>
         </footer>
