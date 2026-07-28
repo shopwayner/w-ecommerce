@@ -610,16 +610,36 @@ test("a capitalization-only dry-run plans nome without executing PATCH", async (
   assert.equal(mocked.calls.stock.length, 0);
 });
 
-test("the editor saves locally before requesting the external dry-run", () => {
-  const source = readFileSync(
+test("the editor saves only locally and external sync rereads the persisted product", () => {
+  const modalSource = readFileSync(
     path.join(process.cwd(), "components/product-details-modal.tsx"),
     "utf8"
   );
-  const saveIndex = source.indexOf("savedProduct = await saveProduct");
-  const previewIndex = source.indexOf("const previewResponse = await fetch");
-  assert.ok(saveIndex >= 0);
-  assert.ok(previewIndex > saveIndex);
-  assert.match(source, /if \(!saveResponse\.ok \|\| !savePayload\.data\)[\s\S]*throw new Error/);
+  const productsSource = readFileSync(
+    path.join(process.cwd(), "components/pages/products-page.tsx"),
+    "utf8"
+  );
+
+  const saveStart = modalSource.indexOf("async function confirmSave");
+  const saveEnd = modalSource.indexOf("return (", saveStart);
+  const saveOperation = modalSource.slice(saveStart, saveEnd);
+  assert.match(saveOperation, /fetch\(`\/api\/products\/\$\{currentProduct\.id\}`/);
+  assert.match(saveOperation, /method:\s*"PATCH"/);
+  assert.match(saveOperation, /Produto salvo no W Ecommerce\./);
+  assert.doesNotMatch(saveOperation, /\/bling\/full-sync/);
+
+  const previewStart = productsSource.indexOf("async function openBlingFullSyncPreview");
+  const previewEnd = productsSource.indexOf("async function confirmBlingFullProductSync", previewStart);
+  const previewOperation = productsSource.slice(previewStart, previewEnd);
+  const persistedReadIndex = previewOperation.indexOf(
+    "await fetch(`/api/products/${productId}`, { cache: \"no-store\" })"
+  );
+  const fullSyncIndex = previewOperation.indexOf(
+    "await fetch(`/api/products/${productId}/bling/full-sync`"
+  );
+  assert.ok(persistedReadIndex >= 0);
+  assert.ok(fullSyncIndex > persistedReadIndex);
+  assert.match(previewOperation, /const productIds = \[\.\.\.selectedProductIds\]/);
 });
 
 test("runtime allows PATCH and stock POST with zero PUT, supplier endpoint, refresh or retry", () => {

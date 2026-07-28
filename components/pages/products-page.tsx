@@ -717,7 +717,7 @@ export function ProductsPage() {
       ? "Selecione apenas um produto para atualizar no Bling."
       : selectedLinkedBlingProducts.length === 0
         ? "Este produto ainda nao esta vinculado a esta conta Bling."
-        : "Este produto pode ser revisado antes da atualizacao no Bling.";
+        : "O produto sera relido do cadastro salvo antes da atualizacao no Bling.";
 
   function updatePendingFilter<Key extends keyof ProductListFilters>(key: Key, value: ProductListFilters[Key]) {
     setPendingFilters((current) => ({ ...current, [key]: value }));
@@ -800,6 +800,8 @@ export function ProductsPage() {
   }
 
   async function openBlingFullSyncPreview() {
+    const productIds = [...selectedProductIds];
+    const productId = productIds.length === 1 ? productIds[0] : null;
     setBlingUpdateOpen(true);
     setBlingUpdateBusy(false);
     setBlingUpdateMessage("");
@@ -816,9 +818,9 @@ export function ProductsPage() {
       setBlingUpdateMessage("Reconecte a conta Bling antes de continuar.");
       return;
     }
-    if (!selectedBlingProduct) {
+    if (!productId || !selectedBlingProduct) {
       setBlingUpdateMessage(
-        selectedProducts.length > 1
+        productIds.length > 1
           ? "Selecione apenas um produto para atualizar no Bling."
           : "Este produto ainda nao esta vinculado a esta conta Bling."
       );
@@ -827,7 +829,24 @@ export function ProductsPage() {
 
     setBlingUpdateBusy(true);
     try {
-      const response = await fetch(`/api/products/${selectedBlingProduct.id}/bling/full-sync`, {
+      const persistedResponse = await fetch(`/api/products/${productId}`, { cache: "no-store" });
+      const persistedPayload = (await persistedResponse.json().catch(() => ({}))) as {
+        data?: ProductListItem;
+        error?: string;
+      };
+      if (!persistedResponse.ok || !persistedPayload.data) {
+        setBlingUpdateMessage(persistedPayload.error ?? "Nao foi possivel reler o produto salvo.");
+        return;
+      }
+      if (
+        persistedPayload.data.blingAccount?.blingAccountId !== selectedBlingConnectionId
+        || !persistedPayload.data.blingAccount.externalProductId?.trim()
+      ) {
+        setBlingUpdateMessage("O produto salvo nao esta vinculado a conta Bling selecionada.");
+        return;
+      }
+
+      const response = await fetch(`/api/products/${productId}/bling/full-sync`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -850,9 +869,10 @@ export function ProductsPage() {
   }
 
   async function confirmBlingFullProductSync() {
+    const productId = selectedBlingProduct?.id;
     if (
       !selectedBlingConnectionId
-      || !selectedBlingProduct
+      || !productId
       || !blingFullSyncPreview
       || !blingFullSyncIdempotencyKey.current
       || blingUpdateBusy
@@ -863,7 +883,7 @@ export function ProductsPage() {
     setBlingUpdateBusy(true);
     setBlingUpdateMessage("");
     try {
-      const response = await fetch(`/api/products/${selectedBlingProduct.id}/bling/full-sync`, {
+      const response = await fetch(`/api/products/${productId}/bling/full-sync`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -880,7 +900,13 @@ export function ProductsPage() {
         return;
       }
       setBlingFullSyncResult(payload.data as BlingFullProductSyncResult);
-      await loadProducts();
+      const persistedResponse = await fetch(`/api/products/${productId}`, { cache: "no-store" });
+      const persistedPayload = (await persistedResponse.json().catch(() => ({}))) as {
+        data?: ProductListItem;
+      };
+      if (persistedResponse.ok && persistedPayload.data) {
+        updateProductRow(persistedPayload.data);
+      }
     } catch {
       setBlingUpdateMessage(
         "O resultado da atualizacao ficou inconclusivo. Verifique o produto antes de tentar novamente."
@@ -1328,10 +1354,14 @@ export function ProductsPage() {
     }
   }
 
-  function handleProductUpdated(updatedProduct: ProductListItem) {
+  function updateProductRow(updatedProduct: ProductListItem) {
     setProducts((currentProducts) =>
       currentProducts.map((product) => (product.id === updatedProduct.id ? updatedProduct : product))
     );
+  }
+
+  function handleProductUpdated(updatedProduct: ProductListItem) {
+    updateProductRow(updatedProduct);
     setViewingProduct(updatedProduct);
   }
 
@@ -1498,8 +1528,8 @@ export function ProductsPage() {
             <div className="min-w-0">
               <p className="text-sm font-semibold text-matrix-goldDark">
                 {selectedProducts.length === 1
-                  ? "1 produto selecionado para cadastro"
-                  : `${selectedProducts.length} produtos selecionados para cadastro`}
+                  ? "1 produto selecionado"
+                  : `${selectedProducts.length} produtos selecionados`}
               </p>
               <p className="mt-1 text-xs text-matrix-muted">{blingUpdateSelectionMessage}</p>
             </div>
@@ -1520,7 +1550,7 @@ export function ProductsPage() {
                 variant="secondary"
               >
                 <RefreshCw className="h-4 w-4" />
-                Atualizar produto no Bling
+                Atualizar selecionados no Bling
               </Button>
             </div>
           </div>

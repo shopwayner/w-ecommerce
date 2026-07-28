@@ -43,15 +43,24 @@ test("the route is authenticated, organization-scoped server-side and fail-close
   );
 });
 
-test("the editor button uses the exact single-action label and keeps the modal open", () => {
-  const source = readFileSync(path.join(process.cwd(), "components/product-details-modal.tsx"), "utf8");
-  assert.match(source, /Atualizar produto no Bling/);
-  const operationStart = source.indexOf("async function updateProductInBling");
-  const operationEnd = source.indexOf("return (", operationStart);
-  const operation = source.slice(operationStart, operationEnd);
-  assert.doesNotMatch(operation, /onClose\(/);
-  assert.match(operation, /onProductUpdated\(refreshed\)/);
-  assert.ok(operation.indexOf("saveInFlight.current = true") < operation.indexOf("await "));
+test("the local editor and selected-products action remain explicitly separated", () => {
+  const modalSource = readFileSync(path.join(process.cwd(), "components/product-details-modal.tsx"), "utf8");
+  const productsSource = readFileSync(path.join(process.cwd(), "components/pages/products-page.tsx"), "utf8");
+
+  assert.match(modalSource, />Cancelar<\/Button>[\s\S]*?Salvar produto/);
+  assert.match(modalSource, />Fechar<\/Button>[\s\S]*?>Editar<\/Button>/);
+  assert.doesNotMatch(modalSource, /Atualizar produto no Bling/);
+  assert.doesNotMatch(modalSource, /\/bling\/full-sync/);
+
+  const updateStart = productsSource.indexOf("function handleProductUpdated");
+  const updateEnd = productsSource.indexOf("async function openBlingImportPreview", updateStart);
+  const updateOperation = productsSource.slice(updateStart, updateEnd);
+  assert.match(updateOperation, /updateProductRow\(updatedProduct\)/);
+  assert.match(updateOperation, /setViewingProduct\(updatedProduct\)/);
+  assert.doesNotMatch(updateOperation, /setSelectedProductIds|clearSelection|loadProducts/);
+
+  assert.match(productsSource, /Atualizar selecionados no Bling/);
+  assert.match(productsSource, /const productIds = \[\.\.\.selectedProductIds\]/);
 });
 
 test("the no-op preview is explicit and cannot enable the final command", () => {
