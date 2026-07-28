@@ -341,3 +341,18 @@ test("the modal renders the same field contract in view and edit without a separ
   assert.match(source, /setForm\(formFromProduct\(currentProduct\)\)/);
   assert.doesNotMatch(source, /NEXT_PUBLIC.*BLING|requestWithoutRefresh/);
 });
+
+test("the detail response supplies edit capability without a duplicate session request", () => {
+  const modalSource = readFileSync(
+    new URL("../components/product-details-modal.tsx", import.meta.url),
+    "utf8"
+  );
+  const routeSource = readFileSync(
+    new URL("../app/api/products/[id]/route.ts", import.meta.url),
+    "utf8"
+  );
+
+  assert.doesNotMatch(modalSource, /fetch\("\/api\/auth\/session"\)/);
+  assert.match(modalSource, /payload\.permissions\?\.canEdit === true/);
+  assert.match(routeSource, /can\(auth\.context\.role, "products:write"\)/);
+});

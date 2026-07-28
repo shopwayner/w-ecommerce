@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { requireApiAuth } from "@/lib/auth/api";
+import { can } from "@/lib/auth/permissions";
 import { parseDecimalPrice } from "@/lib/decimal-price";
 import { normalizeProductBrand } from "@/lib/product-brand";
 import {
@@ -225,7 +226,12 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
     return NextResponse.json({ error: "Produto nao encontrado." }, { status: 404 });
   }
 
-  return NextResponse.json({ data: formatProductResponse(product) });
+  return NextResponse.json({
+    data: formatProductResponse(product),
+    permissions: {
+      canEdit: can(auth.context.role, "products:write")
+    }
+  });
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {

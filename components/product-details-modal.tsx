@@ -376,13 +376,22 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     async function loadDetails() {
       try {
         let nextProduct: T;
+        let canEdit: boolean;
         if (loadProduct) {
-          nextProduct = await loadProduct(product.id);
+          [nextProduct, canEdit] = await Promise.all([
+            loadProduct(product.id),
+            checkPermission ? checkPermission() : Promise.resolve(false)
+          ]);
         } else {
           const response = await fetch(`/api/products/${product.id}`, { cache: "no-store" });
-          const payload = (await response.json()) as { data?: T; error?: string };
+          const payload = (await response.json()) as {
+            data?: T;
+            error?: string;
+            permissions?: { canEdit?: boolean };
+          };
           if (!response.ok || !payload.data) throw new Error(payload.error ?? "Nao foi possivel carregar o produto.");
           nextProduct = payload.data;
+          canEdit = payload.permissions?.canEdit === true;
         }
         if (!active) return;
         const nextImages = orderedImages(nextProduct);
@@ -398,11 +407,16 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
         setTitleAiLoading(false);
         setTitleAiSuggestions([]);
         setTitleAiError(null);
+        setCanEditProduct(canEdit);
+        setPermissionChecked(true);
         setDetailsLoaded(true);
       } catch (loadError) {
         if (active) setError(loadError instanceof Error ? loadError.message : "Nao foi possivel carregar o produto.");
       } finally {
-        if (active) setDetailsLoading(false);
+        if (active) {
+          setPermissionChecked(true);
+          setDetailsLoading(false);
+        }
       }
     }
 
@@ -410,30 +424,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
     return () => {
       active = false;
     };
-  }, [loadProduct, product.id]);
-
-  useEffect(() => {
-    let active = true;
-    async function loadPermission() {
-      try {
-        if (checkPermission) {
-          const allowed = await checkPermission();
-          if (active) setCanEditProduct(allowed);
-        } else {
-          const response = await fetch("/api/auth/session");
-          if (!response.ok) return;
-          const payload = (await response.json()) as { user?: { role?: string } };
-          if (active) setCanEditProduct(payload.user?.role === "OWNER" || payload.user?.role === "ADMIN");
-        }
-      } finally {
-        if (active) setPermissionChecked(true);
-      }
-    }
-    void loadPermission();
-    return () => {
-      active = false;
-    };
-  }, [checkPermission]);
+  }, [checkPermission, loadProduct, product.id]);
 
   useEffect(() => {
     return () => titleAiRequest.current?.abort();

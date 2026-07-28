@@ -13,29 +13,88 @@ import {
 } from "@/lib/product-list-filters";
 import { productCreateSchema } from "@/lib/validation";
 
+const productListSelect = {
+  id: true,
+  name: true,
+  sku: true,
+  ean: true,
+  description: true,
+  category: true,
+  brand: true,
+  ncm: true,
+  source: true,
+  status: true,
+  enrichmentStatus: true,
+  syncStatus: true,
+  confidenceScore: true,
+  weight: true,
+  height: true,
+  width: true,
+  depth: true,
+  attributes: true,
+  blockedFields: true,
+  updatedAt: true,
+  prices: {
+    take: 1,
+    orderBy: { createdAt: "desc" },
+    select: { salePrice: true, costPrice: true }
+  },
+  inventory: {
+    select: { physicalQuantity: true, reservedQuantity: true }
+  },
+  images: {
+    take: 1,
+    orderBy: { position: "asc" },
+    select: { url: true }
+  },
+  enrichmentDrafts: {
+    take: 1,
+    orderBy: { updatedAt: "desc" },
+    select: { id: true }
+  },
+  mappings: {
+    take: 1,
+    orderBy: { updatedAt: "desc" },
+    select: {
+      connectionId: true,
+      externalProductId: true,
+      connection: {
+        select: {
+          name: true,
+          externalCompanyName: true,
+          externalCompanyDocument: true,
+          externalAccountId: true,
+          isDefault: true,
+          status: true
+        }
+      }
+    }
+  },
+  marketplaceCategoryMappings: {
+    where: { provider: "MERCADO_LIVRE" },
+    take: 1,
+    orderBy: { updatedAt: "desc" },
+    select: {
+      provider: true,
+      status: true,
+      marketplaceCategoryId: true,
+      marketplaceCategoryName: true,
+      marketplaceCategoryPath: true,
+      confidenceScore: true,
+      requiredAttributes: true,
+      productAttributeValues: {
+        select: {
+          attributeId: true,
+          value: true,
+          status: true
+        }
+      }
+    }
+  }
+} satisfies Prisma.ProductSelect;
+
 type ProductListRecord = Prisma.ProductGetPayload<{
-  include: {
-    prices: true;
-    inventory: true;
-    images: true;
-    enrichmentDrafts: true;
-    mappings: {
-      include: {
-        connection: true;
-      };
-    };
-    marketplaceCategoryMappings: {
-      include: {
-        productAttributeValues: {
-          select: {
-            attributeId: true;
-            value: true;
-            status: true;
-          };
-        };
-      };
-    };
-  };
+  select: typeof productListSelect;
 }>;
 
 type SerializedProduct = ReturnType<typeof serializeProduct>;
@@ -431,32 +490,11 @@ export async function GET(request: Request) {
           }
         : {})
     },
-    include: {
-      prices: { take: 1, orderBy: { createdAt: "desc" } },
-      inventory: true,
-      images: { take: 1, orderBy: { position: "asc" } },
-      enrichmentDrafts: { take: 1, orderBy: { updatedAt: "desc" } },
+    select: {
+      ...productListSelect,
       mappings: {
-        where: selectedBlingConnectionId ? { connectionId: selectedBlingConnectionId } : undefined,
-        take: 1,
-        orderBy: { updatedAt: "desc" },
-        include: {
-          connection: true
-        }
-      },
-      marketplaceCategoryMappings: {
-        where: { provider: "MERCADO_LIVRE" },
-        take: 1,
-        orderBy: { updatedAt: "desc" },
-        include: {
-          productAttributeValues: {
-            select: {
-              attributeId: true,
-              value: true,
-              status: true
-            }
-          }
-        }
+        ...productListSelect.mappings,
+        where: selectedBlingConnectionId ? { connectionId: selectedBlingConnectionId } : undefined
       }
     },
     orderBy: { createdAt: "desc" }
