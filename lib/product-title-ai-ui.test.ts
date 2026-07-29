@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const modalSource = readFileSync(
-  new URL("../components/product-details-modal.tsx", import.meta.url),
+  new URL("../components/product-details-view.tsx", import.meta.url),
   "utf8"
 );
 const envExample = readFileSync(new URL("../.env.example", import.meta.url), "utf8");

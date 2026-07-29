@@ -329,9 +329,9 @@ test("cancel can restore the immutable baseline without carrying edited values",
   assert.deepEqual(restored, baseline);
 });
 
-test("the modal renders the same field contract in view and edit without a separate mobile layout", () => {
+test("the details page renders the same field contract in view and edit without a separate mobile layout", () => {
   const source = readFileSync(
-    new URL("../components/product-details-modal.tsx", import.meta.url),
+    new URL("../components/product-details-view.tsx", import.meta.url),
     "utf8"
   );
   assert.match(source, /productDetailsFieldDefinitions\.map/);
@@ -346,8 +346,12 @@ test("the modal renders the same field contract in view and edit without a separ
 });
 
 test("the detail response supplies edit capability without a duplicate session request", () => {
-  const modalSource = readFileSync(
-    new URL("../components/product-details-modal.tsx", import.meta.url),
+  const detailsSource = readFileSync(
+    new URL("../components/product-details-view.tsx", import.meta.url),
+    "utf8"
+  );
+  const pageSource = readFileSync(
+    new URL("../components/pages/product-details-page.tsx", import.meta.url),
     "utf8"
   );
   const routeSource = readFileSync(
@@ -355,7 +359,7 @@ test("the detail response supplies edit capability without a duplicate session r
     "utf8"
   );
 
-  assert.doesNotMatch(modalSource, /fetch\("\/api\/auth\/session"\)/);
-  assert.match(modalSource, /payload\.permissions\?\.canEdit === true/);
+  assert.doesNotMatch(detailsSource, /fetch\("\/api\/auth\/session"\)/);
+  assert.match(pageSource, /payload\.permissions\?\.canEdit === true/);
   assert.match(routeSource, /can\(auth\.context\.role, "products:write"\)/);
 });

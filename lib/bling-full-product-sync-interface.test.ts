@@ -44,23 +44,17 @@ test("the route is authenticated, organization-scoped server-side and fail-close
 });
 
 test("the local editor and selected-products action remain explicitly separated", () => {
-  const modalSource = readFileSync(path.join(process.cwd(), "components/product-details-modal.tsx"), "utf8");
+  const detailsSource = readFileSync(path.join(process.cwd(), "components/product-details-view.tsx"), "utf8");
   const productsSource = readFileSync(path.join(process.cwd(), "components/pages/products-page.tsx"), "utf8");
 
-  assert.match(modalSource, />Cancelar<\/Button>[\s\S]*?Salvar produto/);
-  assert.match(modalSource, />Fechar<\/Button>[\s\S]*?>Editar<\/Button>/);
-  assert.doesNotMatch(modalSource, /Atualizar produto no Bling/);
-  assert.doesNotMatch(modalSource, /\/bling\/full-sync/);
-
-  const updateStart = productsSource.indexOf("function handleProductUpdated");
-  const updateEnd = productsSource.indexOf("async function openBlingImportPreview", updateStart);
-  const updateOperation = productsSource.slice(updateStart, updateEnd);
-  assert.match(updateOperation, /updateProductRow\(updatedProduct\)/);
-  assert.match(updateOperation, /setViewingProduct\(updatedProduct\)/);
-  assert.doesNotMatch(updateOperation, /setSelectedProductIds|clearSelection|loadProducts/);
+  assert.match(detailsSource, />Cancelar<\/Button>[\s\S]*?Salvar produto/);
+  assert.match(detailsSource, /Voltar para produtos[\s\S]*?>Editar<\/Button>/);
+  assert.doesNotMatch(detailsSource, /Atualizar produto no Bling/);
+  assert.doesNotMatch(detailsSource, /\/bling\/full-sync/);
 
   assert.match(productsSource, /Atualizar selecionados no Bling/);
   assert.match(productsSource, /const productIds = \[\.\.\.selectedProductIds\]/);
+  assert.doesNotMatch(productsSource, /ProductDetailsModal|viewingProduct/);
 });
 
 test("the no-op preview is explicit and cannot enable the final command", () => {

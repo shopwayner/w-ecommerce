@@ -11,8 +11,10 @@ import {
   type MutableRefObject
 } from "react";
 import Image from "next/image";
+import dynamic from "next/dynamic";
 import {
   AlertTriangle,
+  ArrowLeft,
   Barcode,
   Box,
   CalendarDays,
@@ -41,7 +43,6 @@ import {
   Trash2,
   X
 } from "lucide-react";
-import { MercadoLivrePhotoSearchModal } from "@/components/mercado-livre-photo-search-modal";
 import { Button } from "@/components/ui";
 import { INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES } from "@/lib/intelligent-product-preview";
 import { normalizeMercadoLivreReferenceImageUrl } from "@/lib/mercado-livre-reference-images";
@@ -54,6 +55,19 @@ import {
   type ProductDetailsEditForm,
   type ProductDetailsFieldId
 } from "@/lib/product-details-edit";
+
+const MercadoLivrePhotoSearchModal = dynamic(
+  () => import("@/components/mercado-livre-photo-search-modal")
+    .then((module) => module.MercadoLivrePhotoSearchModal),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="fixed inset-0 z-[85] grid place-items-center bg-black/70 p-4 text-sm text-matrix-muted">
+        Carregando busca de fotos...
+      </div>
+    )
+  }
+);
 
 type ProductDetailsImage = {
   id: string;
@@ -675,26 +689,24 @@ const ProductGallery = memo(function ProductGallery({
   );
 });
 
-export function ProductDetailsModal<T extends ProductDetailsProduct>({
+export function ProductDetailsView<T extends ProductDetailsProduct>({
+  canEditProduct,
+  initialEditing = false,
   product,
-  onClose,
+  onBack,
   onProductUpdated,
-  loadProduct,
-  checkPermission,
   saveProduct
 }: {
+  canEditProduct: boolean;
+  initialEditing?: boolean;
   product: T;
-  onClose: () => void;
+  onBack: () => void;
   onProductUpdated: (product: T) => void;
-  loadProduct?: (productId: string) => Promise<T>;
-  checkPermission?: () => Promise<boolean>;
   saveProduct?: (productId: string, payload: unknown) => Promise<T>;
 }) {
   const [currentProduct, setCurrentProduct] = useState<T>(product);
-  const [detailsLoaded, setDetailsLoaded] = useState(false);
-  const [detailsLoading, setDetailsLoading] = useState(true);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(initialEditing && canEditProduct);
   const [form, setForm] = useState<ProductDetailsEditForm>(() => formFromProduct(product));
   const [dirtyFields, setDirtyFields] = useState<Set<keyof ProductDetailsEditForm>>(() => new Set());
   const [nameEditorResetKey, setNameEditorResetKey] = useState(0);
@@ -708,8 +720,6 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   const [selectedImageId, setSelectedImageId] = useState<string | null>(() => orderedImages(product)[0]?.id ?? null);
   const [draggedImageId, setDraggedImageId] = useState<string | null>(null);
   const [dragOverImageId, setDragOverImageId] = useState<string | null>(null);
-  const [canEditProduct, setCanEditProduct] = useState(false);
-  const [permissionChecked, setPermissionChecked] = useState(false);
   const [confirmingSave, setConfirmingSave] = useState(false);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -746,71 +756,8 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
       setConfirmingDiscard(true);
       return;
     }
-    onClose();
-  }, [hasPendingChanges, onClose, saving]);
-
-  useEffect(() => {
-    let active = true;
-    setDetailsLoading(true);
-    setDetailsLoaded(false);
-
-    async function loadDetails() {
-      try {
-        let nextProduct: T;
-        let canEdit: boolean;
-        if (loadProduct) {
-          [nextProduct, canEdit] = await Promise.all([
-            loadProduct(product.id),
-            checkPermission ? checkPermission() : Promise.resolve(false)
-          ]);
-        } else {
-          const response = await fetch(`/api/products/${product.id}`, { cache: "no-store" });
-          const payload = (await response.json()) as {
-            data?: T;
-            error?: string;
-            permissions?: { canEdit?: boolean };
-          };
-          if (!response.ok || !payload.data) throw new Error(payload.error ?? "Nao foi possivel carregar o produto.");
-          nextProduct = payload.data;
-          canEdit = payload.permissions?.canEdit === true;
-        }
-        if (!active) return;
-        const nextImages = orderedImages(nextProduct);
-        const nextForm = formFromProduct(nextProduct);
-        setCurrentProduct(nextProduct);
-        setForm(nextForm);
-        nameDraftRef.current = nextForm.name;
-        setDirtyFields(new Set());
-        setNameEditorResetKey((current) => current + 1);
-        setNameIsValid(nextForm.name.trim().length >= 2 && nextForm.name.trim().length <= PRODUCT_DETAILS_NAME_MAX_LENGTH);
-        setImages(nextImages);
-        setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
-        setBaselineImageKeys(nextImages.map(imageStateKey));
-        setSelectedImageId(nextImages[0]?.id ?? null);
-        titleAiRequest.current?.abort();
-        titleAiRequest.current = null;
-        setTitleAiOpen(false);
-        setTitleAiLoading(false);
-        setTitleAiSuggestions([]);
-        setTitleAiError(null);
-        setCanEditProduct(canEdit);
-        setPermissionChecked(true);
-        setDetailsLoaded(true);
-      } catch (loadError) {
-        if (active) setError(loadError instanceof Error ? loadError.message : "Nao foi possivel carregar o produto.");
-      } finally {
-        if (active) {
-          setPermissionChecked(true);
-          setDetailsLoading(false);
-        }
-      }
-    }
-
-    void loadDetails();
-    return () => {
-      active = false;
-    };
-  }, [checkPermission, loadProduct, product.id]);
+    onBack();
+  }, [hasPendingChanges, onBack, saving]);
 
   useEffect(() => {
     return () => titleAiRequest.current?.abort();
@@ -1175,15 +1122,13 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
   }
 
   return (
-    <div className="fixed inset-0 z-[70] bg-black/70 p-1 backdrop-blur-md sm:p-2" onMouseDown={(event) => event.target === event.currentTarget && requestClose()}>
-      <section aria-modal="true" className="mx-auto flex h-[calc(100dvh-0.5rem)] w-full max-w-[1540px] flex-col overflow-hidden rounded-xl border border-matrix-gold/35 bg-matrix-panel text-matrix-fg shadow-glow sm:h-[calc(100dvh-1rem)]" role="dialog">
-        <main className="matrix-scroll min-h-0 flex-1 overflow-y-auto px-4 py-4 pb-6 sm:px-6">
-          {detailsLoading ? <p className="mb-3 text-sm text-matrix-muted">Carregando todas as fotos e detalhes...</p> : null}
+    <div className="mx-auto min-w-0 w-full max-w-[1540px]">
+      <section className="flex w-full flex-col overflow-hidden rounded-xl border border-matrix-gold/35 bg-matrix-panel text-matrix-fg shadow-glow lg:h-[calc(100dvh-6.25rem)] lg:min-h-0">
+        <main className="matrix-scroll min-w-0 flex-1 overflow-visible px-4 py-4 pb-6 sm:px-6 lg:min-h-0 lg:overflow-y-auto">
           {feedback ? <div className="mb-3 flex items-center gap-2 rounded-lg border border-green-500/25 bg-green-500/10 px-3 py-2 text-sm font-semibold text-green-700"><CheckCircle2 className="h-4 w-4" />{feedback}</div> : null}
           {error ? <div className="mb-3 flex items-center gap-2 rounded-lg border border-red-500/25 bg-red-500/10 px-3 py-2 text-sm font-semibold text-red-700"><AlertTriangle className="h-4 w-4" />{error}</div> : null}
 
-          {detailsLoaded ? (
-            <>
+          <>
           <div className="grid items-start gap-5 lg:grid-cols-[minmax(320px,0.78fr)_minmax(0,1.35fr)]">
             <ProductGallery
               dragOverImageId={dragOverImageId}
@@ -1204,9 +1149,9 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
             />
 
             <section className="relative order-1 min-w-0 pr-14 lg:order-2 lg:flex lg:min-h-full lg:flex-col lg:justify-center lg:py-8 lg:pr-16">
-              <p className="text-xs font-semibold uppercase text-matrix-goldDark">Ver produto</p>
+              <p className="text-xs font-semibold uppercase text-matrix-goldDark">Produto</p>
               <h2 className="mt-2 max-w-5xl break-words text-2xl font-bold leading-tight sm:text-3xl lg:text-4xl">{currentProduct.name}</h2>
-              <button aria-label="Fechar detalhes do produto" className="absolute right-0 top-0 grid h-11 w-11 place-items-center rounded-lg border border-matrix-border bg-matrix-panel2 text-matrix-muted transition hover:border-matrix-gold/70 hover:text-matrix-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold" onClick={requestClose} type="button"><X className="h-6 w-6" /></button>
+              <button aria-label="Voltar para produtos" className="absolute right-0 top-0 grid h-11 w-11 place-items-center rounded-lg border border-matrix-border bg-matrix-panel2 text-matrix-muted transition hover:border-matrix-gold/70 hover:text-matrix-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold" onClick={requestClose} title="Voltar para produtos" type="button"><ArrowLeft className="h-5 w-5" /></button>
               <div className="mt-4 flex flex-wrap gap-2 text-xs">
                 <span className="inline-flex items-center gap-2 rounded-md border border-matrix-gold/30 bg-matrix-goldSoft/35 px-2.5 py-1.5 font-semibold text-matrix-goldDark"><span className="h-2 w-2 rounded-full bg-matrix-gold" />{statusText}</span>
                 <span className="rounded-md border border-matrix-border bg-matrix-panel2 px-2.5 py-1.5">Origem: <strong>{originText}</strong></span>
@@ -1217,7 +1162,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
           </div>
 
           <ProductDetailsFieldsGrid
-            aiDisabled={saving || titleAiLoading || !canEditProduct || !detailsLoaded || detailsLoading}
+            aiDisabled={saving || titleAiLoading || !canEditProduct}
             aiLoading={titleAiLoading}
             canEditProduct={canEditProduct}
             detailValues={detailValues}
@@ -1296,16 +1241,15 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
             <div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2 text-sm font-semibold"><FileText className="h-4 w-4 text-matrix-goldDark" />Descricao</div>{canToggleDescription ? <button aria-expanded={descriptionExpanded} className="inline-flex items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-semibold text-matrix-goldDark" onClick={() => setDescriptionExpanded((current) => !current)} type="button">{descriptionExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}{descriptionExpanded ? "Recolher" : "Expandir"}</button> : null}</div>
             {editing ? <textarea className="mt-3 min-h-44 w-full resize-y rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm leading-6 outline-none focus:border-matrix-gold/70 focus:ring-2 focus:ring-matrix-gold/20" onChange={(event) => updateField("description", event.target.value)} value={form.description} /> : <div className={`relative mt-3 ${descriptionCollapsed ? "max-h-28 overflow-hidden" : ""}`}><p className="whitespace-pre-line break-words text-sm leading-6">{description || "Nao informado"}</p>{descriptionCollapsed ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-matrix-panel2 to-transparent" /> : null}</div>}
           </section>
-            </>
-          ) : null}
+          </>
         </main>
 
         <footer className="z-10 flex shrink-0 flex-col gap-3 border-t border-matrix-border bg-matrix-panel px-4 py-3 shadow-[0_-12px_32px_rgb(0_0_0/0.2)] sm:flex-row sm:items-center sm:justify-between sm:px-6">
-          <p className="text-xs text-matrix-muted">{editing ? "As mudancas permanecem locais ate a confirmacao do salvamento." : permissionChecked && !canEditProduct ? "Seu usuario pode visualizar, mas nao editar produtos." : "Visualizacao do cadastro local do W Ecommerce."}</p>
+          <p className="text-xs text-matrix-muted">{editing ? "As mudancas permanecem locais ate a confirmacao do salvamento." : !canEditProduct ? "Seu usuario pode visualizar, mas nao editar produtos." : "Visualizacao do cadastro local do W Ecommerce."}</p>
           <div className="grid grid-cols-2 gap-2 sm:flex sm:justify-end">
             {editing ? (
               <><Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">Cancelar</Button><Button disabled={saving || !hasPendingChanges || !nameIsValid} onClick={requestSave} type="button"><Save className="h-4 w-4" />{saving ? "Salvando produto..." : "Salvar produto"}</Button></>
-            ) : <><Button onClick={requestClose} type="button" variant="secondary">Fechar</Button>{canEditProduct ? <Button disabled={!detailsLoaded || detailsLoading} onClick={beginEditing} type="button"><Edit3 className="h-4 w-4" />Editar</Button> : null}</>}
+            ) : <><Button onClick={requestClose} type="button" variant="secondary"><ArrowLeft className="h-4 w-4" />Voltar para produtos</Button>{canEditProduct ? <Button onClick={beginEditing} type="button"><Edit3 className="h-4 w-4" />Editar</Button> : null}</>}
           </div>
         </footer>
       </section>
@@ -1323,7 +1267,7 @@ export function ProductDetailsModal<T extends ProductDetailsProduct>({
 
           {confirmingSave ? <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4"><div className="w-full max-w-lg rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-glow"><div className="flex gap-3"><AlertTriangle className="h-5 w-5 shrink-0 text-matrix-goldDark" /><div><h3 className="text-lg font-bold">Salvar produto?</h3><p className="mt-2 text-sm leading-6 text-matrix-muted">As alteracoes serao gravadas somente no W Ecommerce. Para envia-las ao Bling, selecione o produto na lista e use Atualizar selecionados no Bling.</p></div></div><div className="mt-5 flex justify-end gap-2"><Button disabled={saving} onClick={() => setConfirmingSave(false)} type="button" variant="secondary">Voltar</Button><Button disabled={saving} onClick={() => void confirmSave()} type="button">{saving ? "Salvando produto..." : "Salvar produto"}</Button></div></div></div> : null}
 
-      {confirmingDiscard ? <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4"><div className="w-full max-w-md rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-glow"><h3 className="text-lg font-bold">Descartar alteracoes?</h3><p className="mt-2 text-sm leading-6 text-matrix-muted">A ordem e as fotos removidas serao restauradas na visualizacao e nada sera salvo.</p><div className="mt-5 flex justify-end gap-2"><Button onClick={() => setConfirmingDiscard(false)} type="button" variant="secondary">Continuar editando</Button><Button onClick={onClose} type="button"><Trash2 className="h-4 w-4" />Descartar</Button></div></div></div> : null}
+      {confirmingDiscard ? <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4"><div className="w-full max-w-md rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-glow"><h3 className="text-lg font-bold">Descartar alteracoes?</h3><p className="mt-2 text-sm leading-6 text-matrix-muted">A ordem e as fotos removidas serao restauradas na visualizacao e nada sera salvo.</p><div className="mt-5 flex justify-end gap-2"><Button onClick={() => setConfirmingDiscard(false)} type="button" variant="secondary">Continuar editando</Button><Button onClick={onBack} type="button"><Trash2 className="h-4 w-4" />Descartar</Button></div></div></div> : null}
     </div>
   );
 }

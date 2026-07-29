@@ -612,7 +612,7 @@ test("a capitalization-only dry-run plans nome without executing PATCH", async (
 
 test("the editor saves only locally and external sync rereads the persisted product", () => {
   const modalSource = readFileSync(
-    path.join(process.cwd(), "components/product-details-modal.tsx"),
+    path.join(process.cwd(), "components/product-details-view.tsx"),
     "utf8"
   );
   const productsSource = readFileSync(

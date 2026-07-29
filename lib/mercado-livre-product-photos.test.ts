@@ -258,8 +258,8 @@ test("the photo endpoint is organization-scoped, read-only and creates no local 
   assert.doesNotMatch(source, /prisma\.(?:productImage|product|mercadoLivreReferenceImport|productEnrichmentDraft)\.(?:create|update|upsert|delete)/i);
 });
 
-test("applying search photos changes modal state only and persistence stays in the main save action", () => {
-  const source = readFileSync(new URL("../components/product-details-modal.tsx", import.meta.url), "utf8");
+test("applying search photos changes page state only and persistence stays in the main save action", () => {
+  const source = readFileSync(new URL("../components/product-details-view.tsx", import.meta.url), "utf8");
   const applyStart = source.indexOf("const applyMercadoLivrePhotos = useCallback");
   const applyEnd = source.indexOf("const beginEditing = useCallback", applyStart);
   const applySource = source.slice(applyStart, applyEnd);
@@ -270,5 +270,6 @@ test("applying search photos changes modal state only and persistence stays in t
   assert.doesNotMatch(applySource, /fetch\(/);
   assert.match(saveSource, /method:\s*"PATCH"/);
   assert.match(source, /onCancel=\{\(\) => setSearchingMercadoLivrePhotos\(false\)\}/);
+  assert.match(source, /dynamic\(/);
   assert.doesNotMatch(source, /disabled=\{images\.length >= INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES\}/);
 });
