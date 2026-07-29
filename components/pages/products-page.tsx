@@ -44,6 +44,7 @@ import {
   BLING_IMAGE_APPEND_SENDING_MESSAGE,
   confirmBlingImageAppend
 } from "@/lib/bling-product-image-append-client";
+import { canConfirmBlingImportPreview } from "@/lib/bling-product-import-preview";
 import type { BlingProductUpdateCompletion } from "@/lib/bling-product-update-continuation";
 import type {
   BlingFullProductSyncPreview,
@@ -105,9 +106,13 @@ type ProductAccountContext = {
 };
 
 type BlingImportPreview = {
+  correlationId: string;
   totalReportedByBling: number | null;
   totalFound: number;
   pagesFound: number;
+  pagesCompleted: number;
+  pagesExpected: number;
+  uniqueProductsLoaded: number;
   simpleProducts: number;
   variations: number;
   active: number;
@@ -122,6 +127,12 @@ type BlingImportPreview = {
   duplicateExternalIds: number;
   skuConflicts: number;
   completed: boolean;
+  previewComplete: boolean;
+  previewFingerprint: string;
+  previewExpiresAt: string;
+  confirmationToken: string;
+  warnings: string[];
+  durationMs: number;
   writesPerformed: false;
 };
 
@@ -340,6 +351,7 @@ export function ProductsPage() {
   const [blingImportBusy, setBlingImportBusy] = useState(false);
   const [blingImportMessage, setBlingImportMessage] = useState("");
   const [blingImportPreview, setBlingImportPreview] = useState<BlingImportPreview | null>(null);
+  const [blingImportCorrelationId, setBlingImportCorrelationId] = useState<string | null>(null);
   const [blingSyncJob, setBlingSyncJob] = useState<BlingSyncJob | null>(null);
   const [blingUpdateOpen, setBlingUpdateOpen] = useState(false);
   const [blingUpdateBusy, setBlingUpdateBusy] = useState(false);
@@ -353,6 +365,8 @@ export function ProductsPage() {
   const blingUpdateIdempotencyKey = useRef<string | null>(null);
   const blingImageAppendIdempotencyKey = useRef<string | null>(null);
   const blingUpdateRequestInFlight = useRef(false);
+  const blingImportRequestInFlight = useRef(false);
+  const blingImportCorrelationRef = useRef<string | null>(null);
   const blingUpdateCompletionSequence = useRef(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
@@ -509,6 +523,27 @@ export function ProductsPage() {
     const productIds = new Set(products.map((product) => product.id));
     setSelectedProductIds((current) => new Set([...current].filter((id) => productIds.has(id))));
   }, [products]);
+
+  useEffect(() => {
+    if (!blingImportPreview) return;
+    const expiresAt = Date.parse(blingImportPreview.previewExpiresAt);
+    const remainingMs = expiresAt - Date.now();
+    if (!Number.isFinite(expiresAt) || remainingMs <= 0) {
+      setBlingImportPreview(null);
+      setBlingImportCorrelationId(null);
+      blingImportCorrelationRef.current = null;
+      setBlingImportMessage("A previa expirou. Consulte os produtos novamente.");
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      if (blingImportCorrelationRef.current !== blingImportPreview.correlationId) return;
+      setBlingImportPreview(null);
+      setBlingImportCorrelationId(null);
+      blingImportCorrelationRef.current = null;
+      setBlingImportMessage("A previa expirou. Consulte os produtos novamente.");
+    }, remainingMs);
+    return () => window.clearTimeout(timeout);
+  }, [blingImportPreview]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -1217,6 +1252,11 @@ export function ProductsPage() {
   }
 
   async function openBlingImportPreview() {
+    if (blingImportRequestInFlight.current) return;
+    const correlationId = window.crypto.randomUUID();
+    blingImportRequestInFlight.current = true;
+    blingImportCorrelationRef.current = correlationId;
+    setBlingImportCorrelationId(correlationId);
     setBlingImportOpen(true);
     setBlingImportPreview(null);
     setBlingSyncJob(null);
@@ -1224,10 +1264,16 @@ export function ProductsPage() {
 
     const connectionId = accountContext?.mode === "ERP_ACCOUNT" && accountContext.provider === "BLING" ? accountContext.connectionId : null;
     if (!connectionId) {
+      blingImportRequestInFlight.current = false;
+      blingImportCorrelationRef.current = null;
+      setBlingImportCorrelationId(null);
       setBlingImportMessage("Selecione uma conta Bling no topo antes de consultar os produtos.");
       return;
     }
     if (accountContext?.selectedOption?.status !== "ACTIVE") {
+      blingImportRequestInFlight.current = false;
+      blingImportCorrelationRef.current = null;
+      setBlingImportCorrelationId(null);
       setBlingImportMessage("Reconecte a conta Bling antes de continuar.");
       return;
     }
@@ -1237,17 +1283,40 @@ export function ProductsPage() {
       const response = await fetch("/api/products/import-from-bling", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "dry-run", connectionId })
+        body: JSON.stringify({ mode: "dry-run", connectionId, correlationId })
       });
       const payload = await response.json().catch(() => ({}));
+      if (blingImportCorrelationRef.current !== correlationId) return;
       if (!response.ok) {
+        setBlingImportPreview(null);
+        setBlingSyncJob(null);
         setBlingImportMessage(payload.error ?? "Nao foi possivel consultar os produtos do Bling agora.");
         return;
       }
-      setBlingImportPreview(payload.preview as BlingImportPreview);
+      const preview = payload.preview as BlingImportPreview | undefined;
+      if (
+        !preview
+        || !canConfirmBlingImportPreview(preview, correlationId)
+        || preview.pagesCompleted !== preview.pagesExpected
+        || preview.uniqueProductsLoaded !== preview.totalFound
+      ) {
+        setBlingImportPreview(null);
+        setBlingSyncJob(null);
+        setBlingImportMessage("A consulta retornou dados incompletos ou divergentes. Nenhuma sincronizacao foi iniciada.");
+        return;
+      }
+      setBlingImportPreview(preview);
       setBlingImportMessage("Consulta concluida. Nenhum produto foi alterado.");
+    } catch {
+      if (blingImportCorrelationRef.current !== correlationId) return;
+      setBlingImportPreview(null);
+      setBlingSyncJob(null);
+      setBlingImportMessage("Nao foi possivel consultar os produtos do Bling agora.");
     } finally {
-      setBlingImportBusy(false);
+      if (blingImportCorrelationRef.current === correlationId) {
+        blingImportRequestInFlight.current = false;
+        setBlingImportBusy(false);
+      }
     }
   }
 
@@ -1286,6 +1355,13 @@ export function ProductsPage() {
   async function startBlingSync() {
     const connectionId = accountContext?.mode === "ERP_ACCOUNT" && accountContext.provider === "BLING" ? accountContext.connectionId : null;
     if (!connectionId || !blingImportPreview || blingImportBusy) return;
+    if (!canConfirmBlingImportPreview(blingImportPreview, blingImportCorrelationId)) {
+      setBlingImportPreview(null);
+      setBlingImportCorrelationId(null);
+      blingImportCorrelationRef.current = null;
+      setBlingImportMessage("A previa expirou ou nao corresponde a esta consulta. Gere uma nova previa.");
+      return;
+    }
     const confirmed = window.confirm("Esta acao percorrera todas as paginas do Bling e atualizara o catalogo local. Deseja continuar?");
     if (!confirmed) return;
 
@@ -1295,17 +1371,33 @@ export function ProductsPage() {
       const response = await fetch("/api/products/import-from-bling", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "prepare", connectionId, confirmed: true })
+        body: JSON.stringify({
+          mode: "prepare",
+          connectionId,
+          confirmed: true,
+          correlationId: blingImportPreview.correlationId,
+          previewFingerprint: blingImportPreview.previewFingerprint,
+          confirmationToken: blingImportPreview.confirmationToken
+        })
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || !payload.job?.id) {
+        setBlingImportPreview(null);
+        setBlingImportCorrelationId(null);
+        blingImportCorrelationRef.current = null;
         setBlingImportMessage(payload.error ?? "Nao foi possivel preparar a sincronizacao.");
         return;
       }
+      setBlingImportPreview(null);
+      setBlingImportCorrelationId(null);
+      blingImportCorrelationRef.current = null;
       setBlingSyncJob(payload.job as BlingSyncJob);
       setBlingImportMessage("Sincronizando as paginas encontradas...");
       await runPreparedBlingSync(connectionId, payload.job.id as string);
     } catch (error) {
+      setBlingImportPreview(null);
+      setBlingImportCorrelationId(null);
+      blingImportCorrelationRef.current = null;
       setBlingImportMessage(error instanceof Error ? error.message : "Nao foi possivel concluir a sincronizacao.");
     } finally {
       setBlingImportBusy(false);
@@ -1730,6 +1822,8 @@ export function ProductsPage() {
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Dados inválidos</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.errors}</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">IDs repetidos</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.duplicateExternalIds}</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Conflitos de SKU</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.skuConflicts}</dd></div>
+                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Paginas verificadas</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.pagesCompleted}/{blingImportPreview.pagesExpected}</dd></div>
+                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Integridade da previa</dt><dd className="font-semibold text-emerald-300">Completa</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Alterações realizadas</dt><dd className="font-semibold text-matrix-fg">Nenhuma</dd></div>
                 </dl>
               </>
@@ -1746,7 +1840,7 @@ export function ProductsPage() {
             {blingImportMessage ? <p className="mt-5 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm text-matrix-muted">{blingImportMessage}</p> : null}
             <div className="mt-5 flex flex-wrap justify-end gap-2">
               <Button disabled={blingImportBusy} onClick={() => setBlingImportOpen(false)} type="button" variant="secondary">Fechar</Button>
-              {blingImportPreview ? <Button disabled={blingImportBusy || !blingImportPreview.completed} onClick={() => void startBlingSync()} type="button">{blingImportBusy ? "Sincronizando..." : "Confirmar sincronização"}</Button> : null}
+              {blingImportPreview ? <Button disabled={blingImportBusy || !canConfirmBlingImportPreview(blingImportPreview, blingImportCorrelationId)} onClick={() => void startBlingSync()} type="button">{blingImportBusy ? "Sincronizando..." : "Confirmar sincronização"}</Button> : null}
             </div>
           </section>
         </div>

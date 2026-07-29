@@ -30,6 +30,7 @@ export type BlingApiErrorCode =
   | "TOKEN_INVALID"
   | "PERMISSION_DENIED"
   | "RATE_LIMITED"
+  | "REQUEST_TIMEOUT"
   | "TEMPORARY_FAILURE"
   | "REQUEST_REJECTED";
 
@@ -285,7 +286,16 @@ export class BlingApiClient {
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
         signal: options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : undefined
       });
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof Error
+        && (error.name === "TimeoutError" || error.name === "AbortError")
+      ) {
+        throw new BlingApiError("A consulta ao Bling excedeu o tempo esperado.", 504, "REQUEST_TIMEOUT", undefined, {
+          category: "TEMPORARY",
+          requestState: "UNKNOWN"
+        });
+      }
       throw new BlingApiError("Falha temporaria ao consultar o Bling.", 503, "TEMPORARY_FAILURE", undefined, {
         category: "TEMPORARY",
         requestState: "UNKNOWN"

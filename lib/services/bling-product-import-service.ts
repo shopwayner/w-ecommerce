@@ -1,16 +1,26 @@
+import { createHash } from "node:crypto";
 import { ERPProvider, Prisma } from "@prisma/client";
+import {
+  BlingImportPreviewError,
+  collectBlingPreviewPages,
+  evaluateBlingImportPreviewIntegrity,
+  type BlingImportPreviewFailureDiagnostic
+} from "@/lib/bling-product-import-preview";
 import { prisma } from "@/lib/prisma";
 import {
   extractBlingProductBrand,
   normalizeProductBrand,
   resolveProductBrandFromBling
 } from "@/lib/product-brand";
+import { decryptSecret, encryptSecret } from "@/lib/security/encryption";
 import { BlingApiError, blingApiClient } from "@/lib/services/bling-api-client";
 
 const pageSize = 100;
 const maxSafetyPages = 1_000;
 const maxRetryAttempts = 3;
 const staleJobLeaseMs = 5 * 60 * 1_000;
+const previewConfirmationLifetimeMs = 10 * 60 * 1_000;
+const previewPageTimeoutMs = 30_000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -89,9 +99,13 @@ export type BlingProductStatusConditionalUpdateInput = {
 
 export type BlingProductDryRun = {
   connectionReady: true;
+  correlationId: string;
   totalReportedByBling: number | null;
   totalFound: number;
   pagesFound: number;
+  pagesCompleted: number;
+  pagesExpected: number;
+  uniqueProductsLoaded: number;
   simpleProducts: number;
   variations: number;
   active: number;
@@ -106,7 +120,25 @@ export type BlingProductDryRun = {
   duplicateExternalIds: number;
   skuConflicts: number;
   completed: boolean;
+  previewComplete: true;
+  previewFingerprint: string;
+  previewExpiresAt: string;
+  confirmationToken: string;
+  warnings: string[];
+  durationMs: number;
   writesPerformed: false;
+};
+
+type BlingImportPreviewConfirmation = {
+  version: 1;
+  operation: "BLING_PRODUCT_IMPORT_PREVIEW";
+  userId: string;
+  organizationId: string;
+  connectionId: string;
+  correlationId: string;
+  previewFingerprint: string;
+  issuedAt: string;
+  expiresAt: string;
 };
 
 function record(value: unknown): JsonRecord {
@@ -254,6 +286,43 @@ function isTemporary(error: unknown) {
   return error instanceof BlingApiError && (error.code === "RATE_LIMITED" || error.code === "TEMPORARY_FAILURE");
 }
 
+function classifyPreviewFailure(error: unknown) {
+  if (error instanceof BlingApiError) {
+    return {
+      httpStatus: error.status,
+      errorCode: error.code,
+      requestIdMasked: error.details?.requestIdMasked
+    };
+  }
+  return { errorCode: "UNEXPECTED_ERROR" };
+}
+
+function previewFailureDiagnostic(input: {
+  correlationId: string;
+  stage: BlingImportPreviewFailureDiagnostic["stage"];
+  startedAt: number;
+  error?: unknown;
+  errorCode?: string;
+  page?: number | null;
+  expectedPages?: number | null;
+  pagesCompleted?: number;
+  uniqueProductsLoaded?: number;
+}): BlingImportPreviewFailureDiagnostic {
+  const failure = classifyPreviewFailure(input.error);
+  return {
+    correlationId: input.correlationId,
+    stage: input.stage,
+    page: input.page ?? null,
+    expectedPages: input.expectedPages ?? null,
+    httpStatus: failure.httpStatus ?? null,
+    errorCode: input.errorCode ?? failure.errorCode ?? "UNEXPECTED_ERROR",
+    requestIdMasked: failure.requestIdMasked ?? null,
+    durationMs: Math.max(0, Date.now() - input.startedAt),
+    pagesCompleted: input.pagesCompleted ?? 0,
+    uniqueProductsLoaded: input.uniqueProductsLoaded ?? 0
+  };
+}
+
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -271,7 +340,8 @@ async function fetchCatalogPage(input: {
         organizationId: input.organizationId,
         connectionId: input.connectionId,
         path: "/produtos",
-        query: { pagina: input.page, limite: pageSize, criterio: input.criterion ?? 1 }
+        query: { pagina: input.page, limite: pageSize, criterio: input.criterion ?? 1 },
+        timeoutMs: input.readOnly ? previewPageTimeoutMs : undefined
       };
       return input.readOnly
         ? await blingApiClient.requestReadOnly<BlingCatalogResponse>(request)
@@ -319,9 +389,11 @@ async function validateConnection(organizationId: string, connectionId: string) 
     where: { id: connectionId, organizationId },
     select: { id: true, status: true, tokens: { orderBy: { updatedAt: "desc" }, take: 1, select: { id: true } } }
   });
-  if (!connection) throw new Error("Conta Bling nao encontrada.");
+  if (!connection) {
+    throw new BlingApiError("Conta Bling nao encontrada.", 404, "CONNECTION_NOT_FOUND");
+  }
   if (connection.status === "DISCONNECTED" || !connection.tokens.length) {
-    throw new Error("Reconecte a conta Bling antes de continuar.");
+    throw new BlingApiError("Reconecte a conta Bling antes de continuar.", 401, "TOKEN_MISSING");
   }
   return connection;
 }
@@ -331,39 +403,38 @@ async function fetchAllProducts(input: {
   connectionId: string;
   readOnly: boolean;
   criterion?: 1 | 5;
+  correlationId?: string;
 }) {
-  const products: NormalizedBlingProduct[] = [];
-  let page = 1;
-  let pagesFound = 0;
-  let sourceRowsFetched = 0;
-  let totalReportedByBling: number | null = null;
-  let errors = 0;
-  let completed = false;
+  const collected = await collectBlingPreviewPages<NormalizedBlingProduct>({
+    correlationId: input.correlationId ?? "background-catalog-read",
+    pageSize,
+    maxPages: maxSafetyPages,
+    fetchPage: async (page) => {
+      const payload = await fetchCatalogPage({ ...input, page });
+      try {
+        return normalizePage(payload);
+      } catch (error) {
+        throw new BlingImportPreviewError(
+          "A pagina retornada pelo Bling nao pode ser normalizada.",
+          previewFailureDiagnostic({
+            correlationId: input.correlationId ?? "background-catalog-read",
+            stage: "NORMALIZATION",
+            startedAt: Date.now(),
+            error,
+            page
+          })
+        );
+      }
+    },
+    productKey: (product) => product.externalProductId,
+    classifyFailure: classifyPreviewFailure
+  });
 
-  for (; page <= maxSafetyPages; page += 1) {
-    let payload: BlingCatalogResponse;
-    try {
-      payload = await fetchCatalogPage({ ...input, page });
-    } catch (error) {
-      if (!isTemporary(error)) throw error;
-      errors += 1;
-      break;
-    }
-    const normalized = normalizePage(payload);
-    totalReportedByBling = normalized.totalReported ?? totalReportedByBling;
-    sourceRowsFetched += normalized.sourceRowCount;
-    errors += normalized.invalidRows;
-    products.push(...normalized.products);
-
-    if (normalized.sourceRowCount > 0) pagesFound += 1;
-    const reachedReportedTotal = totalReportedByBling !== null && sourceRowsFetched >= totalReportedByBling;
-    if (normalized.sourceRowCount < pageSize || reachedReportedTotal) {
-      completed = true;
-      break;
-    }
-  }
-
-  return { products, pagesFound, totalReportedByBling, errors, completed };
+  return {
+    ...collected,
+    errors: collected.invalidRows,
+    completed: collected.terminated
+  };
 }
 
 function safeProductAttributes(
@@ -795,10 +866,138 @@ async function applyPage(input: {
   });
 }
 
+function createPreviewFingerprint(input: {
+  correlationId: string;
+  connectionId: string;
+  totalReportedByBling: number;
+  totalFound: number;
+  pagesCompleted: number;
+  pagesExpected: number;
+  existing: number;
+  newProducts: number;
+  importable: number;
+  duplicateExternalIds: number;
+  skuConflicts: number;
+}) {
+  return createHash("sha256").update(JSON.stringify([
+    input.correlationId,
+    input.connectionId,
+    input.totalReportedByBling,
+    input.totalFound,
+    input.pagesCompleted,
+    input.pagesExpected,
+    input.existing,
+    input.newProducts,
+    input.importable,
+    input.duplicateExternalIds,
+    input.skuConflicts
+  ])).digest("hex");
+}
+
+export function createBlingImportPreviewConfirmation(
+  input: {
+    userId: string;
+    organizationId: string;
+    connectionId: string;
+    correlationId: string;
+    previewFingerprint: string;
+  },
+  now = new Date()
+) {
+  const confirmation: BlingImportPreviewConfirmation = {
+    version: 1,
+    operation: "BLING_PRODUCT_IMPORT_PREVIEW",
+    userId: input.userId,
+    organizationId: input.organizationId,
+    connectionId: input.connectionId,
+    correlationId: input.correlationId,
+    previewFingerprint: input.previewFingerprint,
+    issuedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + previewConfirmationLifetimeMs).toISOString()
+  };
+  return {
+    confirmationToken: encryptSecret(JSON.stringify(confirmation)),
+    previewExpiresAt: confirmation.expiresAt
+  };
+}
+
+export function verifyBlingImportPreviewConfirmation(
+  encrypted: string,
+  input: {
+    userId: string;
+    organizationId: string;
+    connectionId: string;
+    correlationId: string;
+    previewFingerprint: string;
+  },
+  now = new Date()
+) {
+  try {
+    const confirmation = JSON.parse(decryptSecret(encrypted)) as BlingImportPreviewConfirmation;
+    const issuedAt = Date.parse(confirmation.issuedAt);
+    const expiresAt = Date.parse(confirmation.expiresAt);
+    if (
+      confirmation.version !== 1
+      || confirmation.operation !== "BLING_PRODUCT_IMPORT_PREVIEW"
+      || confirmation.userId !== input.userId
+      || confirmation.organizationId !== input.organizationId
+      || confirmation.connectionId !== input.connectionId
+      || confirmation.correlationId !== input.correlationId
+      || confirmation.previewFingerprint !== input.previewFingerprint
+      || !Number.isFinite(issuedAt)
+      || !Number.isFinite(expiresAt)
+      || expiresAt <= now.getTime()
+      || expiresAt - issuedAt !== previewConfirmationLifetimeMs
+    ) {
+      throw new Error("invalid");
+    }
+  } catch {
+    throw new BlingImportPreviewError(
+      "A previa expirou ou nao corresponde a esta execucao.",
+      {
+        correlationId: input.correlationId,
+        stage: "PREPARE_SYNC",
+        page: null,
+        expectedPages: null,
+        httpStatus: 409,
+        errorCode: "PREVIEW_INVALID_OR_EXPIRED",
+        requestIdMasked: null,
+        durationMs: 0,
+        pagesCompleted: 0,
+        uniqueProductsLoaded: 0
+      }
+    );
+  }
+}
+
 export class BlingProductImportService {
-  async dryRun(input: { organizationId: string; connectionId: string }): Promise<BlingProductDryRun> {
-    await validateConnection(input.organizationId, input.connectionId);
-    const fetched = await fetchAllProducts({ ...input, readOnly: true });
+  async dryRun(input: {
+    userId: string;
+    organizationId: string;
+    connectionId: string;
+    correlationId: string;
+  }): Promise<BlingProductDryRun> {
+    const startedAt = Date.now();
+    try {
+      await validateConnection(input.organizationId, input.connectionId);
+    } catch (error) {
+      throw new BlingImportPreviewError(
+        "A conexao Bling nao esta pronta para a consulta.",
+        previewFailureDiagnostic({
+          correlationId: input.correlationId,
+          stage: "AUTHENTICATION",
+          startedAt,
+          error
+        })
+      );
+    }
+
+    const fetched = await fetchAllProducts({
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      correlationId: input.correlationId,
+      readOnly: true
+    });
     const uniqueProducts = new Map<string, NormalizedBlingProduct>();
     let duplicateExternalIds = 0;
     for (const product of fetched.products) {
@@ -806,18 +1005,89 @@ export class BlingProductImportService {
       else uniqueProducts.set(product.externalProductId, product);
     }
     const products = [...uniqueProducts.values()];
-    const mappings = await loadMappings(input.organizationId, input.connectionId, products.map((product) => product.externalProductId));
+    let mappings: Map<string, string>;
+    let skuConflicts: Set<string>;
+    try {
+      mappings = await loadMappings(
+        input.organizationId,
+        input.connectionId,
+        products.map((product) => product.externalProductId)
+      );
+      const mappedIdsForComparison = new Set(mappings.keys());
+      skuConflicts = await loadSkuConflicts(input.organizationId, products, mappedIdsForComparison);
+    } catch (error) {
+      throw new BlingImportPreviewError(
+        "A comparacao local obrigatoria nao foi concluida.",
+        previewFailureDiagnostic({
+          correlationId: input.correlationId,
+          stage: "LOCAL_COMPARISON",
+          startedAt,
+          error,
+          pagesCompleted: fetched.completedPages.length,
+          uniqueProductsLoaded: products.length
+        })
+      );
+    }
     const mappedIds = new Set(mappings.keys());
-    const skuConflicts = await loadSkuConflicts(input.organizationId, products, mappedIds);
     const conflictCount = products.filter((product) => !mappedIds.has(product.externalProductId) && product.sku && skuConflicts.has(product.sku)).length;
     const existing = mappedIds.size;
     const newProducts = products.length - existing - conflictCount;
+    const integrity = evaluateBlingImportPreviewIntegrity({
+      totalReportedByBling: fetched.totalReportedByBling,
+      sourceRowsFetched: fetched.sourceRowsFetched,
+      completedPages: fetched.completedPages,
+      terminated: fetched.terminated,
+      totalChangedDuringFetch: fetched.totalChangedDuringFetch,
+      invalidRows: fetched.invalidRows,
+      duplicateExternalIds,
+      uniqueProductsLoaded: products.length
+    });
+    if (!integrity.previewComplete || fetched.totalReportedByBling === null) {
+      throw new BlingImportPreviewError(
+        "A previa nao passou pelas verificacoes de integridade.",
+        previewFailureDiagnostic({
+          correlationId: input.correlationId,
+          stage: "INTEGRITY",
+          startedAt,
+          errorCode: integrity.reasons[0] ?? "PREVIEW_INCOMPLETE",
+          expectedPages: integrity.pagesExpected,
+          pagesCompleted: fetched.completedPages.length,
+          uniqueProductsLoaded: products.length
+        })
+      );
+    }
+
+    const importable = existing + newProducts;
+    const previewFingerprint = createPreviewFingerprint({
+      correlationId: input.correlationId,
+      connectionId: input.connectionId,
+      totalReportedByBling: fetched.totalReportedByBling,
+      totalFound: products.length,
+      pagesCompleted: fetched.completedPages.length,
+      pagesExpected: integrity.pagesExpected,
+      existing,
+      newProducts,
+      importable,
+      duplicateExternalIds,
+      skuConflicts: conflictCount
+    });
+    const confirmation = createBlingImportPreviewConfirmation({
+      userId: input.userId,
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      correlationId: input.correlationId,
+      previewFingerprint
+    });
 
     return {
       connectionReady: true,
+      correlationId: input.correlationId,
       totalReportedByBling: fetched.totalReportedByBling,
       totalFound: products.length,
       pagesFound: fetched.pagesFound,
+      pagesCompleted: fetched.completedPages.length,
+      pagesExpected: integrity.pagesExpected,
+      uniqueProductsLoaded: products.length,
       simpleProducts: products.filter((product) => !product.isVariation).length,
       variations: products.filter((product) => product.isVariation).length,
       active: products.filter((product) => product.status === "A").length,
@@ -826,17 +1096,31 @@ export class BlingProductImportService {
       existing,
       new: newProducts,
       wouldUpdate: existing,
-      importable: existing + newProducts,
+      importable,
       errors: fetched.errors,
       ignored: conflictCount + fetched.errors,
       duplicateExternalIds,
       skuConflicts: conflictCount,
-      completed: fetched.completed,
+      completed: true,
+      previewComplete: true,
+      previewFingerprint,
+      previewExpiresAt: confirmation.previewExpiresAt,
+      confirmationToken: confirmation.confirmationToken,
+      warnings: [],
+      durationMs: Math.max(0, Date.now() - startedAt),
       writesPerformed: false
     };
   }
 
-  async prepareSync(input: { organizationId: string; connectionId: string }) {
+  async prepareSync(input: {
+    userId: string;
+    organizationId: string;
+    connectionId: string;
+    correlationId: string;
+    previewFingerprint: string;
+    confirmationToken: string;
+  }) {
+    verifyBlingImportPreviewConfirmation(input.confirmationToken, input);
     await validateConnection(input.organizationId, input.connectionId);
     const erpConnection = await prisma.eRPConnection.findUnique({
       where: { organizationId_provider: { organizationId: input.organizationId, provider: ERPProvider.BLING } },
