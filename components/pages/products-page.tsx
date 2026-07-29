@@ -107,12 +107,21 @@ type ProductAccountContext = {
 
 type BlingImportPreview = {
   correlationId: string;
+  reportedTotal: number | null;
+  derivedTotal: number | null;
+  totalSource: "RESPONSE" | "HEADER" | "DERIVED_SHORT_PAGE" | "DERIVED_EMPTY_SENTINEL";
   totalReportedByBling: number | null;
   totalFound: number;
   pagesFound: number;
   pagesCompleted: number;
   pagesExpected: number;
+  pageSize: number;
+  firstPage: number;
+  lastDataPage: number;
+  sentinelPage: number | null;
+  pageCounts: number[];
   uniqueProductsLoaded: number;
+  uniqueIdsCount: number;
   simpleProducts: number;
   variations: number;
   active: number;
@@ -127,7 +136,9 @@ type BlingImportPreview = {
   duplicateExternalIds: number;
   skuConflicts: number;
   completed: boolean;
+  paginationComplete: boolean;
   previewComplete: boolean;
+  listFingerprint: string;
   previewFingerprint: string;
   previewExpiresAt: string;
   confirmationToken: string;
@@ -1279,6 +1290,7 @@ export function ProductsPage() {
     }
 
     setBlingImportBusy(true);
+    let previewAccepted = false;
     try {
       const response = await fetch("/api/products/import-from-bling", {
         method: "POST",
@@ -1306,6 +1318,7 @@ export function ProductsPage() {
         return;
       }
       setBlingImportPreview(preview);
+      previewAccepted = true;
       setBlingImportMessage("Consulta concluida. Nenhum produto foi alterado.");
     } catch {
       if (blingImportCorrelationRef.current !== correlationId) return;
@@ -1316,6 +1329,10 @@ export function ProductsPage() {
       if (blingImportCorrelationRef.current === correlationId) {
         blingImportRequestInFlight.current = false;
         setBlingImportBusy(false);
+        if (!previewAccepted) {
+          blingImportCorrelationRef.current = null;
+          setBlingImportCorrelationId(null);
+        }
       }
     }
   }
@@ -1815,7 +1832,16 @@ export function ProductsPage() {
                   <KpiCard label="Precisam de revisão" value={String(blingImportPreview.ignored)} hint="Conflitos ou dados inválidos" tone="danger" />
                 </div>
                 <dl className="mt-4 grid gap-x-6 gap-y-2 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm sm:grid-cols-2">
-                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Total informado pelo Bling</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.totalReportedByBling ?? "Não informado"}</dd></div>
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-matrix-muted">
+                      {blingImportPreview.totalSource === "RESPONSE" || blingImportPreview.totalSource === "HEADER"
+                        ? "Total confirmado pelo Bling"
+                        : "Total confirmado pela paginação completa"}
+                    </dt>
+                    <dd className="font-semibold text-matrix-fg">
+                      {blingImportPreview.reportedTotal ?? blingImportPreview.derivedTotal ?? blingImportPreview.totalFound}
+                    </dd>
+                  </div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Produtos simples</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.simpleProducts}</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Variações</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.variations}</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Seriam atualizados</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.wouldUpdate}</dd></div>

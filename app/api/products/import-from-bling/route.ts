@@ -23,7 +23,7 @@ const prepareSchema = z.object({
   confirmed: z.literal(true),
   correlationId: z.string().uuid(),
   previewFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-  confirmationToken: z.string().trim().min(1).max(4_096)
+  confirmationToken: z.string().trim().min(1).max(32_768)
 }).strict();
 
 const runSchema = z.object({
@@ -84,8 +84,21 @@ function logFailure(input: {
     errorCode: diagnostic?.errorCode ?? "UNEXPECTED_ERROR",
     requestIdMasked: diagnostic?.requestIdMasked ?? null,
     durationMs: diagnostic?.durationMs ?? input.durationMs,
+    pageSize: diagnostic?.pageSize ?? null,
+    pageCounts: diagnostic?.pageCounts ?? null,
+    pageStatuses: diagnostic?.pageStatuses ?? null,
     pagesCompleted: diagnostic?.pagesCompleted ?? null,
-    uniqueProductsLoaded: diagnostic?.uniqueProductsLoaded ?? null
+    lastDataPage: diagnostic?.lastDataPage ?? null,
+    sentinelPage: diagnostic?.sentinelPage ?? null,
+    reportedTotal: diagnostic?.reportedTotal ?? null,
+    derivedTotal: diagnostic?.derivedTotal ?? null,
+    totalSource: diagnostic?.totalSource ?? "NONE",
+    uniqueIdsCount: diagnostic?.uniqueProductsLoaded ?? null,
+    duplicateCount: diagnostic?.duplicateCount ?? null,
+    invalidCount: diagnostic?.invalidCount ?? null,
+    paginationComplete: diagnostic?.paginationComplete ?? false,
+    previewComplete: diagnostic?.previewComplete ?? false,
+    jobCreated: diagnostic?.jobCreated ?? false
   });
 }
 
@@ -133,8 +146,20 @@ export async function POST(request: Request) {
         errorCode: null,
         requestIdMasked: null,
         durationMs: preview.durationMs,
+        pageSize: preview.pageSize,
+        pageCounts: preview.pageCounts,
         pagesCompleted: preview.pagesCompleted,
-        uniqueProductsLoaded: preview.uniqueProductsLoaded
+        lastDataPage: preview.lastDataPage,
+        sentinelPage: preview.sentinelPage,
+        reportedTotal: preview.reportedTotal,
+        derivedTotal: preview.derivedTotal,
+        totalSource: preview.totalSource,
+        uniqueIdsCount: preview.uniqueIdsCount,
+        duplicateCount: preview.duplicateExternalIds,
+        invalidCount: preview.errors,
+        paginationComplete: preview.paginationComplete,
+        previewComplete: preview.previewComplete,
+        jobCreated: false
       });
       return NextResponse.json(
         { preview },
@@ -154,6 +179,16 @@ export async function POST(request: Request) {
         correlationId: parsed.data.correlationId,
         previewFingerprint: parsed.data.previewFingerprint,
         confirmationToken: parsed.data.confirmationToken
+      });
+      console.info("[bling.product-import]", {
+        correlationId: parsed.data.correlationId,
+        stage: "PREPARE_SYNC",
+        httpStatus: 202,
+        errorCode: null,
+        durationMs: Math.max(0, Date.now() - requestStartedAt),
+        paginationComplete: true,
+        previewComplete: true,
+        jobCreated: true
       });
       return NextResponse.json({ job }, { status: 202 });
     }
@@ -189,8 +224,21 @@ export async function POST(request: Request) {
             errorCode: safe.diagnostic.errorCode,
             requestIdMasked: safe.diagnostic.requestIdMasked,
             durationMs: safe.diagnostic.durationMs,
+            pageSize: safe.diagnostic.pageSize,
+            pageCounts: safe.diagnostic.pageCounts,
+            pageStatuses: safe.diagnostic.pageStatuses,
             pagesCompleted: safe.diagnostic.pagesCompleted,
-            uniqueProductsLoaded: safe.diagnostic.uniqueProductsLoaded
+            lastDataPage: safe.diagnostic.lastDataPage,
+            sentinelPage: safe.diagnostic.sentinelPage,
+            reportedTotal: safe.diagnostic.reportedTotal,
+            derivedTotal: safe.diagnostic.derivedTotal,
+            totalSource: safe.diagnostic.totalSource,
+            uniqueIdsCount: safe.diagnostic.uniqueProductsLoaded,
+            duplicateCount: safe.diagnostic.duplicateCount,
+            invalidCount: safe.diagnostic.invalidCount,
+            paginationComplete: safe.diagnostic.paginationComplete,
+            previewComplete: safe.diagnostic.previewComplete,
+            jobCreated: safe.diagnostic.jobCreated
           }
           : undefined
       },

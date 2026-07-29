@@ -6,6 +6,13 @@ export type BlingImportPreviewStage =
   | "LOCAL_COMPARISON"
   | "PREPARE_SYNC";
 
+export type BlingImportTotalSource =
+  | "RESPONSE"
+  | "HEADER"
+  | "DERIVED_SHORT_PAGE"
+  | "DERIVED_EMPTY_SENTINEL"
+  | "NONE";
+
 export type BlingImportPreviewFailureDiagnostic = {
   correlationId: string;
   stage: BlingImportPreviewStage;
@@ -15,8 +22,21 @@ export type BlingImportPreviewFailureDiagnostic = {
   errorCode: string;
   requestIdMasked: string | null;
   durationMs: number;
+  pageSize?: number;
+  pageCounts?: number[];
+  pageStatuses?: number[];
   pagesCompleted: number;
+  lastDataPage?: number;
+  sentinelPage?: number | null;
+  reportedTotal?: number | null;
+  derivedTotal?: number | null;
+  totalSource?: BlingImportTotalSource;
   uniqueProductsLoaded: number;
+  duplicateCount?: number;
+  invalidCount?: number;
+  paginationComplete?: boolean;
+  previewComplete?: boolean;
+  jobCreated?: boolean;
 };
 
 export class BlingImportPreviewError extends Error {
@@ -34,6 +54,9 @@ export type NormalizedBlingPreviewPage<T> = {
   sourceRowCount: number;
   invalidRows: number;
   totalReported: number | null;
+  totalSource?: Extract<BlingImportTotalSource, "RESPONSE" | "HEADER" | "NONE">;
+  totalInvalid?: boolean;
+  httpStatus?: number;
 };
 
 export type CollectedBlingPreviewPages<T> = {
@@ -41,8 +64,14 @@ export type CollectedBlingPreviewPages<T> = {
   sourceRowsFetched: number;
   invalidRows: number;
   totalReportedByBling: number | null;
+  reportedTotalSource: Extract<BlingImportTotalSource, "RESPONSE" | "HEADER" | "NONE">;
+  reportedTotalInvalid: boolean;
   completedPages: number[];
+  pageCounts: number[];
+  pageStatuses: number[];
   pagesFound: number;
+  lastDataPage: number;
+  sentinelPage: number | null;
   terminated: boolean;
   totalChangedDuringFetch: boolean;
 };
@@ -52,6 +81,55 @@ type SafeFailure = {
   errorCode?: string;
   requestIdMasked?: string;
 };
+
+function expectedPagesFromTotal(total: number | null, pageSize: number) {
+  if (total === null) return null;
+  return total === 0 ? 1 : Math.ceil(total / pageSize);
+}
+
+function collectionDiagnostic(input: {
+  correlationId: string;
+  page: number | null;
+  pageSize: number;
+  httpStatus: number | null;
+  errorCode: string;
+  requestIdMasked: string | null;
+  durationMs: number;
+  totalReportedByBling: number | null;
+  completedPages: number[];
+  pageCounts: number[];
+  pageStatuses: number[];
+  lastDataPage: number;
+  sentinelPage: number | null;
+  uniqueProductIds: Set<string>;
+  invalidRows: number;
+}): BlingImportPreviewFailureDiagnostic {
+  return {
+    correlationId: input.correlationId,
+    stage: "CATALOG_PAGE",
+    page: input.page,
+    expectedPages: expectedPagesFromTotal(input.totalReportedByBling, input.pageSize),
+    httpStatus: input.httpStatus,
+    errorCode: input.errorCode,
+    requestIdMasked: input.requestIdMasked,
+    durationMs: input.durationMs,
+    pageSize: input.pageSize,
+    pageCounts: [...input.pageCounts],
+    pageStatuses: [...input.pageStatuses],
+    pagesCompleted: input.completedPages.length,
+    lastDataPage: input.lastDataPage,
+    sentinelPage: input.sentinelPage,
+    reportedTotal: input.totalReportedByBling,
+    derivedTotal: null,
+    totalSource: "NONE",
+    uniqueProductsLoaded: input.uniqueProductIds.size,
+    duplicateCount: 0,
+    invalidCount: input.invalidRows,
+    paginationComplete: false,
+    previewComplete: false,
+    jobCreated: false
+  };
+}
 
 export async function collectBlingPreviewPages<T>(input: {
   correlationId: string;
@@ -67,11 +145,17 @@ export async function collectBlingPreviewPages<T>(input: {
   const products: T[] = [];
   const uniqueProductIds = new Set<string>();
   const completedPages: number[] = [];
+  const pageCounts: number[] = [];
+  const pageStatuses: number[] = [];
   let sourceRowsFetched = 0;
   let invalidRows = 0;
   let totalReportedByBling: number | null = null;
+  let reportedTotalSource: CollectedBlingPreviewPages<T>["reportedTotalSource"] = "NONE";
+  let reportedTotalInvalid = false;
   let totalChangedDuringFetch = false;
   let pagesFound = 0;
+  let lastDataPage = 0;
+  let sentinelPage: number | null = null;
   let terminated = false;
 
   for (let page = 1; page <= input.maxPages; page += 1) {
@@ -83,34 +167,47 @@ export async function collectBlingPreviewPages<T>(input: {
         throw new BlingImportPreviewError(error.message, {
           ...error.diagnostic,
           page,
-          expectedPages: totalReportedByBling === null
-            ? null
-            : Math.max(1, Math.ceil(totalReportedByBling / input.pageSize)),
+          expectedPages: expectedPagesFromTotal(totalReportedByBling, input.pageSize),
           durationMs: Math.max(0, now() - startedAt),
+          pageSize: input.pageSize,
+          pageCounts: [...pageCounts],
+          pageStatuses: [...pageStatuses],
           pagesCompleted: completedPages.length,
-          uniqueProductsLoaded: uniqueProductIds.size
+          lastDataPage,
+          sentinelPage,
+          reportedTotal: totalReportedByBling,
+          invalidCount: invalidRows,
+          uniqueProductsLoaded: uniqueProductIds.size,
+          paginationComplete: false,
+          previewComplete: false,
+          jobCreated: false
         });
       }
       const failure = input.classifyFailure(error);
       throw new BlingImportPreviewError(
         "A consulta obrigatoria ao catalogo Bling foi interrompida.",
-        {
+        collectionDiagnostic({
           correlationId: input.correlationId,
-          stage: "CATALOG_PAGE",
           page,
-          expectedPages: totalReportedByBling === null
-            ? null
-            : Math.max(1, Math.ceil(totalReportedByBling / input.pageSize)),
+          pageSize: input.pageSize,
           httpStatus: failure.httpStatus ?? null,
           errorCode: failure.errorCode ?? "CATALOG_PAGE_FAILED",
           requestIdMasked: failure.requestIdMasked ?? null,
           durationMs: Math.max(0, now() - startedAt),
-          pagesCompleted: completedPages.length,
-          uniqueProductsLoaded: uniqueProductIds.size
-        }
+          totalReportedByBling,
+          completedPages,
+          pageCounts,
+          pageStatuses,
+          lastDataPage,
+          sentinelPage,
+          uniqueProductIds,
+          invalidRows
+        })
       );
     }
 
+    const responseStatus = normalized.httpStatus ?? 200;
+    if (normalized.totalInvalid) reportedTotalInvalid = true;
     if (normalized.totalReported !== null) {
       if (
         totalReportedByBling !== null
@@ -119,12 +216,20 @@ export async function collectBlingPreviewPages<T>(input: {
         totalChangedDuringFetch = true;
       }
       totalReportedByBling = normalized.totalReported;
+      reportedTotalSource = normalized.totalSource === "HEADER" ? "HEADER" : "RESPONSE";
     }
 
     completedPages.push(page);
+    pageCounts.push(normalized.sourceRowCount);
+    pageStatuses.push(responseStatus);
     sourceRowsFetched += normalized.sourceRowCount;
     invalidRows += normalized.invalidRows;
-    if (normalized.sourceRowCount > 0) pagesFound += 1;
+    if (normalized.sourceRowCount > 0) {
+      pagesFound += 1;
+      lastDataPage = page;
+    } else {
+      sentinelPage = page;
+    }
     for (const product of normalized.products) {
       products.push(product);
       uniqueProductIds.add(input.productKey(product));
@@ -133,7 +238,10 @@ export async function collectBlingPreviewPages<T>(input: {
     const reachedReportedTotal =
       totalReportedByBling !== null
       && sourceRowsFetched >= totalReportedByBling;
-    if (normalized.sourceRowCount < input.pageSize || reachedReportedTotal) {
+    const reachedSafeBoundary =
+      normalized.sourceRowCount < input.pageSize
+      || reachedReportedTotal;
+    if (reachedSafeBoundary) {
       terminated = true;
       break;
     }
@@ -144,23 +252,44 @@ export async function collectBlingPreviewPages<T>(input: {
     sourceRowsFetched,
     invalidRows,
     totalReportedByBling,
+    reportedTotalSource,
+    reportedTotalInvalid,
     completedPages,
+    pageCounts,
+    pageStatuses,
     pagesFound,
+    lastDataPage,
+    sentinelPage,
     terminated,
     totalChangedDuringFetch
   };
 }
 
 export type BlingImportPreviewIntegrity = {
+  paginationComplete: boolean;
   previewComplete: boolean;
   pagesExpected: number;
+  firstPage: number;
+  lastDataPage: number;
+  sentinelPage: number | null;
+  reportedTotal: number | null;
+  derivedTotal: number | null;
+  totalSource: BlingImportTotalSource;
   reasons: string[];
 };
 
+function pushReason(reasons: string[], reason: string) {
+  if (!reasons.includes(reason)) reasons.push(reason);
+}
+
 export function evaluateBlingImportPreviewIntegrity(input: {
   totalReportedByBling: number | null;
+  reportedTotalSource?: Extract<BlingImportTotalSource, "RESPONSE" | "HEADER" | "NONE">;
+  reportedTotalInvalid?: boolean;
   sourceRowsFetched: number;
   completedPages: number[];
+  pageCounts: number[];
+  pageStatuses?: number[];
   terminated: boolean;
   totalChangedDuringFetch: boolean;
   invalidRows: number;
@@ -170,44 +299,215 @@ export function evaluateBlingImportPreviewIntegrity(input: {
   pageSize?: number;
 }): BlingImportPreviewIntegrity {
   const pageSize = input.pageSize ?? 100;
-  const pagesExpected = input.totalReportedByBling === null
-    ? 0
-    : Math.max(1, Math.ceil(input.totalReportedByBling / pageSize));
   const reasons: string[] = [];
+  const firstPage = input.completedPages[0] ?? 1;
+  const uniquePages = new Set(input.completedPages);
+  const lastRequestedPage = input.completedPages.at(-1) ?? 0;
 
-  if (!input.terminated) reasons.push("PAGINATION_NOT_TERMINATED");
-  if (input.totalReportedByBling === null) reasons.push("TOTAL_NOT_REPORTED");
-  if (input.totalChangedDuringFetch) reasons.push("TOTAL_CHANGED_DURING_FETCH");
-  if (
-    input.totalReportedByBling !== null
-    && input.sourceRowsFetched !== input.totalReportedByBling
-  ) {
-    reasons.push("TOTAL_COUNT_MISMATCH");
+  if (!Number.isInteger(pageSize) || pageSize <= 0) {
+    pushReason(reasons, "INVALID_PAGE_SIZE");
   }
-  if (pagesExpected !== input.completedPages.length) {
-    reasons.push("PAGE_COUNT_MISMATCH");
+  if (!input.terminated) pushReason(reasons, "PAGINATION_NOT_TERMINATED");
+  if (uniquePages.size !== input.completedPages.length) {
+    pushReason(reasons, "PAGE_DUPLICATED");
+  }
+  if (input.completedPages.some((page, index) => index > 0 && page <= input.completedPages[index - 1])) {
+    pushReason(reasons, "PAGE_OUT_OF_ORDER");
   }
   if (
-    input.completedPages.some((page, index) => page !== index + 1)
-    || new Set(input.completedPages).size !== input.completedPages.length
+    firstPage !== 1
+    || Array.from({ length: Math.max(0, lastRequestedPage) }, (_, index) => index + 1)
+      .some((page) => !uniquePages.has(page))
   ) {
-    reasons.push("PAGE_SEQUENCE_INVALID");
+    pushReason(reasons, "PAGE_MISSING");
   }
-  if (input.invalidRows > 0) reasons.push("INVALID_ROWS");
-  if (input.duplicateExternalIds > 0) reasons.push("DUPLICATE_EXTERNAL_IDS");
-  if (input.uniqueProductsLoaded < input.sourceRowsFetched - input.invalidRows) {
-    reasons.push("UNIQUE_PRODUCT_COUNT_MISMATCH");
+  if (input.pageCounts.length !== input.completedPages.length) {
+    pushReason(reasons, "PAGE_COUNT_MISMATCH");
+  }
+  if (
+    input.pageCounts.some((count) =>
+      !Number.isInteger(count) || count < 0 || count > pageSize
+    )
+  ) {
+    pushReason(reasons, "INVALID_PAGE_COUNT");
+  }
+  if (
+    input.pageStatuses
+    && (
+      input.pageStatuses.length !== input.completedPages.length
+      || input.pageStatuses.some((status) => status < 200 || status >= 300)
+    )
+  ) {
+    pushReason(reasons, "BLING_REQUEST_FAILED");
+  }
+
+  const lastPositiveIndex = input.pageCounts.reduce(
+    (last, count, index) => count > 0 ? index : last,
+    -1
+  );
+  const lastDataPage = lastPositiveIndex >= 0
+    ? input.completedPages[lastPositiveIndex] ?? 0
+    : 0;
+  const sentinelIndex = input.pageCounts.findIndex((count) => count === 0);
+  const sentinelPage = sentinelIndex >= 0
+    ? input.completedPages[sentinelIndex] ?? null
+    : null;
+
+  input.pageCounts.forEach((count, index) => {
+    const laterHasData = input.pageCounts.slice(index + 1).some((later) => later > 0);
+    if (laterHasData && count < pageSize) pushReason(reasons, "PAGE_GAP");
+  });
+
+  if (input.invalidRows > 0) pushReason(reasons, "INVALID_PRODUCT_DATA");
+  if (input.duplicateExternalIds > 0) pushReason(reasons, "DUPLICATE_EXTERNAL_ID");
+  if (input.reportedTotalInvalid) pushReason(reasons, "TOTAL_MISMATCH");
+  if (input.totalChangedDuringFetch) pushReason(reasons, "TOTAL_MISMATCH");
+
+  const hasReportedTotal = input.totalReportedByBling !== null;
+  const reportedTotalValid =
+    hasReportedTotal
+    && Number.isInteger(input.totalReportedByBling)
+    && (input.totalReportedByBling ?? -1) >= 0;
+  let totalSource: BlingImportTotalSource = "NONE";
+  let derivedTotal: number | null = null;
+  let pagesExpected = input.completedPages.length;
+
+  if (hasReportedTotal) {
+    if (!reportedTotalValid) pushReason(reasons, "TOTAL_MISMATCH");
+    pagesExpected = expectedPagesFromTotal(input.totalReportedByBling, pageSize) ?? 0;
+    if (
+      input.uniqueProductsLoaded !== input.totalReportedByBling
+      || input.sourceRowsFetched !== input.totalReportedByBling
+      || input.completedPages.length !== pagesExpected
+    ) {
+      pushReason(reasons, "TOTAL_MISMATCH");
+    }
+    totalSource = input.reportedTotalSource === "HEADER" ? "HEADER" : "RESPONSE";
+  } else {
+    const finalCount = input.pageCounts.at(-1);
+    const precedingCounts = input.pageCounts.slice(0, -1);
+    const precedingPagesFull = precedingCounts.every((count) => count === pageSize);
+    const shortPageTermination =
+      typeof finalCount === "number"
+      && finalCount > 0
+      && finalCount < pageSize
+      && precedingPagesFull;
+    const emptyCatalog = input.pageCounts.length === 1 && finalCount === 0;
+    const emptySentinelTermination =
+      finalCount === 0
+      && (
+        emptyCatalog
+        || precedingPagesFull
+        || (
+          precedingCounts.length > 0
+          && precedingCounts.slice(0, -1).every((count) => count === pageSize)
+          && (precedingCounts.at(-1) ?? pageSize) < pageSize
+        )
+      );
+
+    if (shortPageTermination) {
+      totalSource = "DERIVED_SHORT_PAGE";
+      derivedTotal = input.uniqueProductsLoaded;
+    } else if (emptySentinelTermination) {
+      const previousCount = precedingCounts.at(-1);
+      totalSource =
+        typeof previousCount === "number" && previousCount > 0 && previousCount < pageSize
+          ? "DERIVED_SHORT_PAGE"
+          : "DERIVED_EMPTY_SENTINEL";
+      derivedTotal = input.uniqueProductsLoaded;
+    } else {
+      pushReason(reasons, "PAGINATION_NOT_TERMINATED");
+    }
+  }
+
+  if (input.uniqueProductsLoaded !== input.sourceRowsFetched - input.invalidRows) {
+    pushReason(reasons, "TOTAL_MISMATCH");
+  }
+
+  const paginationReasons = new Set([
+    "INVALID_PAGE_SIZE",
+    "PAGINATION_NOT_TERMINATED",
+    "PAGE_DUPLICATED",
+    "PAGE_OUT_OF_ORDER",
+    "PAGE_MISSING",
+    "PAGE_COUNT_MISMATCH",
+    "INVALID_PAGE_COUNT",
+    "BLING_REQUEST_FAILED",
+    "PAGE_GAP",
+    "INVALID_PRODUCT_DATA",
+    "DUPLICATE_EXTERNAL_ID",
+    "TOTAL_MISMATCH"
+  ]);
+  const paginationComplete = !reasons.some((reason) => paginationReasons.has(reason));
+  if (!paginationComplete && !hasReportedTotal) {
+    totalSource = "NONE";
+    derivedTotal = null;
   }
 
   return {
-    previewComplete: reasons.length === 0,
+    paginationComplete,
+    previewComplete: paginationComplete,
     pagesExpected,
+    firstPage,
+    lastDataPage,
+    sentinelPage,
+    reportedTotal: input.totalReportedByBling,
+    derivedTotal,
+    totalSource,
     reasons
+  };
+}
+
+export function validateBlingImportPreviewProof(input: {
+  pageSize: number;
+  firstPage: number;
+  lastDataPage: number;
+  sentinelPage: number | null;
+  pageCounts: number[];
+  uniqueIdsCount: number;
+  reportedTotal: number | null;
+  derivedTotal: number | null;
+  totalSource: BlingImportTotalSource;
+  duplicateCount: number;
+  invalidCount: number;
+}) {
+  const completedPages = input.pageCounts.map((_, index) => input.firstPage + index);
+  const integrity = evaluateBlingImportPreviewIntegrity({
+    totalReportedByBling: input.reportedTotal,
+    reportedTotalSource:
+      input.totalSource === "HEADER"
+        ? "HEADER"
+        : input.totalSource === "RESPONSE"
+          ? "RESPONSE"
+          : "NONE",
+    sourceRowsFetched: input.pageCounts.reduce((total, count) => total + count, 0),
+    completedPages,
+    pageCounts: input.pageCounts,
+    pageStatuses: input.pageCounts.map(() => 200),
+    terminated: true,
+    totalChangedDuringFetch: false,
+    invalidRows: input.invalidCount,
+    duplicateExternalIds: input.duplicateCount,
+    uniqueProductsLoaded: input.uniqueIdsCount,
+    pageSize: input.pageSize
+  });
+
+  return {
+    ...integrity,
+    proofMatches:
+      integrity.paginationComplete
+      && integrity.firstPage === input.firstPage
+      && integrity.lastDataPage === input.lastDataPage
+      && integrity.sentinelPage === input.sentinelPage
+      && integrity.reportedTotal === input.reportedTotal
+      && integrity.derivedTotal === input.derivedTotal
+      && integrity.totalSource === input.totalSource
   };
 }
 
 export type ConfirmableBlingImportPreview = {
   correlationId: string;
+  paginationComplete: boolean;
   previewComplete: boolean;
   previewExpiresAt: string;
   previewFingerprint: string;
@@ -220,7 +520,7 @@ export function canConfirmBlingImportPreview(
   now = Date.now()
 ) {
   if (!preview || !activeCorrelationId) return false;
-  if (!preview.previewComplete) return false;
+  if (!preview.paginationComplete || !preview.previewComplete) return false;
   if (preview.correlationId !== activeCorrelationId) return false;
   if (!preview.confirmationToken || !preview.previewFingerprint) return false;
   const expiresAt = Date.parse(preview.previewExpiresAt);
@@ -248,6 +548,12 @@ export function publicBlingImportPreviewErrorMessage(
       ? ""
       : ` de ${diagnostic.expectedPages}`;
     return `A consulta foi interrompida na pagina ${diagnostic.page}${expected}. Nenhuma sincronizacao foi iniciada.`;
+  }
+  if (
+    diagnostic.stage === "INTEGRITY"
+    && diagnostic.errorCode === "PAGINATION_NOT_TERMINATED"
+  ) {
+    return "Nao foi possivel confirmar o fim da paginacao do Bling. Nenhuma sincronizacao foi iniciada.";
   }
   if (diagnostic.stage === "INTEGRITY") {
     return "A consulta retornou dados incompletos ou divergentes. Nenhuma sincronizacao foi iniciada.";
