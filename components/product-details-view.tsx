@@ -1122,7 +1122,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
   }
 
   return (
-    <div className="mx-auto min-w-0 w-full max-w-[1540px]">
+    <div className="w-full min-w-0 max-w-none">
       <section className="flex w-full flex-col overflow-hidden rounded-xl border border-matrix-gold/35 bg-matrix-panel text-matrix-fg shadow-glow lg:h-[calc(100dvh-6.25rem)] lg:min-h-0">
         <main className="matrix-scroll min-w-0 flex-1 overflow-visible px-4 py-4 pb-6 sm:px-6 lg:min-h-0 lg:overflow-y-auto">
           {feedback ? <div className="mb-3 flex items-center gap-2 rounded-lg border border-green-500/25 bg-green-500/10 px-3 py-2 text-sm font-semibold text-green-700"><CheckCircle2 className="h-4 w-4" />{feedback}</div> : null}

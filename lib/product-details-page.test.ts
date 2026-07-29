@@ -80,6 +80,12 @@ test("the details page performs one local detail request and passes server permi
   assert.match(pageSource, /<ProductDetailsView/);
 });
 
+test("the dedicated product page uses the full width available inside the app shell", () => {
+  assert.match(viewSource, /className="w-full min-w-0 max-w-none"/);
+  assert.doesNotMatch(viewSource, /mx-auto min-w-0 w-full max-w-\[1540px\]/);
+  assert.match(pageSource, /w-full min-w-0 max-w-none place-items-center/);
+});
+
 test("tenant isolation remains enforced by the existing detail API", () => {
   assert.match(apiSource, /where:\s*\{\s*id,\s*organizationId:\s*auth\.context\.organizationId\s*\}/);
   assert.match(apiSource, /Produto nao encontrado/);

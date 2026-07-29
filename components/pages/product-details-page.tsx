@@ -71,7 +71,7 @@ export function ProductDetailsPage({
       {loading ? (
         <section
           aria-busy="true"
-          className="mx-auto grid min-h-[calc(100dvh-7rem)] w-full max-w-[1540px] place-items-center rounded-xl border border-matrix-border bg-matrix-panel p-6 text-matrix-muted"
+          className="grid min-h-[calc(100dvh-7rem)] w-full min-w-0 max-w-none place-items-center rounded-xl border border-matrix-border bg-matrix-panel p-6 text-matrix-muted"
         >
           Carregando produto...
         </section>
