@@ -109,6 +109,19 @@ test("8. manifesto registra o commit e o SHA do pacote", () => {
     /DEPLOY_COMMIT=`\$EXPECTED_COMMIT/,
     "o deploy remoto deve reportar o commit do manifesto",
   );
+  assertContains(
+    /grep -Eq "\\"commitSha\\"\[\[:space:\]\]\*:\[\[:space:\]\]\*\\"`\$EXPECTED_COMMIT\\""/,
+    "a validacao remota deve aceitar whitespace JSON gerado pelo PowerShell",
+  );
+  assertContains(
+    /grep -Eq "\\"packageSha256\\"\[\[:space:\]\]\*:\[\[:space:\]\]\*\\"`\$EXPECTED_PACKAGE_SHA\\""/,
+    "a validacao remota deve aceitar whitespace no SHA do pacote",
+  );
+  assert.doesNotMatch(
+    deployScript,
+    /grep -Fq "\\"(?:commitSha|packageSha256)\\": \\"/,
+    "a validacao nao pode depender de um unico espaco no JSON",
+  );
 });
 
 test("9. pacote corrompido bloqueia antes da extracao", () => {

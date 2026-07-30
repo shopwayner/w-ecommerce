@@ -1062,8 +1062,8 @@ fi
 if [ "`$ACTUAL_MANIFEST_SHA" != "`$EXPECTED_MANIFEST_SHA" ]; then
   fail_remote "SHA-256 do manifesto remoto diverge do manifesto local."
 fi
-grep -Fq "\"commitSha\": \"`$EXPECTED_COMMIT\"" "`$REMOTE_MANIFEST" || fail_remote "Manifesto remoto nao identifica o commit esperado."
-grep -Fq "\"packageSha256\": \"`$EXPECTED_PACKAGE_SHA\"" "`$REMOTE_MANIFEST" || fail_remote "Manifesto remoto nao identifica o pacote esperado."
+grep -Eq "\"commitSha\"[[:space:]]*:[[:space:]]*\"`$EXPECTED_COMMIT\"" "`$REMOTE_MANIFEST" || fail_remote "Manifesto remoto nao identifica o commit esperado."
+grep -Eq "\"packageSha256\"[[:space:]]*:[[:space:]]*\"`$EXPECTED_PACKAGE_SHA\"" "`$REMOTE_MANIFEST" || fail_remote "Manifesto remoto nao identifica o pacote esperado."
 
 PACKAGE_LIST="`$(mktemp /tmp/w-ecommerce.package-list.XXXXXX)"
 tar -tzf "`$REMOTE_PACKAGE" > "`$PACKAGE_LIST" || fail_remote "Pacote tar.gz corrompido ou ilegivel."
