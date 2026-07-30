@@ -1165,9 +1165,7 @@ echo "==> Build do app W Ecommerce"
     docker compose --env-file "$RemoteDir/.env.production" -f docker-compose.yml build app
 ) || fail_remote "Build do app falhou."
 APP_IMAGE_ID="`$(
-  cd "`$RELEASE_DIR"
-  W_ECOMMERCE_ENV_FILE="$RemoteDir/.env.production" \
-    docker compose --env-file "$RemoteDir/.env.production" -f docker-compose.yml images -q app | head -n 1
+  docker image inspect w-ecommerce-app:latest --format '{{.Id}}' 2>/dev/null || true
 )"
 if [ -z "`$APP_IMAGE_ID" ]; then
   fail_remote "ID da nova imagem do app nao foi identificado."

@@ -177,6 +177,15 @@ test("12. PostgreSQL e Redis nao fazem parte da recriacao", () => {
 
 test("13. recriacao usa --no-deps e --force-recreate somente no app", () => {
   assertContains(
+    /docker image inspect w-ecommerce-app:latest --format '\{\{\.Id\}\}'/,
+    "a nova imagem deve ser identificada pela tag construida, antes de recriar o app",
+  );
+  assert.doesNotMatch(
+    deployScript,
+    /docker compose[\s\S]{0,200}images -q app/,
+    "a imagem nova nao pode ser inferida pelo container antigo ainda em execucao",
+  );
+  assertContains(
     /up -d --no-deps --force-recreate app/,
     "somente app deve ser recriado sem dependencias",
   );
