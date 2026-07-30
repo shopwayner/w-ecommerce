@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
+import {
+  BlingConnectionLimitReachedError,
+  BlingOAuthAuthorizationInProgressError
+} from "@/lib/services/bling-connection-entitlement-service";
 import { blingOAuthService, getBlingOAuthConfigurationStatus } from "@/lib/services/bling-oauth-service";
 import { erpConnectionsService } from "@/lib/services/erps/erp-connections-service";
 
@@ -32,7 +36,19 @@ export async function GET(_request: NextRequest, { params }: Params) {
         success: true,
         authorizationUrl: await blingOAuthService.buildAuthorizationUrl(state)
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof BlingConnectionLimitReachedError) {
+        return NextResponse.json(
+          { error: "Limite de conexoes Bling atingido.", code: "BLING_CONNECTION_LIMIT_REACHED" },
+          { status: 409 }
+        );
+      }
+      if (error instanceof BlingOAuthAuthorizationInProgressError) {
+        return NextResponse.json(
+          { error: "Ja existe uma autorizacao Bling em andamento.", code: "BLING_OAUTH_ALREADY_IN_PROGRESS" },
+          { status: 409 }
+        );
+      }
       return NextResponse.json({ error: "Não foi possível iniciar a conexão agora." }, { status: 400 });
     }
   }

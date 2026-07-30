@@ -76,6 +76,15 @@ type BlingIntegratedConnection = {
   internalNotes: string;
 };
 
+type BlingConnectionLimit = {
+  used: number;
+  current: number;
+  limit: number | null;
+  unlimited: boolean;
+  canCreate: boolean;
+  allowed: boolean;
+};
+
 type ERP = {
   key: ERPKey;
   name: string;
@@ -205,6 +214,14 @@ function createForm(connection: ERPConnection | null, erp: ERP | null): FormStat
 export function ERPsPage() {
   const [connections, setConnections] = useState<ERPConnection[]>([]);
   const [blingAccounts, setBlingAccounts] = useState<BlingIntegratedConnection[]>([]);
+  const [blingConnectionLimit, setBlingConnectionLimit] = useState<BlingConnectionLimit>({
+    used: 0,
+    current: 0,
+    limit: 1,
+    unlimited: false,
+    canCreate: false,
+    allowed: false
+  });
   const [selected, setSelected] = useState<ERP | null>(null);
   const [modalMode, setModalMode] = useState<ERPModalMode | null>(null);
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
@@ -233,9 +250,13 @@ export function ERPsPage() {
   async function loadBlingAccounts() {
     const response = await fetch("/api/integrations");
     if (!response.ok) return [];
-    const payload = (await response.json()) as { data?: BlingIntegratedConnection[] };
+    const payload = (await response.json()) as {
+      data?: BlingIntegratedConnection[];
+      limit?: BlingConnectionLimit;
+    };
     const accounts = payload.data ?? [];
     setBlingAccounts(accounts);
+    if (payload.limit) setBlingConnectionLimit(payload.limit);
     setSelectedBlingAccount((current) => current ? accounts.find((account) => account.id === current.id) ?? current : current);
     return accounts;
   }
@@ -285,6 +306,7 @@ export function ERPsPage() {
   }
 
   function openCreateIntegration(erp: ERP) {
+    if (erp.key === "bling" && !blingConnectionLimit.canCreate) return;
     setModalMode("create");
     setSelectedConnectionId(null);
     setSelectedBlingAccount(null);
@@ -322,6 +344,7 @@ export function ERPsPage() {
   async function submitBlingModal(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!modalMode || !blingForm.accountAlias.trim()) return;
+    if (modalMode === "create" && !blingConnectionLimit.canCreate) return;
 
     setSaving(true);
     setMessage("");
@@ -525,6 +548,7 @@ export function ERPsPage() {
   const canConnect = Boolean(selectedConnection?.supportsOAuth && selectedConnection.authUrlImplemented && selectedConnection.hasCredentials);
   const canSubmitBling = Boolean(
     blingForm.accountAlias.trim().length >= 2
+    && (modalMode !== "create" || blingConnectionLimit.canCreate)
     && (modalMode === "manage" ? selectedConnectionId : blingForm.clientId.trim() && blingForm.clientSecret)
   );
   const selectedBlingStatus = selectedBlingAccount?.status ?? "PENDING";
@@ -582,7 +606,12 @@ export function ERPsPage() {
                 <h3 className="text-lg font-semibold text-matrix-fg">{erp.name}</h3>
                 <p className="mt-3 text-sm leading-6 text-matrix-muted">{erp.description}</p>
               </div>
-              <Button className="mt-auto w-full border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" variant="secondary" onClick={() => openCreateIntegration(erp)}>
+              <Button
+                className="mt-auto w-full border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35"
+                disabled={erp.key === "bling" && !blingConnectionLimit.canCreate}
+                variant="secondary"
+                onClick={() => openCreateIntegration(erp)}
+              >
                 <Plus className="h-4 w-4" />
                 Nova integração {erp.name}
               </Button>
@@ -646,7 +675,13 @@ export function ERPsPage() {
               </div>
               <h3 className="mt-6 font-bold text-matrix-goldDark">Nenhuma conta integrada</h3>
               <p className="mt-4 max-w-48 text-sm leading-6 text-matrix-muted">Conecte uma conta para começar a sincronizar seus dados.</p>
-              <Button className="mt-auto w-full justify-center border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35" onClick={() => openCreateIntegration(erp)} type="button" variant="secondary">
+              <Button
+                className="mt-auto w-full justify-center border-matrix-gold/70 bg-transparent text-matrix-goldDark hover:bg-matrix-goldSoft/35"
+                disabled={erp.key === "bling" && !blingConnectionLimit.canCreate}
+                onClick={() => openCreateIntegration(erp)}
+                type="button"
+                variant="secondary"
+              >
                 <Plus className="h-4 w-4" />
                 Conectar conta
               </Button>
@@ -672,6 +707,18 @@ export function ERPsPage() {
             </div>
 
             <form className="mt-5 space-y-4" onSubmit={submitBlingModal}>
+              {modalMode === "create" ? (
+                <div className="rounded-lg border border-matrix-border bg-matrix-panel2/58 px-4 py-3 text-sm text-matrix-muted">
+                  {blingConnectionLimit.unlimited
+                    ? `Contas Bling conectadas: ${blingConnectionLimit.used} — Ilimitado`
+                    : `Contas Bling conectadas: ${blingConnectionLimit.used} de ${blingConnectionLimit.limit}`}
+                  {!blingConnectionLimit.unlimited
+                    && blingConnectionLimit.limit !== null
+                    && blingConnectionLimit.used >= blingConnectionLimit.limit
+                    ? <p className="mt-2 text-orange-200">Limite de conexões Bling atingido.</p>
+                    : null}
+                </div>
+              ) : null}
               <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>

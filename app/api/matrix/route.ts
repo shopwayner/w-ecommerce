@@ -10,7 +10,7 @@ export async function GET() {
   const [connections, syncRules, limit] = await Promise.all([
     prisma.blingConnection.findMany({ where: { organizationId: auth.context.organizationId }, orderBy: { createdAt: "asc" } }),
     prisma.syncRule.findMany({ where: { organizationId: auth.context.organizationId }, orderBy: { createdAt: "asc" } }),
-    planLimitService.checkBlingConnectionLimit(auth.context.organizationId)
+    planLimitService.checkBlingConnectionLimit(auth.context.organizationId, auth.context.user.id)
   ]);
 
   return NextResponse.json({ connections, syncRules, limit });

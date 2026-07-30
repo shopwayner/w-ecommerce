@@ -19,7 +19,7 @@ export async function GET() {
       include: { user: true },
       orderBy: { createdAt: "asc" }
     }),
-    planLimitService.getUsageSummary(auth.context.organizationId)
+    planLimitService.getUsageSummary(auth.context.organizationId, auth.context.user.id)
   ]);
 
   if (!organization) {

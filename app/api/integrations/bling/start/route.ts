@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
-import { planLimitService } from "@/lib/services/plan-limit-service";
+import {
+  BlingConnectionLimitReachedError,
+  BlingOAuthAuthorizationInProgressError
+} from "@/lib/services/bling-connection-entitlement-service";
 import { blingOAuthService } from "@/lib/services/bling-oauth-service";
 import { blingStartSchema } from "@/lib/validation";
 
@@ -17,11 +20,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Dados invalidos", issues: parsed.error.flatten() }, { status: 400 });
   }
 
-  const limit = await planLimitService.checkBlingConnectionLimit(auth.context.organizationId);
-  if (!limit.allowed) {
-    return NextResponse.json({ error: `Limite de conexoes Bling atingido (${limit.current}/${limit.limit}).` }, { status: 403 });
-  }
-
   try {
     const state = await blingOAuthService.createConnectionOAuthState({
       organizationId: auth.context.organizationId,
@@ -34,7 +32,19 @@ export async function POST(request: Request) {
     });
     const authorizationUrl = await blingOAuthService.buildAuthorizationUrl(state);
     return NextResponse.json({ authorizationUrl });
-  } catch {
+  } catch (error) {
+    if (error instanceof BlingConnectionLimitReachedError) {
+      return NextResponse.json(
+        { error: "Limite de conexoes Bling atingido.", code: "BLING_CONNECTION_LIMIT_REACHED" },
+        { status: 409 }
+      );
+    }
+    if (error instanceof BlingOAuthAuthorizationInProgressError) {
+      return NextResponse.json(
+        { error: "Ja existe uma autorizacao Bling em andamento.", code: "BLING_OAUTH_ALREADY_IN_PROGRESS" },
+        { status: 409 }
+      );
+    }
     return NextResponse.json({ error: "Não foi possível iniciar a autorização desta conta Bling." }, { status: 400 });
   }
 }

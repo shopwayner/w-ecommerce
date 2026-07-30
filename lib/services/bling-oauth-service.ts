@@ -6,6 +6,11 @@ import {
   BLING_AUTHORIZATION_URL,
   validateBlingRedirectUri
 } from "@/lib/services/bling-oauth-url";
+import {
+  assertBlingConnectionCreationAllowed,
+  blingConnectionEntitlementService,
+  reserveBlingConnectionAuthorization
+} from "@/lib/services/bling-connection-entitlement-service";
 import { sanitizeLogPayload } from "@/lib/utils";
 
 const tokenUrl = "https://www.bling.com.br/Api/v3/oauth/token";
@@ -49,6 +54,16 @@ type BlingCredentials = {
 type EncryptedBlingCredentials = {
   clientIdEncrypted: string | null;
   clientSecretEncrypted: string | null;
+};
+
+type PendingConnectionOAuthStateInput = {
+  organizationId: string;
+  userId: string;
+  connectionName: string;
+  connectionRole: ConnectionRole;
+  clientIdEncrypted?: string;
+  clientSecretEncrypted?: string;
+  internalNotes?: string;
 };
 
 export class BlingAccountAlreadyConnectedError extends Error {
@@ -245,6 +260,16 @@ function isSerializationConflict(error: unknown) {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034";
 }
 
+async function acquireBlingConnectionCreationLock(
+  transaction: Prisma.TransactionClient,
+  organizationId: string
+) {
+  const lockKey = `bling-connection-create:${organizationId}`;
+  await transaction.$queryRaw`
+    SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS "lockState"
+  `;
+}
+
 async function audit(organizationId: string, userId: string | null, action: string, metadata: Record<string, unknown>) {
   await prisma.auditLog.create({
     data: {
@@ -258,6 +283,79 @@ async function audit(organizationId: string, userId: string | null, action: stri
 }
 
 export class BlingOAuthService {
+  private async reservePendingConnectionOAuthState(input: PendingConnectionOAuthStateInput) {
+    const state = randomBytes(32).toString("base64url");
+    const now = new Date();
+
+    await reserveBlingConnectionAuthorization<Prisma.TransactionClient, string>({
+      runExclusive: (operation) => prisma.$transaction(async (transaction) => {
+        await acquireBlingConnectionCreationLock(transaction, input.organizationId);
+        return operation(transaction);
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }),
+      getEntitlement: (transaction) => blingConnectionEntitlementService.check(
+        input.organizationId,
+        input.userId,
+        transaction
+      ),
+      hasAuthorizationInProgress: async (transaction) => Boolean(
+        await transaction.oAuthState.findFirst({
+          where: {
+            organizationId: input.organizationId,
+            userId: input.userId,
+            usedAt: null,
+            expiresAt: { gt: now },
+            connectionName: { startsWith: pendingConnectionStatePrefix }
+          },
+          select: { id: true }
+        })
+      ),
+      reserve: async (transaction) => {
+        const connection = await transaction.blingConnection.create({
+          data: {
+            organizationId: input.organizationId,
+            name: input.connectionName.trim(),
+            role: input.connectionRole,
+            status: "PENDING",
+            clientIdEncrypted: input.clientIdEncrypted,
+            clientSecretEncrypted: input.clientSecretEncrypted,
+            internalNotes: input.internalNotes?.trim() || null
+          },
+          select: { id: true }
+        });
+
+        await transaction.oAuthState.create({
+          data: {
+            organizationId: input.organizationId,
+            userId: input.userId,
+            stateHash: hashState(state),
+            connectionName: `${pendingConnectionStatePrefix}${connection.id}`,
+            connectionRole: input.connectionRole,
+            expiresAt: new Date(now.getTime() + stateTtlMs)
+          }
+        });
+
+        await transaction.auditLog.create({
+          data: {
+            organizationId: input.organizationId,
+            userId: input.userId,
+            action: "BLING_OAUTH_START",
+            entity: "BlingConnection",
+            entityId: connection.id,
+            metadata: sanitizeLogPayload({
+              connectionId: connection.id,
+              connectionRole: input.connectionRole,
+              mode: "create"
+            }) as Prisma.InputJsonObject
+          }
+        });
+
+        return connection.id;
+      }
+    });
+
+    return state;
+  }
+
   private async credentialsForConnection(connectionId: string, organizationId: string): Promise<BlingCredentials> {
     const connection = await prisma.blingConnection.findFirst({
       where: { id: connectionId, organizationId },
@@ -286,48 +384,18 @@ export class BlingOAuthService {
 
   async createConnectionOAuthState(input: CreateConnectionOAuthStateInput) {
     getBlingRedirectUri();
-    const state = randomBytes(32).toString("base64url");
     const clientIdEncrypted = encryptSecret(input.clientId.trim());
     const clientSecretEncrypted = encryptSecret(input.clientSecret.trim());
 
-    await prisma.$transaction(async (transaction) => {
-      const connection = await transaction.blingConnection.create({
-        data: {
-          organizationId: input.organizationId,
-          name: input.connectionName.trim(),
-          role: input.connectionRole,
-          status: "PENDING",
-          clientIdEncrypted,
-          clientSecretEncrypted,
-          internalNotes: input.internalNotes?.trim() || null
-        },
-        select: { id: true }
-      });
-
-      await transaction.oAuthState.create({
-        data: {
-          organizationId: input.organizationId,
-          userId: input.userId,
-          stateHash: hashState(state),
-          connectionName: `${pendingConnectionStatePrefix}${connection.id}`,
-          connectionRole: input.connectionRole,
-          expiresAt: new Date(Date.now() + stateTtlMs)
-        }
-      });
-
-      await transaction.auditLog.create({
-        data: {
-          organizationId: input.organizationId,
-          userId: input.userId,
-          action: "BLING_OAUTH_START",
-          entity: "BlingConnection",
-          entityId: connection.id,
-          metadata: sanitizeLogPayload({ connectionId: connection.id, connectionRole: input.connectionRole, mode: "create" }) as Prisma.InputJsonObject
-        }
-      });
+    return this.reservePendingConnectionOAuthState({
+      organizationId: input.organizationId,
+      userId: input.userId,
+      connectionName: input.connectionName,
+      connectionRole: input.connectionRole,
+      clientIdEncrypted,
+      clientSecretEncrypted,
+      internalNotes: input.internalNotes
     });
-
-    return state;
   }
 
   async createOAuthState(input: OAuthStateInput) {
@@ -346,6 +414,16 @@ export class BlingOAuthService {
 
     if (!connectionName || !connectionRole) {
       throw new Error("Dados da conexao Bling incompletos.");
+    }
+
+    if (!input.reconnectConnectionId) {
+      getGlobalBlingCredentials();
+      return this.reservePendingConnectionOAuthState({
+        organizationId: input.organizationId,
+        userId: input.userId,
+        connectionName,
+        connectionRole
+      });
     }
 
     const state = randomBytes(32).toString("base64url");
@@ -483,6 +561,15 @@ export class BlingOAuthService {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         return await prisma.$transaction(async (transaction) => {
+          await acquireBlingConnectionCreationLock(transaction, stateRecord.organizationId);
+          assertBlingConnectionCreationAllowed(
+            await blingConnectionEntitlementService.check(
+              stateRecord.organizationId,
+              stateRecord.userId,
+              transaction
+            )
+          );
+
           const existingConnections = await transaction.blingConnection.findMany({
             where: {
               organizationId: stateRecord.organizationId,
@@ -556,6 +643,7 @@ export class BlingOAuthService {
     companyId: string
   ) {
     return prisma.$transaction(async (transaction) => {
+      await acquireBlingConnectionCreationLock(transaction, stateRecord.organizationId);
       const target = await transaction.blingConnection.findFirst({
         where: { id: connectionId, organizationId: stateRecord.organizationId },
         select: { id: true, status: true, externalCompanyId: true }
@@ -620,6 +708,7 @@ export class BlingOAuthService {
     companyId: string
   ) {
     return prisma.$transaction(async (transaction) => {
+      await acquireBlingConnectionCreationLock(transaction, stateRecord.organizationId);
       const target = await transaction.blingConnection.findFirst({
         where: { id: connectionId, organizationId: stateRecord.organizationId },
         select: {
