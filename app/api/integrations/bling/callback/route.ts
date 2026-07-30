@@ -10,6 +10,7 @@ import {
   getBlingCallbackResultPath,
   type BlingCallbackResult
 } from "@/lib/services/bling-callback-result";
+import { blingProductImportService } from "@/lib/services/bling-product-import-service";
 import { getPublicRedirectUrl } from "@/lib/url";
 import { sanitizeLogPayload } from "@/lib/utils";
 
@@ -40,6 +41,17 @@ export async function GET(request: NextRequest) {
 
   try {
     const result = await blingOAuthService.completeCallback(code, state);
+    if (result.mode === "create") {
+      try {
+        await blingProductImportService.scheduleInitialImport({
+          organizationId: result.connection.organizationId,
+          connectionId: result.connection.id
+        });
+        return publicResultRedirect("connected-importing");
+      } catch {
+        return publicResultRedirect("connected-import-failed");
+      }
+    }
     return publicResultRedirect(result.mode === "reconnect" ? "reconnected" : "connected");
   } catch (callbackError) {
     if (callbackError instanceof BlingAccountAlreadyConnectedError) {

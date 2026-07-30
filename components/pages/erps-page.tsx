@@ -72,7 +72,6 @@ type BlingIntegratedConnection = {
   tokenExpiresAt: string | null;
   hasToken: boolean;
   credentialsConfigured: boolean;
-  clientIdMasked: string | null;
   internalNotes: string;
 };
 
@@ -107,8 +106,6 @@ type FormState = {
 type BlingFormState = {
   accountAlias: string;
   role: BlingConnectionRole;
-  clientId: string;
-  clientSecret: string;
   internalNotes: string;
 };
 
@@ -121,7 +118,7 @@ const erps: ERP[] = [
 ];
 
 const emptyForm: FormState = { accountAlias: "", credentials: {}, taxRate: "", orderImportStartDate: "", internalNotes: "", productSyncEnabled: false, orderSyncEnabled: false, stockSyncEnabled: false, invoiceSyncEnabled: false };
-const emptyBlingForm: BlingFormState = { accountAlias: "", role: "OTHER", clientId: "", clientSecret: "", internalNotes: "" };
+const emptyBlingForm: BlingFormState = { accountAlias: "", role: "OTHER", internalNotes: "" };
 const blingRoleOptions: Array<{ label: string; value: BlingConnectionRole }> = [
   { label: "Matriz", value: "MATRIX" },
   { label: "Filial", value: "BRANCH" },
@@ -279,9 +276,11 @@ export function ERPsPage() {
     const blingResult = parseBlingCallbackResult(url.searchParams.get("bling"));
     if (!blingResult) return;
 
-    const success = blingResult === "connected" || blingResult === "reconnected";
+    const success = blingResult === "connected"
+      || blingResult === "connected-importing"
+      || blingResult === "reconnected";
     setCallbackNotice({ message: getBlingCallbackResultMessage(blingResult), success });
-    if (success) {
+    if (success || blingResult === "connected-import-failed") {
       void loadConnections();
       void loadBlingAccounts();
     }
@@ -326,8 +325,6 @@ export function ERPsPage() {
     setBlingForm({
       accountAlias: account.name,
       role: account.role,
-      clientId: "",
-      clientSecret: "",
       internalNotes: account.internalNotes
     });
     setForm(emptyForm);
@@ -356,8 +353,6 @@ export function ERPsPage() {
         body: JSON.stringify({
           name: blingForm.accountAlias.trim(),
           role: blingForm.role,
-          clientId: blingForm.clientId.trim(),
-          clientSecret: blingForm.clientSecret,
           internalNotes: blingForm.internalNotes.trim()
         })
       });
@@ -383,8 +378,6 @@ export function ERPsPage() {
       body: JSON.stringify({
         name: blingForm.accountAlias.trim(),
         role: blingForm.role,
-        clientId: blingForm.clientId.trim(),
-        clientSecret: blingForm.clientSecret,
         internalNotes: blingForm.internalNotes.trim()
       })
     });
@@ -402,8 +395,6 @@ export function ERPsPage() {
       setBlingForm({
         accountAlias: updated.name,
         role: updated.role,
-        clientId: "",
-        clientSecret: "",
         internalNotes: updated.internalNotes
       });
     }
@@ -549,7 +540,7 @@ export function ERPsPage() {
   const canSubmitBling = Boolean(
     blingForm.accountAlias.trim().length >= 2
     && (modalMode !== "create" || blingConnectionLimit.canCreate)
-    && (modalMode === "manage" ? selectedConnectionId : blingForm.clientId.trim() && blingForm.clientSecret)
+    && (modalMode !== "manage" || selectedConnectionId)
   );
   const selectedBlingStatus = selectedBlingAccount?.status ?? "PENDING";
   const canTestSelectedBling = Boolean(selectedBlingAccount?.hasToken && selectedBlingStatus !== "DISCONNECTED" && !blingAction);
@@ -571,7 +562,7 @@ export function ERPsPage() {
             <h3 className="font-semibold text-matrix-goldDark">Integrações ERP com credenciais seguras</h3>
             <ul className="mt-4 grid gap-4 text-sm leading-6 text-matrix-fg">
               <li className="flex gap-3"><span className="mt-2 h-1.5 w-1.5 rounded-full bg-matrix-gold" /><span>Tokens, app secrets, senhas e chaves são salvos criptografados.</span></li>
-              <li className="flex gap-3"><span className="mt-2 h-1.5 w-1.5 rounded-full bg-matrix-gold" /><span>Nesta etapa nenhuma importação, sincronização, estoque, preço ou NF é executado automaticamente.</span></li>
+              <li className="flex gap-3"><span className="mt-2 h-1.5 w-1.5 rounded-full bg-matrix-gold" /><span>Ao autorizar uma nova conta Bling, a carga inicial de produtos é agendada em segundo plano para a organização atual.</span></li>
             </ul>
           </div>
         </div>
@@ -754,36 +745,11 @@ export function ERPsPage() {
                 <div className="flex items-start gap-3">
                   <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-matrix-goldDark" />
                   <div className="min-w-0 flex-1">
-                    <h4 className="font-semibold text-matrix-fg">Credenciais protegidas</h4>
+                    <h4 className="font-semibold text-matrix-fg">Aplicativo oficial W Ecommerce</h4>
                     <p className="mt-1 text-sm text-matrix-muted">
-                      {selectedBlingAccount?.credentialsConfigured
-                        ? "Credenciais configuradas e protegidas."
-                        : "Cadastre as credenciais desta conta para conectar ao Bling."}
+                      A conta utiliza o aplicativo OAuth oficial configurado com seguranca no servidor.
                     </p>
-                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                      <label className="grid gap-2 text-sm text-matrix-muted">
-                        Client ID
-                        <input
-                          autoComplete="off"
-                          className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60"
-                          maxLength={512}
-                          placeholder={selectedBlingAccount?.clientIdMasked ? `Salvo como ${selectedBlingAccount.clientIdMasked}. Digite para substituir.` : "Informe o Client ID"}
-                          value={blingForm.clientId}
-                          onChange={(event) => setBlingForm((current) => ({ ...current, clientId: event.target.value }))}
-                        />
-                      </label>
-                      <label className="grid gap-2 text-sm text-matrix-muted">
-                        Client Secret
-                        <input
-                          autoComplete="new-password"
-                          className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60"
-                          maxLength={2048}
-                          placeholder="Digite somente para cadastrar ou substituir"
-                          type="password"
-                          value={blingForm.clientSecret}
-                          onChange={(event) => setBlingForm((current) => ({ ...current, clientSecret: event.target.value }))}
-                        />
-                      </label>
+                    <div className="mt-4 grid gap-3">
                       <label className="grid gap-2 text-sm text-matrix-muted sm:col-span-2">
                         Expiração da autorização
                         <input className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-muted outline-none" disabled value={formatDate(selectedBlingAccount?.tokenExpiresAt)} />
@@ -920,7 +886,7 @@ export function ERPsPage() {
               </section>
 
               <section className="space-y-2 rounded-lg border border-matrix-gold/25 bg-matrix-goldSoft/20 px-3 py-3 text-sm text-matrix-goldDark">
-                <p>Nesta etapa o sistema salva credenciais reais com segurança, mas não importa produtos, pedidos, estoque, preço, NF ou dispara webhooks.</p>
+                <p>As credenciais do aplicativo Bling ficam somente no servidor. Salvar configurações não executa sincronização; uma nova autorização Bling agenda apenas a carga inicial de produtos.</p>
                 {selectedConnection.supportsOAuth && !selectedConnection.authUrlImplemented ? <p>Conectar/Autorizar será liberado quando a URL OAuth oficial deste ERP estiver implementada.</p> : null}
                 {isLocalhost() ? <p className="flex gap-2 text-orange-200"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /> Para OAuth real, use domínio HTTPS público, como ngrok ou domínio de produção.</p> : null}
               </section>

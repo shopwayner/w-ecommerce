@@ -13,12 +13,14 @@ export const maxDuration = 300;
 
 const dryRunSchema = z.object({
   mode: z.literal("dry-run"),
+  operation: z.enum(["IMPORT", "SYNC"]),
   connectionId: z.string().trim().min(1),
   correlationId: z.string().uuid()
 }).strict();
 
 const prepareSchema = z.object({
   mode: z.literal("prepare"),
+  operation: z.enum(["IMPORT", "SYNC"]),
   connectionId: z.string().trim().min(1),
   confirmed: z.literal(true),
   correlationId: z.string().uuid(),
@@ -26,18 +28,39 @@ const prepareSchema = z.object({
   confirmationToken: z.string().trim().min(1).max(32_768)
 }).strict();
 
-const runSchema = z.object({
-  mode: z.literal("run"),
-  connectionId: z.string().trim().min(1),
-  jobId: z.string().trim().min(1),
-  confirmed: z.literal(true)
-}).strict();
+const postSchema = z.discriminatedUnion("mode", [dryRunSchema, prepareSchema]);
 
-const postSchema = z.discriminatedUnion("mode", [dryRunSchema, prepareSchema, runSchema]);
+function publicPrepareErrorMessage(
+  diagnostic: BlingImportPreviewFailureDiagnostic
+) {
+  const messages: Record<string, string> = {
+    PREVIEW_MISSING: "Gere uma nova previa antes de iniciar a operacao.",
+    PREVIEW_EXPIRED: "A previa expirou. Consulte os produtos novamente.",
+    PREVIEW_FINGERPRINT_MISMATCH:
+      "A previa mudou ou esta incompleta. Consulte os produtos novamente.",
+    PREVIEW_CONNECTION_MISMATCH:
+      "A conta Bling selecionada mudou. Gere uma nova previa para esta conta.",
+    PREVIEW_ORGANIZATION_MISMATCH:
+      "Esta previa nao pertence a organizacao atual.",
+    PREVIEW_STALE: "A previa nao e mais valida. Consulte os produtos novamente.",
+    PREVIEW_CORRELATION_MISMATCH:
+      "A previa nao e mais valida. Consulte os produtos novamente.",
+    PREVIEW_OPERATION_MISMATCH:
+      "A previa nao e mais valida. Consulte os produtos novamente.",
+    PREVIEW_USER_MISMATCH:
+      "A previa nao e mais valida. Consulte os produtos novamente.",
+    PREVIEW_INVALID:
+      "A previa nao e mais valida. Consulte os produtos novamente.",
+    JOB_ALREADY_RUNNING:
+      "Ja existe uma importacao ou sincronizacao em andamento para esta conta Bling."
+  };
+  return messages[diagnostic.errorCode]
+    ?? publicBlingImportPreviewErrorMessage(diagnostic);
+}
 
 function safeError(
   error: unknown,
-  mode?: "dry-run" | "prepare" | "run"
+  mode?: "dry-run" | "prepare"
 ): { message: string; status: number; diagnostic?: BlingImportPreviewFailureDiagnostic } {
   if (error instanceof BlingImportPreviewError) {
     const status = error.diagnostic.stage === "AUTHENTICATION"
@@ -49,7 +72,7 @@ function safeError(
           ? 409
           : 503;
     return {
-      message: publicBlingImportPreviewErrorMessage(error.diagnostic),
+      message: publicPrepareErrorMessage(error.diagnostic),
       status,
       diagnostic: error.diagnostic
     };
@@ -109,10 +132,28 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const connectionId = url.searchParams.get("connectionId")?.trim();
   const jobId = url.searchParams.get("jobId")?.trim();
-  if (!connectionId || !jobId) return NextResponse.json({ error: "Sincronizacao nao informada." }, { status: 400 });
+  const operation = url.searchParams.get("operation")?.trim();
+  const active = url.searchParams.get("active") === "true";
+  if (!connectionId || (!jobId && !active)) {
+    return NextResponse.json({ error: "Sincronizacao nao informada." }, { status: 400 });
+  }
+  if (operation !== "IMPORT" && operation !== "SYNC") {
+    return NextResponse.json({ error: "Operacao nao informada." }, { status: 400 });
+  }
 
   try {
-    const job = await blingProductImportService.getJobStatus({ organizationId: auth.context.organizationId, connectionId, jobId });
+    const job = active
+      ? await blingProductImportService.getActiveJobStatus({
+          organizationId: auth.context.organizationId,
+          connectionId,
+          operation
+        })
+      : await blingProductImportService.getJobStatus({
+          organizationId: auth.context.organizationId,
+          connectionId,
+          jobId: jobId as string,
+          operation
+        });
     return NextResponse.json({ job });
   } catch (error) {
     const safe = safeError(error);
@@ -127,7 +168,28 @@ export async function POST(request: Request) {
 
   const payload = await request.json().catch(() => null);
   const parsed = postSchema.safeParse(payload);
-  if (!parsed.success) return NextResponse.json({ error: "Dados da sincronizacao invalidos." }, { status: 400 });
+  if (!parsed.success) {
+    const record =
+      payload && typeof payload === "object"
+        ? payload as Record<string, unknown>
+        : {};
+    const errorCode =
+      record.mode === "prepare"
+      && (typeof record.confirmationToken !== "string"
+        || !record.confirmationToken.trim())
+        ? "PREVIEW_MISSING"
+        : "INVALID_REQUEST";
+    return NextResponse.json(
+      {
+        error: errorCode === "PREVIEW_MISSING"
+          ? "Gere uma nova previa antes de iniciar a operacao."
+          : "Dados da sincronizacao invalidos.",
+        errorCode,
+        previewComplete: false
+      },
+      { status: 400 }
+    );
+  }
 
   try {
     if (parsed.data.mode === "dry-run") {
@@ -135,6 +197,7 @@ export async function POST(request: Request) {
         userId: auth.context.user.id,
         organizationId: auth.context.organizationId,
         connectionId: parsed.data.connectionId,
+        operation: parsed.data.operation,
         correlationId: parsed.data.correlationId
       });
       console.info("[bling.product-import]", {
@@ -176,6 +239,7 @@ export async function POST(request: Request) {
         userId: auth.context.user.id,
         organizationId: auth.context.organizationId,
         connectionId: parsed.data.connectionId,
+        operation: parsed.data.operation,
         correlationId: parsed.data.correlationId,
         previewFingerprint: parsed.data.previewFingerprint,
         confirmationToken: parsed.data.confirmationToken
@@ -193,16 +257,10 @@ export async function POST(request: Request) {
       return NextResponse.json({ job }, { status: 202 });
     }
 
-    const job = await blingProductImportService.runPreparedSync({
-      organizationId: auth.context.organizationId,
-      connectionId: parsed.data.connectionId,
-      jobId: parsed.data.jobId
-    });
-    return NextResponse.json({ job });
   } catch (error) {
     const correlationId = "correlationId" in parsed.data
       ? parsed.data.correlationId
-      : "run-without-preview-correlation";
+      : "request-without-preview-correlation";
     const safe = safeError(error, parsed.data.mode);
     logFailure({
       correlationId,

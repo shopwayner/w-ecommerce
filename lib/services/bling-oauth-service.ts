@@ -32,17 +32,8 @@ type OAuthStateInput = {
   userId: string;
   connectionName?: string;
   connectionRole?: ConnectionRole;
-  reconnectConnectionId?: string;
-};
-
-type CreateConnectionOAuthStateInput = {
-  organizationId: string;
-  userId: string;
-  connectionName: string;
-  connectionRole: ConnectionRole;
-  clientId: string;
-  clientSecret: string;
   internalNotes?: string;
+  reconnectConnectionId?: string;
 };
 
 type BlingCredentials = {
@@ -51,18 +42,11 @@ type BlingCredentials = {
   redirectUri: string;
 };
 
-type EncryptedBlingCredentials = {
-  clientIdEncrypted: string | null;
-  clientSecretEncrypted: string | null;
-};
-
 type PendingConnectionOAuthStateInput = {
   organizationId: string;
   userId: string;
   connectionName: string;
   connectionRole: ConnectionRole;
-  clientIdEncrypted?: string;
-  clientSecretEncrypted?: string;
   internalNotes?: string;
 };
 
@@ -114,44 +98,11 @@ function getBlingRedirectUri() {
   }
 }
 
-function decryptStoredBlingCredentials(credentials: EncryptedBlingCredentials): Pick<BlingCredentials, "clientId" | "clientSecret"> | null {
-  if (!credentials.clientIdEncrypted && !credentials.clientSecretEncrypted) return null;
-  if (!credentials.clientIdEncrypted || !credentials.clientSecretEncrypted) throw new BlingCredentialsMissingError();
-
-  try {
-    return {
-      clientId: decryptSecret(credentials.clientIdEncrypted),
-      clientSecret: decryptSecret(credentials.clientSecretEncrypted)
-    };
-  } catch {
-    throw new BlingCredentialsMissingError();
-  }
-}
-
-function maskClientId(clientId: string) {
-  if (clientId.length <= 6) return `${clientId.slice(0, 1)}***${clientId.slice(-1)}`;
-  return `${clientId.slice(0, 4)}${"*".repeat(Math.min(12, Math.max(4, clientId.length - 8)))}${clientId.slice(-4)}`;
-}
-
-export function getBlingConnectionCredentialSummary(credentials: EncryptedBlingCredentials) {
-  try {
-    const stored = decryptStoredBlingCredentials(credentials);
-    return {
-      credentialsConfigured: Boolean(stored),
-      clientIdMasked: stored ? maskClientId(stored.clientId) : null
-    };
-  } catch {
-    return { credentialsConfigured: false, clientIdMasked: null };
-  }
-}
-
-export function getEncryptedBlingCredentialUpdates(input: { clientId?: string; clientSecret?: string }) {
-  const updates: { clientIdEncrypted?: string; clientSecretEncrypted?: string } = {};
-  const clientId = input.clientId?.trim();
-  const clientSecret = input.clientSecret?.trim();
-  if (clientId) updates.clientIdEncrypted = encryptSecret(clientId);
-  if (clientSecret) updates.clientSecretEncrypted = encryptSecret(clientSecret);
-  return updates;
+export function getBlingConnectionCredentialSummary(_unusedConnection?: unknown) {
+  void _unusedConnection;
+  return {
+    credentialsConfigured: getBlingOAuthConfigurationStatus().configured
+  };
 }
 
 export function getBlingOAuthConfigurationStatus() {
@@ -316,8 +267,6 @@ export class BlingOAuthService {
             name: input.connectionName.trim(),
             role: input.connectionRole,
             status: "PENDING",
-            clientIdEncrypted: input.clientIdEncrypted,
-            clientSecretEncrypted: input.clientSecretEncrypted,
             internalNotes: input.internalNotes?.trim() || null
           },
           select: { id: true }
@@ -359,12 +308,9 @@ export class BlingOAuthService {
   private async credentialsForConnection(connectionId: string, organizationId: string): Promise<BlingCredentials> {
     const connection = await prisma.blingConnection.findFirst({
       where: { id: connectionId, organizationId },
-      select: { clientIdEncrypted: true, clientSecretEncrypted: true }
+      select: { id: true }
     });
     if (!connection) throw new BlingCredentialsMissingError();
-
-    const stored = decryptStoredBlingCredentials(connection);
-    if (stored) return { ...stored, redirectUri: getBlingRedirectUri() };
 
     try {
       return getGlobalBlingCredentials();
@@ -380,22 +326,6 @@ export class BlingOAuthService {
     } catch {
       return false;
     }
-  }
-
-  async createConnectionOAuthState(input: CreateConnectionOAuthStateInput) {
-    getBlingRedirectUri();
-    const clientIdEncrypted = encryptSecret(input.clientId.trim());
-    const clientSecretEncrypted = encryptSecret(input.clientSecret.trim());
-
-    return this.reservePendingConnectionOAuthState({
-      organizationId: input.organizationId,
-      userId: input.userId,
-      connectionName: input.connectionName,
-      connectionRole: input.connectionRole,
-      clientIdEncrypted,
-      clientSecretEncrypted,
-      internalNotes: input.internalNotes
-    });
   }
 
   async createOAuthState(input: OAuthStateInput) {
@@ -422,7 +352,8 @@ export class BlingOAuthService {
         organizationId: input.organizationId,
         userId: input.userId,
         connectionName,
-        connectionRole
+        connectionRole,
+        internalNotes: input.internalNotes
       });
     }
 

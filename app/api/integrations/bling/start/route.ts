@@ -21,13 +21,11 @@ export async function POST(request: Request) {
   }
 
   try {
-    const state = await blingOAuthService.createConnectionOAuthState({
+    const state = await blingOAuthService.createOAuthState({
       organizationId: auth.context.organizationId,
       userId: auth.context.user.id,
       connectionName: parsed.data.name,
       connectionRole: parsed.data.role,
-      clientId: parsed.data.clientId,
-      clientSecret: parsed.data.clientSecret,
       internalNotes: parsed.data.internalNotes
     });
     const authorizationUrl = await blingOAuthService.buildAuthorizationUrl(state);

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { blingOAuthService } from "@/lib/services/bling-oauth-service";
+import { blingProductImportService } from "@/lib/services/bling-product-import-service";
 import { erpConnectionsService } from "@/lib/services/erps/erp-connections-service";
 
 type Params = { params: Promise<{ provider: string }> };
@@ -19,8 +20,19 @@ export async function GET(request: NextRequest, { params }: Params) {
   if (error || !code || !state) return NextResponse.redirect(new URL("/erps?bling=error", request.url));
 
   try {
-    await blingOAuthService.completeCallback(code, state);
-    return NextResponse.redirect(new URL("/erps?bling=success", request.url));
+    const result = await blingOAuthService.completeCallback(code, state);
+    if (result.mode === "create") {
+      try {
+        await blingProductImportService.scheduleInitialImport({
+          organizationId: result.connection.organizationId,
+          connectionId: result.connection.id
+        });
+        return NextResponse.redirect(new URL("/erps?bling=connected-importing", request.url));
+      } catch {
+        return NextResponse.redirect(new URL("/erps?bling=connected-import-failed", request.url));
+      }
+    }
+    return NextResponse.redirect(new URL("/erps?bling=reconnected", request.url));
   } catch {
     return NextResponse.redirect(new URL("/erps?bling=error", request.url));
   }

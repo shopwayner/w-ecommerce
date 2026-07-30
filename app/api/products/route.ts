@@ -4,7 +4,11 @@ import { requireApiAuth } from "@/lib/auth/api";
 import { normalizeProductBrand } from "@/lib/product-brand";
 import { prisma } from "@/lib/prisma";
 import { getUserAccountContext } from "@/lib/services/account-context-service";
-import { readCanonicalBlingStatusFromAttributes } from "@/lib/services/bling-product-import-service";
+import {
+  readBlingProductConnectionAttributes,
+  readBlingProductMarketplaceStores,
+  readCanonicalBlingStatusFromAttributes
+} from "@/lib/services/bling-product-import-service";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import {
   buildProductListFilterOptions,
@@ -163,16 +167,6 @@ function hasText(value: string | null | undefined) {
 function hasRealSku(value: string | null | undefined) {
   const sku = value?.trim();
   return Boolean(sku && !sku.toUpperCase().startsWith("BLING-"));
-}
-
-function normalizeMarketplaceKey(value: string | null | undefined) {
-  const text = value?.trim();
-  return text ? text.toUpperCase() : null;
-}
-
-function isLinkedMercadoLivreStatus(status: string | null | undefined) {
-  const normalized = status?.trim().toLowerCase();
-  return !normalized || !["closed", "deleted", "inactive"].includes(normalized);
 }
 
 function toNumber(value: unknown) {
@@ -337,6 +331,10 @@ function serializeProduct(product: ProductListRecord) {
   const attributes = getProductAttributes(product.attributes);
   const currentPrice = product.prices[0];
   const blingMapping = product.mappings[0];
+  const blingAttributes = readBlingProductConnectionAttributes(
+    attributes,
+    blingMapping?.connectionId
+  );
   const brand = normalizeProductBrand(product.brand);
   const blingAccountName =
     blingMapping?.connection.name ||
@@ -354,8 +352,15 @@ function serializeProduct(product: ProductListRecord) {
     category: product.category,
     brand,
     ncm: product.ncm,
-    origin: product.source ?? metadata.origin ?? product.brand,
-    unit: metadata.unit ?? (typeof attributes.unit === "string" ? attributes.unit : null),
+    origin:
+      metadata.origin
+      ?? getStringAttribute(blingAttributes, "origin")
+      ?? product.source
+      ?? product.brand,
+    unit:
+      metadata.unit
+      ?? getStringAttribute(blingAttributes, "unit")
+      ?? (typeof attributes.unit === "string" ? attributes.unit : null),
     imageUrl: product.images[0]?.url ?? null,
     hasEnrichmentDraft: product.enrichmentDrafts.length > 0,
     status: product.status,
@@ -389,10 +394,14 @@ function serializeProduct(product: ProductListRecord) {
         status: value.status
       }))
     })),
-    marketplaceStores: {
-      mercadoLivre: false
-    },
-    blingStatus: readCanonicalBlingStatusFromAttributes(attributes),
+    marketplaceStores: readBlingProductMarketplaceStores(
+      attributes,
+      blingMapping?.connectionId
+    ),
+    blingStatus: readCanonicalBlingStatusFromAttributes(
+      attributes,
+      blingMapping?.connectionId
+    ),
     confidenceScore: product.confidenceScore,
     weight: product.weight?.toString() ?? null,
     height: product.height?.toString() ?? null,
@@ -409,42 +418,6 @@ function serializeProduct(product: ProductListRecord) {
       : metadata.stockOverride ?? 0,
     updatedAt: product.updatedAt
   };
-}
-
-async function attachMarketplaceStores(organizationId: string, products: SerializedProduct[]) {
-  if (!products.length) return products;
-
-  const listingRows = await prisma.mercadoLivreListingCache.findMany({
-    where: { organizationId },
-    select: {
-      sku: true,
-      status: true
-    }
-  });
-
-  if (!listingRows.length) return products;
-
-  const mercadoLivreSkus = new Set<string>();
-
-  for (const listing of listingRows) {
-    if (!isLinkedMercadoLivreStatus(listing.status)) continue;
-
-    const sku = normalizeMarketplaceKey(listing.sku);
-    if (sku) mercadoLivreSkus.add(sku);
-  }
-
-  return products.map((product) => {
-    const sku = normalizeMarketplaceKey(product.sku);
-    const hasMercadoLivreListing = Boolean(sku && mercadoLivreSkus.has(sku));
-
-    return {
-      ...product,
-      marketplaceStores: {
-        ...product.marketplaceStores,
-        mercadoLivre: hasMercadoLivreListing
-      }
-    };
-  });
 }
 
 export async function GET(request: Request) {
@@ -492,9 +465,42 @@ export async function GET(request: Request) {
     },
     select: {
       ...productListSelect,
+      prices: {
+        ...productListSelect.prices,
+        where: { organizationId: auth.context.organizationId }
+      },
+      inventory: {
+        ...productListSelect.inventory,
+        where: {
+          organizationId: auth.context.organizationId,
+          ...(selectedBlingConnectionId
+            ? { connectionId: selectedBlingConnectionId }
+            : {})
+        }
+      },
+      images: {
+        ...productListSelect.images,
+        where: { organizationId: auth.context.organizationId }
+      },
+      enrichmentDrafts: {
+        ...productListSelect.enrichmentDrafts,
+        where: { organizationId: auth.context.organizationId }
+      },
       mappings: {
         ...productListSelect.mappings,
-        where: selectedBlingConnectionId ? { connectionId: selectedBlingConnectionId } : undefined
+        where: {
+          organizationId: auth.context.organizationId,
+          ...(selectedBlingConnectionId
+            ? { connectionId: selectedBlingConnectionId }
+            : {})
+        }
+      },
+      marketplaceCategoryMappings: {
+        ...productListSelect.marketplaceCategoryMappings,
+        where: {
+          organizationId: auth.context.organizationId,
+          provider: "MERCADO_LIVRE"
+        }
       }
     },
     orderBy: { createdAt: "desc" }
@@ -530,7 +536,7 @@ export async function GET(request: Request) {
   const safePage = limit ? Math.min(page, totalPages) : 1;
   const start = limit ? (safePage - 1) * limit : 0;
   const pageProducts = limit ? sorted.slice(start, start + limit) : sorted;
-  const data = await attachMarketplaceStores(auth.context.organizationId, pageProducts);
+  const data = pageProducts;
 
   return NextResponse.json({
     data,

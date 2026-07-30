@@ -262,18 +262,23 @@ test("script defaults to dry-run and requires an explicit confirm argument", () 
   assert.equal(packageJson.scripts["bling:backfill-product-brands"], "tsx scripts/backfill-bling-product-brands.ts");
 });
 
-test("product detail API returns brand and the modal renders the Brand card", () => {
+test("product detail API returns brand and the dedicated view renders the Brand card", () => {
   const routeSource = readFileSync(
     path.join(process.cwd(), "app/api/products/[id]/route.ts"),
     "utf8"
   );
-  const pageSource = readFileSync(
-    path.join(process.cwd(), "components/pages/products-page.tsx"),
+  const viewSource = readFileSync(
+    path.join(process.cwd(), "components/product-details-view.tsx"),
+    "utf8"
+  );
+  const fieldsSource = readFileSync(
+    path.join(process.cwd(), "lib/product-details-edit.ts"),
     "utf8"
   );
   assert.match(routeSource, /const brand = normalizeProductBrand\(product\.brand\)/);
   assert.match(routeSource, /\n\s+brand,/);
   assert.match(routeSource, /requireApiAuth\("products:read"\)/);
-  assert.match(pageSource, /label:\s*"Marca"/);
-  assert.match(pageSource, /value:\s*product\.brand\s*\?\?\s*"Sem marca"/);
+  assert.match(fieldsSource, /\{\s*id:\s*"brand",\s*label:\s*"Marca"[\s\S]+placeholder:\s*"Sem marca"/);
+  assert.match(viewSource, /brand:\s*currentProduct\.brand/);
+  assert.match(viewSource, /productDetailsFieldDefinitions\.map/);
 });

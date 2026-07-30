@@ -725,6 +725,12 @@ function remoteImageDescriptors(remote: JsonRecord): BlingProductImageDescriptor
   return readRemoteImageGallery(remote).images;
 }
 
+export function readBlingProductImageUrls(value: unknown) {
+  return remoteImageDescriptors(remoteData(value))
+    .map((image) => normalizeBlingProductImageUrl(image.url))
+    .filter((image): image is string => Boolean(image));
+}
+
 function canonicalJson(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalJson);
   if (!value || typeof value !== "object") return value;

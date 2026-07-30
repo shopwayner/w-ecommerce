@@ -241,10 +241,10 @@ test("frontend entitlement and organization tampering is rejected by the strict 
   const valid = {
     name: "Bling",
     role: "OTHER",
-    clientId: "client-id",
-    clientSecret: "client-secret",
     internalNotes: ""
   };
+  assert.equal(blingStartSchema.safeParse({ ...valid, clientId: "client-id" }).success, false);
+  assert.equal(blingStartSchema.safeParse({ ...valid, clientSecret: "client-secret" }).success, false);
   assert.equal(blingStartSchema.safeParse(valid).success, true);
   assert.equal(blingStartSchema.safeParse({ ...valid, unlimited: true }).success, false);
   assert.equal(blingStartSchema.safeParse({ ...valid, organizationId: "another-tenant" }).success, false);

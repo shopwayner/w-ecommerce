@@ -79,7 +79,7 @@ function createLiveConfirmation(input: {
       input.correlationId ?? "00000000-0000-4000-8000-000000000099",
     existing: 10,
     newProducts: 2,
-    importable: 12,
+    importable: 2,
     skuConflicts: 0,
     matchSummary: {
       updatedByMapping: 10,
@@ -274,7 +274,7 @@ test("PREPARE_SYNC continua depois do lock e cria exatamente um job no escopo co
       erpConnectionId: "erp-connection-lock-test",
       blingConnectionId: "connection-lock-test",
       provider: "BLING",
-      type: "PRODUCTS_FULL_SYNC",
+    type: "BLING_PRODUCTS_IMPORT",
       status: "PENDING",
       currentPage: 1
     }
@@ -395,6 +395,40 @@ test("execucao do job resolve a conta por blingConnectionId", () => {
     /fetchCatalogPage\(\{[\s\S]*?connectionId:\s*input\.connectionId/
   );
   assert.doesNotMatch(runSource, /externalAccountId/);
+});
+
+test("job concorrente retorna codigo especifico e nao cria outro job", async () => {
+  const confirmation = createLiveConfirmation();
+  let jobsCreated = 0;
+  const transaction: MockTransaction = {
+    $queryRaw: async () => [{ lockState: "" }],
+    erpSyncJob: {
+      findFirst: async () => ({ id: "active-job" }),
+      create: async () => {
+        jobsCreated += 1;
+        return { id: "unexpected-job" };
+      }
+    },
+    eRPConnection: {
+      findUnique: async () => ({ id: "erp-connection-lock-test" }),
+      create: async () => ({ id: "unexpected-erp-connection" })
+    }
+  };
+  mockPrepareDependencies(transaction);
+
+  await assert.rejects(
+    blingProductImportService.prepareSync({
+      ...confirmation.common,
+      previewFingerprint: confirmation.previewFingerprint,
+      confirmationToken: confirmation.confirmationToken
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof BlingImportPreviewError);
+      assert.equal(error.diagnostic.errorCode, "JOB_ALREADY_RUNNING");
+      return true;
+    }
+  );
+  assert.equal(jobsCreated, 0);
 });
 
 test("falha real do lock e propagada e cria zero job", async () => {

@@ -3,14 +3,12 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
-import { blingOAuthService, getBlingConnectionCredentialSummary, getEncryptedBlingCredentialUpdates } from "@/lib/services/bling-oauth-service";
+import { blingOAuthService } from "@/lib/services/bling-oauth-service";
 import { sanitizeLogPayload } from "@/lib/utils";
 
 const updateConnectionSchema = z.object({
   name: z.string().trim().min(2).max(80),
   role: z.enum(["MATRIX", "BRANCH", "OTHER"]),
-  clientId: z.string().trim().max(512).optional(),
-  clientSecret: z.string().trim().max(2048).optional(),
   internalNotes: z.string().trim().max(2000).optional()
 }).strict();
 
@@ -32,14 +30,13 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   const { id } = await params;
   const current = await prisma.blingConnection.findFirst({
     where: { id, organizationId: auth.context.organizationId },
-    select: { id: true, clientIdEncrypted: true, clientSecretEncrypted: true }
+    select: { id: true }
   });
   if (!current) return NextResponse.json({ error: "Conta Bling não encontrada." }, { status: 404 });
 
   const updateData: Prisma.BlingConnectionUpdateInput = {
     name: parsed.data.name,
-    role: parsed.data.role,
-    ...getEncryptedBlingCredentialUpdates(parsed.data)
+    role: parsed.data.role
   };
   if (parsed.data.internalNotes !== undefined) updateData.internalNotes = parsed.data.internalNotes || null;
 
@@ -47,11 +44,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     const connection = await transaction.blingConnection.update({
       where: { id: current.id },
       data: updateData,
-      select: {
-        id: true,
-        clientIdEncrypted: true,
-        clientSecretEncrypted: true
-      }
+      select: { id: true }
     });
 
     await transaction.auditLog.create({
@@ -65,9 +58,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           fields: [
             "name",
             "role",
-            "internalNotes",
-            ...(parsed.data.clientId ? ["clientId"] : []),
-            ...(parsed.data.clientSecret ? ["clientSecret"] : [])
+            "internalNotes"
           ]
         }) as Prisma.InputJsonObject
       }
@@ -75,8 +66,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     return connection;
   });
 
-  const credentialSummary = getBlingConnectionCredentialSummary(updated);
-  return NextResponse.json({ success: true, credentialsConfigured: credentialSummary.credentialsConfigured });
+  return NextResponse.json({ success: true, connectionId: updated.id });
 }
 
 export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) {

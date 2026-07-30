@@ -28,9 +28,18 @@ export async function GET() {
       connection: true,
       product: {
         include: {
-          images: { take: 1, orderBy: { position: "asc" } },
+          images: {
+            where: { organizationId: auth.context.organizationId },
+            take: 1,
+            orderBy: { position: "asc" }
+          },
           mappings: {
-            where: selectedBlingConnectionId ? { connectionId: selectedBlingConnectionId } : undefined,
+            where: {
+              organizationId: auth.context.organizationId,
+              ...(selectedBlingConnectionId
+                ? { connectionId: selectedBlingConnectionId }
+                : {})
+            },
             include: { connection: true },
             orderBy: { updatedAt: "desc" }
           }

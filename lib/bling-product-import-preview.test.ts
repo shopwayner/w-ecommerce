@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { prisma } from "./prisma";
+import { blingApiClient } from "./services/bling-api-client";
 import {
   BlingImportPreviewError,
   canConfirmBlingImportPreview,
@@ -13,6 +15,7 @@ import {
   consumeBlingImportPreviewConfirmation,
   createBlingImportPreviewConfirmation,
   createBlingImportPreviewFingerprint,
+  blingProductImportService,
   normalizeBlingCatalogPage,
   processBlingImportItemsIndependently,
   registerBlingImportPreviewCorrelation,
@@ -84,7 +87,7 @@ function createConfirmation(correlationId = correlationOne, proofValue = proof()
     correlationId,
     existing: 200,
     newProducts: 16,
-    importable: 216,
+    importable: 16,
     skuConflicts: 0,
     matchSummary: {
       updatedByMapping: 200,
@@ -115,6 +118,17 @@ function createConfirmation(correlationId = correlationOne, proofValue = proof()
       proof: proofValue
     }, new Date("2026-07-29T16:00:00.000Z"))
   };
+}
+
+function assertPreviewErrorCode(
+  callback: () => unknown,
+  errorCode: string
+) {
+  assert.throws(callback, (error: unknown) => {
+    assert.ok(error instanceof BlingImportPreviewError);
+    assert.equal(error.diagnostic.errorCode, errorCode);
+    return true;
+  });
 }
 
 test.beforeEach(() => {
@@ -162,6 +176,18 @@ test("previa de 382 itens em quatro paginas permanece valida", () => {
   assert.equal(integrity.previewComplete, true);
   assert.equal(integrity.derivedTotal, 382);
   assert.equal(integrity.totalSource, "DERIVED_SHORT_PAGE");
+  assert.equal(integrity.lastDataPage, 4);
+  assert.deepEqual(integrity.reasons, []);
+});
+
+test("catalogo de 383 itens aceita paginas 100/100/100/83", () => {
+  const integrity = integrityFor({
+    pageCounts: [100, 100, 100, 83],
+    uniqueIdsCount: 383
+  });
+  assert.equal(integrity.paginationComplete, true);
+  assert.equal(integrity.previewComplete, true);
+  assert.equal(integrity.derivedTotal, 383);
   assert.equal(integrity.lastDataPage, 4);
   assert.deepEqual(integrity.reasons, []);
 });
@@ -325,7 +351,7 @@ test("falha em PREPARE_SYNC consome o token e cria zero job", () => {
 
 test("confirmacao backend com metadados adulterados e bloqueada", () => {
   const confirmation = createConfirmation();
-  assert.throws(
+  assertPreviewErrorCode(
     () => verifyBlingImportPreviewConfirmation(
       confirmation.confirmationToken,
       {
@@ -334,13 +360,13 @@ test("confirmacao backend com metadados adulterados e bloqueada", () => {
       },
       new Date("2026-07-29T16:05:00.000Z")
     ),
-    BlingImportPreviewError
+    "PREVIEW_FINGERPRINT_MISMATCH"
   );
 });
 
 test("confirmacao de outra organizacao e bloqueada", () => {
   const confirmation = createConfirmation();
-  assert.throws(
+  assertPreviewErrorCode(
     () => verifyBlingImportPreviewConfirmation(
       confirmation.confirmationToken,
       {
@@ -350,7 +376,7 @@ test("confirmacao de outra organizacao e bloqueada", () => {
       },
       new Date("2026-07-29T16:05:00.000Z")
     ),
-    BlingImportPreviewError
+    "PREVIEW_ORGANIZATION_MISMATCH"
   );
 });
 
@@ -362,7 +388,7 @@ test("nova consulta invalida o token anterior", () => {
     connectionId: confirmation.common.connectionId,
     correlationId: correlationTwo
   });
-  assert.throws(
+  assertPreviewErrorCode(
     () => verifyBlingImportPreviewConfirmation(
       confirmation.confirmationToken,
       {
@@ -371,7 +397,7 @@ test("nova consulta invalida o token anterior", () => {
       },
       new Date("2026-07-29T16:05:00.000Z")
     ),
-    BlingImportPreviewError
+    "PREVIEW_STALE"
   );
 });
 
@@ -392,7 +418,7 @@ test("token expirado e bloqueado no frontend e backend", () => {
     ),
     false
   );
-  assert.throws(
+  assertPreviewErrorCode(
     () => verifyBlingImportPreviewConfirmation(
       confirmation.confirmationToken,
       {
@@ -401,7 +427,37 @@ test("token expirado e bloqueado no frontend e backend", () => {
       },
       new Date("2026-07-29T16:11:00.000Z")
     ),
-    BlingImportPreviewError
+    "PREVIEW_EXPIRED"
+  );
+});
+
+test("token adulterado e operacao divergente recebem codigos especificos", () => {
+  const confirmation = createConfirmation();
+  assertPreviewErrorCode(
+    () => verifyBlingImportPreviewConfirmation(
+      `${confirmation.confirmationToken}x`,
+      {
+        ...confirmation.common,
+        previewFingerprint: confirmation.previewFingerprint
+      },
+      new Date("2026-07-29T16:05:00.000Z")
+    ),
+    "PREVIEW_INVALID"
+  );
+
+  resetBlingImportPreviewCorrelationsForTests();
+  const syncConfirmation = createConfirmation();
+  assertPreviewErrorCode(
+    () => verifyBlingImportPreviewConfirmation(
+      syncConfirmation.confirmationToken,
+      {
+        ...syncConfirmation.common,
+        operation: "SYNC",
+        previewFingerprint: syncConfirmation.previewFingerprint
+      },
+      new Date("2026-07-29T16:05:00.000Z")
+    ),
+    "PREVIEW_OPERATION_MISMATCH"
   );
 });
 
@@ -410,7 +466,7 @@ test("nova consulta limpa a previa anterior na interface", () => {
     path.join(process.cwd(), "components/pages/products-page.tsx"),
     "utf8"
   );
-  const handlerStart = source.indexOf("async function openBlingImportPreview()");
+  const handlerStart = source.indexOf("async function openBlingOperationPreview(");
   const requestStart = source.indexOf('fetch("/api/products/import-from-bling"', handlerStart);
   const clearPreview = source.indexOf("setBlingImportPreview(null)", handlerStart);
   const clearRejectedCorrelation = source.indexOf("if (!previewAccepted)", handlerStart);
@@ -641,7 +697,7 @@ test("advisory locks sao convertidos para tipo suportado pelo Prisma", () => {
 
 test("preview de conexao A nao confirma conexao B", () => {
   const confirmation = createConfirmation();
-  assert.throws(
+  assertPreviewErrorCode(
     () => verifyBlingImportPreviewConfirmation(
       confirmation.confirmationToken,
       {
@@ -651,8 +707,152 @@ test("preview de conexao A nao confirma conexao B", () => {
       },
       new Date("2026-07-29T16:05:00.000Z")
     ),
-    BlingImportPreviewError
+    "PREVIEW_CONNECTION_MISMATCH"
   );
+});
+
+test("fixture J-Commerce processa 383 IDs em quatro paginas e classifica 100 mappings e 283 novos", async () => {
+  const products = Array.from({ length: 383 }, (_, index) => {
+    const item = index + 1;
+    const mappedProductNumber =
+      item <= 90
+        ? item
+        : item <= 93
+          ? 1
+          : item <= 96
+            ? 2
+            : item <= 98
+              ? 3
+              : item <= 100
+                ? 4
+                : item;
+    return {
+      id: `external-${item}`,
+      codigo: item >= 381 ? "" : `SKU-${mappedProductNumber}`,
+      nome: `Produto J-Commerce ${item}`,
+      gtin: null,
+      situacao: "A",
+      formato: "S"
+    };
+  });
+  const mappingRows = Array.from({ length: 100 }, (_, index) => {
+    const item = index + 1;
+    const productNumber =
+      item <= 90
+        ? item
+        : item <= 93
+          ? 1
+          : item <= 96
+            ? 2
+            : item <= 98
+              ? 3
+              : 4;
+    return {
+      externalProductId: `external-${item}`,
+      productId: `local-product-${productNumber}`
+    };
+  });
+  const originalConnection = prisma.blingConnection;
+  const originalMappings = prisma.productExternalMapping;
+  const originalProducts = prisma.product;
+  const originalReadOnly = blingApiClient.requestReadOnly;
+  const pagesRequested: number[] = [];
+
+  Object.defineProperty(prisma, "blingConnection", {
+    configurable: true,
+    value: {
+      findFirst: async () => ({
+        id: "j-commerce-connection",
+        organizationId: "willian-workspace",
+        name: "J-Commerce",
+        status: "ACTIVE",
+        tokens: [{
+          id: "token-j-commerce",
+          expiresAt: new Date(Date.now() + 60_000)
+        }]
+      })
+    }
+  });
+  Object.defineProperty(prisma, "productExternalMapping", {
+    configurable: true,
+    value: {
+      findMany: async (args: {
+        where: { externalProductId: { in: string[] } };
+      }) => mappingRows.filter((row) =>
+        args.where.externalProductId.in.includes(row.externalProductId)
+      )
+    }
+  });
+  Object.defineProperty(prisma, "product", {
+    configurable: true,
+    value: { findMany: async () => [] }
+  });
+  Object.defineProperty(blingApiClient, "requestReadOnly", {
+    configurable: true,
+    value: async (request: {
+      query?: { pagina?: number };
+      onResponseMeta?: (metadata: { status: number }) => void;
+    }) => {
+      const page = request.query?.pagina ?? 1;
+      pagesRequested.push(page);
+      request.onResponseMeta?.({ status: 200 });
+      const start = (page - 1) * pageSize;
+      return { data: products.slice(start, start + pageSize), total: 383 };
+    }
+  });
+
+  try {
+    const preview = await blingProductImportService.dryRun({
+      userId: "willian-user",
+      organizationId: "willian-workspace",
+      connectionId: "j-commerce-connection",
+      operation: "IMPORT",
+      correlationId: "00000000-0000-4000-8000-000000000383"
+    });
+
+    assert.deepEqual(pagesRequested, [1, 2, 3, 4]);
+    assert.deepEqual(preview.pageCounts, [100, 100, 100, 83]);
+    assert.equal(preview.uniqueIdsCount, 383);
+    assert.equal(preview.updatedByMapping, 100);
+    assert.equal(preview.wouldCreate, 283);
+    assert.equal(preview.withoutSku, 3);
+    assert.equal(preview.withoutGtin, 383);
+    assert.equal(preview.previewComplete, true);
+    assert.equal(preview.paginationComplete, true);
+    assert.equal(new Set(mappingRows.map((row) => row.productId)).size, 90);
+    const repeatedProductGroups = [...new Set(
+      mappingRows
+        .filter((row, index, all) =>
+          all.findIndex((candidate) =>
+            candidate.productId === row.productId
+          ) !== index
+        )
+        .map((row) => row.productId)
+    )];
+    assert.deepEqual(repeatedProductGroups.sort(), [
+      "local-product-1",
+      "local-product-2",
+      "local-product-3",
+      "local-product-4"
+    ]);
+  } finally {
+    Object.defineProperty(prisma, "blingConnection", {
+      configurable: true,
+      value: originalConnection
+    });
+    Object.defineProperty(prisma, "productExternalMapping", {
+      configurable: true,
+      value: originalMappings
+    });
+    Object.defineProperty(prisma, "product", {
+      configurable: true,
+      value: originalProducts
+    });
+    Object.defineProperty(blingApiClient, "requestReadOnly", {
+      configurable: true,
+      value: originalReadOnly
+    });
+  }
 });
 
 test("interface rejeita preview quando a conexao selecionada mudou", () => {

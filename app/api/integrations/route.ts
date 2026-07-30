@@ -29,8 +29,6 @@ export async function GET() {
         externalCompanyDocument: true,
         externalCompanyId: true,
         externalAccountEmail: true,
-        clientIdEncrypted: true,
-        clientSecretEncrypted: true,
         internalNotes: true,
         lastSyncAt: true,
         lastTestAt: true,
@@ -51,7 +49,7 @@ export async function GET() {
   return NextResponse.json({
     limit,
     data: blingConnections.map((connection) => {
-      const credentialSummary = getBlingConnectionCredentialSummary(connection);
+      const credentialSummary = getBlingConnectionCredentialSummary();
       const tokenExpiresAt = connection.tokens[0]?.expiresAt ?? null;
       const tokenValidInFuture = Boolean(tokenExpiresAt && tokenExpiresAt.getTime() > Date.now());
       return {
@@ -64,7 +62,6 @@ export async function GET() {
         externalCompanyPresent: Boolean(connection.externalCompanyId),
         isDefault: connection.isDefault,
         externalAccountEmail: connection.externalAccountEmail,
-        clientIdMasked: credentialSummary.clientIdMasked,
         internalNotes: connection.internalNotes ?? "",
         lastSyncAt: connection.lastSyncAt,
         lastTestAt: connection.lastTestAt,

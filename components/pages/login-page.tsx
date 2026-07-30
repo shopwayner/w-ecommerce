@@ -68,7 +68,7 @@ const plans = [
 
 export function LoginPage() {
   const router = useRouter();
-  const [email, setEmail] = useState("Crowner@admin.com");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [remember, setRemember] = useState(true);
