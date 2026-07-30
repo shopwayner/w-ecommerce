@@ -1,13 +1,12 @@
 import { prisma } from "@/lib/prisma";
+import {
+  blingConnectionEntitlementService,
+  type BlingConnectionEntitlement
+} from "@/lib/services/bling-connection-entitlement-service";
 
 const masterOrganizationSlugs = new Set(["wayner-master", "w-ecommerce-master"]);
 
-export type BlingConnectionLimit = {
-  allowed: boolean;
-  current: number;
-  limit: number | null;
-  unlimited: boolean;
-};
+export type BlingConnectionLimit = BlingConnectionEntitlement;
 
 function currentMonthPeriod() {
   const now = new Date();
@@ -35,22 +34,8 @@ export class PlanLimitService {
     return subscription;
   }
 
-  async checkBlingConnectionLimit(organizationId: string): Promise<BlingConnectionLimit> {
-    const [isMaster, subscription, current] = await Promise.all([
-      isMasterOrganization(organizationId),
-      this.getCurrentPlan(organizationId),
-      prisma.blingConnection.count({ where: { organizationId, status: { not: "DISCONNECTED" } } })
-    ]);
-
-    if (isMaster) {
-      return { allowed: true, current, limit: null, unlimited: true };
-    }
-
-    if (!subscription) return { allowed: false, current, limit: 0, unlimited: false };
-
-    const limit = subscription.plan.code === "ENTERPRISE" ? subscription.enterpriseLimit ?? subscription.plan.maxBlingConnections : subscription.plan.maxBlingConnections;
-
-    return { allowed: current < limit, current, limit, unlimited: false };
+  async checkBlingConnectionLimit(organizationId: string, userId: string): Promise<BlingConnectionLimit> {
+    return blingConnectionEntitlementService.check(organizationId, userId);
   }
 
   async checkOperationLimit(organizationId: string, operationKey: string) {
@@ -91,12 +76,12 @@ export class PlanLimitService {
     });
   }
 
-  async getUsageSummary(organizationId: string) {
+  async getUsageSummary(organizationId: string, userId: string) {
     const { periodStart, periodEnd } = currentMonthPeriod();
     const [subscription, blingConnections, blingConnectionLimit, usage] = await Promise.all([
       this.getCurrentPlan(organizationId),
       prisma.blingConnection.count({ where: { organizationId, status: { not: "DISCONNECTED" } } }),
-      this.checkBlingConnectionLimit(organizationId),
+      this.checkBlingConnectionLimit(organizationId, userId),
       prisma.usageCounter.findMany({ where: { organizationId, periodStart, periodEnd } })
     ]);
     const operations = usage.reduce((total, item) => total + item.value, 0);

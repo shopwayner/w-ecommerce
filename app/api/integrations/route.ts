@@ -45,7 +45,7 @@ export async function GET() {
         }
       }
     }),
-    planLimitService.checkBlingConnectionLimit(auth.context.organizationId)
+    planLimitService.checkBlingConnectionLimit(auth.context.organizationId, auth.context.user.id)
   ]);
 
   return NextResponse.json({

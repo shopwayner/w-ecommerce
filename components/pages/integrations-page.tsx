@@ -16,7 +16,14 @@ type Connection = {
   createdAt: string;
 };
 
-type Limit = { allowed: boolean; current: number; limit: number | null; unlimited: boolean };
+type Limit = {
+  used: number;
+  current: number;
+  limit: number | null;
+  unlimited: boolean;
+  canCreate: boolean;
+  allowed: boolean;
+};
 type MercadoLivreConnection = {
   id: string;
   siteId: string;
@@ -98,7 +105,14 @@ function isOfficialMercadoLivreOwnerAuthorizationUrl(value: unknown, expectedApp
 
 export function IntegrationsPage() {
   const [connections, setConnections] = useState<Connection[]>([]);
-  const [limit, setLimit] = useState<Limit>({ allowed: false, current: 0, limit: 0, unlimited: false });
+  const [limit, setLimit] = useState<Limit>({
+    used: 0,
+    current: 0,
+    limit: 1,
+    unlimited: false,
+    canCreate: false,
+    allowed: false
+  });
   const [mercadoLivre, setMercadoLivre] = useState<MercadoLivreStatus>({ configured: false, data: null });
   const [ownerDiagnosticStatus, setOwnerDiagnosticStatus] = useState<MercadoLivreOwnerDiagnosticStatus | null>(null);
   const [ownerDiagnosticResult, setOwnerDiagnosticResult] = useState<MercadoLivreOwnerDiagnosticResult | null>(null);
@@ -117,7 +131,14 @@ export function IntegrationsPage() {
     if (response.ok) {
       const payload = await response.json();
       setConnections(payload.data ?? []);
-      setLimit(payload.limit ?? { allowed: false, current: 0, limit: 0, unlimited: false });
+      setLimit(payload.limit ?? {
+        used: 0,
+        current: 0,
+        limit: 1,
+        unlimited: false,
+        canCreate: false,
+        allowed: false
+      });
     }
     if (mercadoLivreResponse.ok) {
       const payload = (await mercadoLivreResponse.json()) as MercadoLivreStatus;
@@ -238,17 +259,17 @@ export function IntegrationsPage() {
         title="Integracoes"
         description="Conecte contas Bling por organizacao. Tokens ficam criptografados e nunca aparecem no frontend."
         actions={
-          <Button disabled={!limit.allowed} onClick={() => setModalOpen(true)}>
+          <Button disabled={!limit.canCreate} onClick={() => setModalOpen(true)}>
             <Cable className="h-4 w-4" />
-            Conectar Bling
+            Autorizar nova conta
           </Button>
         }
       />
 
       {message ? <div className="mb-4 rounded-md border border-matrix-border bg-white/[0.03] px-4 py-3 text-sm text-slate-300">{message}</div> : null}
-      {!limit.allowed ? (
+      {!limit.unlimited && limit.limit !== null && limit.used >= limit.limit ? (
         <div className="mb-4 rounded-md border border-orange-500/20 bg-orange-500/10 px-4 py-3 text-sm text-orange-200">
-          Limite de conexoes Bling atingido: {limit.current}/{limit.limit}.
+          Limite de conexoes Bling atingido.
         </div>
       ) : null}
 
@@ -256,7 +277,11 @@ export function IntegrationsPage() {
         <Card>
           <div className="mb-4 flex items-center justify-between gap-3">
             <h3 className="font-semibold text-white">Conexoes Bling</h3>
-            <Badge tone={limit.allowed ? "success" : "warning"}>{limit.unlimited ? `${limit.current} / Ilimitado` : `${limit.current}/${limit.limit}`}</Badge>
+            <Badge tone={limit.canCreate ? "success" : "warning"}>
+              {limit.unlimited
+                ? `Contas Bling conectadas: ${limit.used} — Ilimitado`
+                : `Contas Bling conectadas: ${limit.used} de ${limit.limit}`}
+            </Badge>
           </div>
           {connections.length ? (
             <DataTable
