@@ -192,6 +192,14 @@ const allowedConnectorTokens = new Set([
   "por",
   "sem"
 ]);
+const supportedSourceTokenExpansions: Readonly<Record<string, readonly string[]>> = {
+  blk: ["preto"],
+  preto: ["blk"],
+  red: ["vermelho"],
+  vermelho: ["red"],
+  turq: ["turquesa"],
+  turquesa: ["turq"]
+};
 
 function collapseWhitespace(value: string) {
   return value.trim().replace(/\s+/g, " ");
@@ -206,6 +214,16 @@ function normalizedComparisonKey(value: string) {
 
 function normalizedTokens(value: string) {
   return normalizedComparisonKey(value).match(/[a-z0-9]+/g) ?? [];
+}
+
+function allowedFactTokens(value: string) {
+  const tokens = new Set(normalizedTokens(value));
+  for (const token of [...tokens]) {
+    for (const expanded of supportedSourceTokenExpansions[token] ?? []) {
+      tokens.add(expanded);
+    }
+  }
+  return tokens;
 }
 
 function boundedMaxOutputTokens(value: string | undefined) {
@@ -271,7 +289,7 @@ export function inspectOpenAIProductTitleSuggestion(
 ) {
   const rejectionCodes: OpenAIProductTitleRejectionCode[] = [];
   const allowedSourceTokens = allowedSourceText
-    ? new Set(normalizedTokens(allowedSourceText))
+    ? allowedFactTokens(allowedSourceText)
     : null;
   const excludedKeys = new Set(
     excludedTitles

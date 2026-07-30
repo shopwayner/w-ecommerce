@@ -37,12 +37,13 @@ type BlingCatalogResponse = {
   total?: unknown;
 };
 
-type NormalizedBlingProduct = {
+export type NormalizedBlingProduct = {
   externalProductId: string;
   parentExternalProductId: string | null;
   name: string;
   sku: string | null;
   gtin: string | null;
+  packagingGtin: string | null;
   description: string | null;
   price: number | null;
   costPrice: number | null;
@@ -427,6 +428,7 @@ function normalizeOne(rawValue: unknown, parent?: NormalizedBlingProduct): Norma
     name,
     sku: firstText(raw.codigo, raw.sku),
     gtin: firstText(raw.gtin, raw.ean),
+    packagingGtin: firstText(raw.gtinEmbalagem, raw.eanEmbalagem, parent?.packagingGtin),
     description: firstText(raw.descricaoComplementar, raw.descricaoCurta, parent?.description),
     price: positiveOrNull(raw.preco),
     costPrice: firstNumber(raw.precoCusto, supplier.precoCusto),
@@ -479,6 +481,75 @@ function normalizePage(payload: BlingCatalogResponse, httpStatus = 200) {
 
 export function normalizeBlingCatalogPage(payload: unknown) {
   return normalizePage(record(payload) as BlingCatalogResponse);
+}
+
+function preferDetailValue<T>(detail: T | null, summary: T | null) {
+  return detail ?? summary;
+}
+
+function mergeBlingProductDetail(
+  summary: NormalizedBlingProduct,
+  detail: NormalizedBlingProduct
+): NormalizedBlingProduct {
+  return {
+    ...summary,
+    name: detail.name,
+    sku: preferDetailValue(detail.sku, summary.sku),
+    gtin: preferDetailValue(detail.gtin, summary.gtin),
+    packagingGtin: preferDetailValue(detail.packagingGtin, summary.packagingGtin),
+    description: preferDetailValue(detail.description, summary.description),
+    price: preferDetailValue(detail.price, summary.price),
+    costPrice: preferDetailValue(detail.costPrice, summary.costPrice),
+    stock: preferDetailValue(detail.stock, summary.stock),
+    unit: preferDetailValue(detail.unit, summary.unit),
+    imageUrl: preferDetailValue(detail.imageUrl, summary.imageUrl),
+    brand: preferDetailValue(detail.brand, summary.brand),
+    category: preferDetailValue(detail.category, summary.category),
+    ncm: preferDetailValue(detail.ncm, summary.ncm),
+    weight: preferDetailValue(detail.weight, summary.weight),
+    height: preferDetailValue(detail.height, summary.height),
+    width: preferDetailValue(detail.width, summary.width),
+    depth: preferDetailValue(detail.depth, summary.depth),
+    status: detail.status === "UNKNOWN" ? summary.status : detail.status,
+    format: detail.format === "UNKNOWN" ? summary.format : detail.format,
+    parentExternalProductId: summary.parentExternalProductId,
+    isVariation: summary.isVariation
+  };
+}
+
+export async function hydrateNewBlingProductFromDetail(
+  input: {
+    organizationId: string;
+    connectionId: string;
+    product: NormalizedBlingProduct;
+  },
+  fetchDetail: (request: {
+    organizationId: string;
+    connectionId: string;
+    externalProductId: string;
+  }) => Promise<unknown> = async (request) =>
+    blingApiClient.request<unknown>({
+      organizationId: request.organizationId,
+      connectionId: request.connectionId,
+      method: "GET",
+      path: `/produtos/${encodeURIComponent(request.externalProductId)}`
+    })
+) {
+  const payload = await fetchDetail({
+    organizationId: input.organizationId,
+    connectionId: input.connectionId,
+    externalProductId: input.product.externalProductId
+  });
+  const detail = normalizeOne(record(payload).data ?? payload);
+  if (!detail || detail.externalProductId !== input.product.externalProductId) {
+    throw new Error("O detalhe retornado pelo Bling nao corresponde ao produto solicitado.");
+  }
+  return mergeBlingProductDetail(input.product, detail);
+}
+
+export function resolveImportedGtin(remoteValue: string | null, currentValue: string | null = null) {
+  const normalized = normalizeGtin(remoteValue);
+  return normalized && isValidGtin(normalized) ? normalized : currentValue;
 }
 
 function isTemporary(error: unknown) {
@@ -1021,7 +1092,8 @@ function draftData(product: NormalizedBlingProduct, organizationId: string, erpC
       externalProductId: product.externalProductId,
       parentExternalProductId: product.parentExternalProductId,
       format: product.format,
-      isVariation: product.isVariation
+      isVariation: product.isVariation,
+      packagingGtin: product.packagingGtin
     } satisfies Prisma.InputJsonObject,
     lastFetchedAt: new Date()
   };
@@ -1246,6 +1318,7 @@ async function updateMatchedProduct(
       id: true,
       sku: true,
       ean: true,
+      packagingGtin: true,
       name: true,
       description: true,
       category: true,
@@ -1274,15 +1347,18 @@ async function updateMatchedProduct(
     });
     if (!conflict) nextSku = remoteSku;
   }
-  const normalizedRemoteGtin = normalizeGtin(input.product.gtin);
-  const nextEan =
-    normalizedRemoteGtin && isValidGtin(normalizedRemoteGtin)
-      ? normalizedRemoteGtin
-      : current.ean;
+  const nextEan = resolveImportedGtin(input.product.gtin, current.ean);
+  const nextPackagingGtin = resolveImportedGtin(
+    input.product.packagingGtin,
+    current.packagingGtin
+  );
   const nextBrand = resolveProductBrandFromBling(current.brand, input.product.brand);
   const update: Prisma.ProductUncheckedUpdateInput = {};
   if (nextSku !== current.sku) update.sku = nextSku;
   if (nextEan !== current.ean) update.ean = nextEan;
+  if (nextPackagingGtin !== current.packagingGtin) {
+    update.packagingGtin = nextPackagingGtin;
+  }
   if (input.product.name !== current.name) update.name = input.product.name;
   if (input.product.description !== current.description) update.description = input.product.description;
   if (input.product.category !== current.category) update.category = input.product.category;
@@ -1332,14 +1408,27 @@ async function applyProduct(input: {
   jobId: string;
   page: number;
   product: NormalizedBlingProduct;
+  preliminaryMatch: BlingProductImportMatch;
   cursor: BlingProductImportJobCursor;
 }) {
+  const product = input.preliminaryMatch.kind === "CREATE"
+    ? await hydrateNewBlingProductFromDetail({
+        organizationId: input.organizationId,
+        connectionId: input.connectionId,
+        product: input.product
+      })
+    : input.product;
+
   return prisma.$transaction(async (transaction) => {
-    const resolved = await resolveMatchInTransaction(transaction, input);
+    const resolved = await resolveMatchInTransaction(transaction, {
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      product
+    });
     if (resolved.match.kind === "NEEDS_REVIEW") {
       await upsertImportDraft(
         transaction,
-        input.product,
+        product,
         input.organizationId,
         input.erpConnectionId,
         input.connectionId,
@@ -1355,26 +1444,28 @@ async function applyProduct(input: {
     }
 
     if (resolved.match.kind === "CREATE") {
-      const normalizedGtin = normalizeGtin(input.product.gtin);
+      const ean = resolveImportedGtin(product.gtin);
+      const packagingGtin = resolveImportedGtin(product.packagingGtin);
       const createdProduct = await transaction.product.create({
         data: {
           organizationId: input.organizationId,
-          sku: input.product.sku?.trim() || null,
-          ean: normalizedGtin && isValidGtin(normalizedGtin) ? normalizedGtin : null,
-          name: input.product.name,
-          description: input.product.description,
-          category: input.product.category,
-          brand: normalizeProductBrand(input.product.brand),
-          ncm: input.product.ncm,
+          sku: product.sku?.trim() || null,
+          ean,
+          packagingGtin,
+          name: product.name,
+          description: product.description,
+          category: product.category,
+          brand: normalizeProductBrand(product.brand),
+          ncm: product.ncm,
           status: "DRAFT",
           enrichmentStatus: "IMPORTED",
           syncStatus: "NOT_SYNCED",
           source: "BLING",
-          weight: input.product.weight,
-          height: input.product.height,
-          width: input.product.width,
-          depth: input.product.depth,
-          attributes: safeProductAttributes(null, input.product, input.connectionId)
+          weight: product.weight,
+          height: product.height,
+          width: product.width,
+          depth: product.depth,
+          attributes: safeProductAttributes(null, product, input.connectionId)
         },
         select: { id: true }
       });
@@ -1387,17 +1478,17 @@ async function applyProduct(input: {
           lastExternalSyncAt: new Date()
         }
       });
-      await updateLocalPrice(transaction, input.organizationId, createdProduct.id, input.product);
+      await updateLocalPrice(transaction, input.organizationId, createdProduct.id, product);
       await updateLocalInventory(
         transaction,
         input.organizationId,
         input.connectionId,
         createdProduct.id,
-        input.product.stock
+        product.stock
       );
       await upsertImportDraft(
         transaction,
-        input.product,
+        product,
         input.organizationId,
         input.erpConnectionId,
         input.connectionId,
@@ -1417,7 +1508,7 @@ async function applyProduct(input: {
       organizationId: input.organizationId,
       connectionId: input.connectionId,
       productId: resolved.match.productId,
-      product: input.product
+      product
     });
 
     let status: BlingProductImportItemStatus;
@@ -1443,7 +1534,7 @@ async function applyProduct(input: {
     }
     await upsertImportDraft(
       transaction,
-      input.product,
+      product,
       input.organizationId,
       input.erpConnectionId,
       input.connectionId,
@@ -1492,6 +1583,7 @@ async function applyPage(input: {
   jobId: string;
   page: number;
   products: NormalizedBlingProduct[];
+  matches: Map<string, BlingProductImportMatch>;
   invalidRows: number;
   cursor: BlingProductImportJobCursor;
 }) {
@@ -1499,6 +1591,10 @@ async function applyPage(input: {
     items: input.products,
     initialState: input.cursor,
     processItem: async (product, currentCursor) => {
+      const preliminaryMatch = input.matches.get(product.externalProductId);
+      if (!preliminaryMatch) {
+        throw new Error("A classificacao preliminar do produto nao foi encontrada.");
+      }
       const result = await applyProduct({
         organizationId: input.organizationId,
         connectionId: input.connectionId,
@@ -1506,6 +1602,7 @@ async function applyPage(input: {
         jobId: input.jobId,
         page: input.page,
         product,
+        preliminaryMatch,
         cursor: currentCursor
       });
       return result.cursor;
@@ -2256,6 +2353,11 @@ export class BlingProductImportService {
       if (normalized.sourceRowCount !== expectedPageCount) {
         throw new Error("A pagina atual diverge da previa confirmada.");
       }
+      const matching = await classifyBlingProductsForConnection({
+        organizationId: input.organizationId,
+        connectionId: input.connectionId,
+        products: normalized.products
+      });
       const cursor = await applyPage({
         organizationId: input.organizationId,
         connectionId: input.connectionId,
@@ -2263,6 +2365,7 @@ export class BlingProductImportService {
         jobId: job.id,
         page,
         products: normalized.products,
+        matches: matching.matches,
         invalidRows: normalized.invalidRows,
         cursor: initialCursor
       });

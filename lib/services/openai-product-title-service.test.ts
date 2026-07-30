@@ -529,6 +529,90 @@ test("rejects unsupported facts without rejecting Fazer 150, Factor 150 or Smart
   ]);
 });
 
+test("accepts safe BLK and RED expansions without loosening unsupported facts", () => {
+  const source = "CAPACETE PLAY FUZZY BLK/RED 60/L RACE TECH";
+
+  assert.deepEqual(
+    validateOpenAIProductTitleSuggestion(
+      { title: "Capacete Race Tech Play Fuzzy Preto Vermelho 60 L" },
+      null,
+      source
+    ),
+    { title: "Capacete Race Tech Play Fuzzy Preto Vermelho 60 L" }
+  );
+
+  const unsupportedBrand = inspectOpenAIProductTitleSuggestion(
+    { title: "Capacete ASX Play Fuzzy Preto Vermelho 60 L" },
+    null,
+    source
+  );
+  assert.deepEqual(unsupportedBrand.rejectionCodes, [
+    "OPENAI_SUGGESTION_UNSUPPORTED_FACT"
+  ]);
+
+  const unsupportedFeature = inspectOpenAIProductTitleSuggestion(
+    { title: "Capacete Race Tech Play Fuzzy Preto Fosco Vermelho 60 L" },
+    null,
+    source
+  );
+  assert.deepEqual(unsupportedFeature.rejectionCodes, [
+    "OPENAI_SUGGESTION_UNSUPPORTED_FACT"
+  ]);
+});
+
+test("accepts capitalization, punctuation and reordering of existing title facts", () => {
+  const source = "CAPACETE PLAY FUZZY BLK/RED 60/L RACE TECH";
+  assert.deepEqual(
+    validateOpenAIProductTitleSuggestion(
+      { title: "Race Tech: Capacete Play Fuzzy RED/BLK 60 L" },
+      null,
+      source
+    ),
+    { title: "Race Tech: Capacete Play Fuzzy RED/BLK 60 L" }
+  );
+});
+
+test("accepts Turq and Turquesa only when the source contains that color evidence", () => {
+  const source = "Capacete ASX City Start Brilho Preto/Turq/Rosa 60";
+  assert.deepEqual(
+    validateOpenAIProductTitleSuggestion(
+      { title: "Capacete ASX City Start Brilho Preto Turquesa Rosa 60" },
+      "ASX",
+      source
+    ),
+    { title: "Capacete ASX City Start Brilho Preto Turquesa Rosa 60" }
+  );
+
+  const withoutEvidence = inspectOpenAIProductTitleSuggestion(
+    { title: "Capacete ASX City Start Brilho Preto Turquesa Rosa 60" },
+    "ASX",
+    "Capacete ASX City Start Brilho Preto Rosa 60"
+  );
+  assert.deepEqual(withoutEvidence.rejectionCodes, [
+    "OPENAI_SUGGESTION_UNSUPPORTED_FACT"
+  ]);
+});
+
+test("conditional aliases remain bidirectional without accepting size changes", () => {
+  assert.deepEqual(
+    validateOpenAIProductTitleSuggestion(
+      { title: "Capacete Race Tech Play Fuzzy BLK RED 60 L" },
+      null,
+      "Capacete Race Tech Play Fuzzy Preto Vermelho 60 L"
+    ),
+    { title: "Capacete Race Tech Play Fuzzy BLK RED 60 L" }
+  );
+
+  const changedSize = inspectOpenAIProductTitleSuggestion(
+    { title: "Capacete Race Tech Play Fuzzy Preto Vermelho 58 M" },
+    null,
+    "Capacete Race Tech Play Fuzzy BLK RED 60 L"
+  );
+  assert.deepEqual(changedSize.rejectionCodes, [
+    "OPENAI_SUGGESTION_UNSUPPORTED_FACT"
+  ]);
+});
+
 test("empty product title is rejected before the mocked provider is called", async () => {
   let calls = 0;
   await expectTitleError(
