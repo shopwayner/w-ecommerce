@@ -13,6 +13,7 @@ import {
   consumeBlingImportPreviewConfirmation,
   createBlingImportPreviewConfirmation,
   createBlingImportPreviewFingerprint,
+  normalizeBlingCatalogPage,
   processBlingImportItemsIndependently,
   registerBlingImportPreviewCorrelation,
   resetBlingImportPreviewCorrelationsForTests,
@@ -150,6 +151,19 @@ test("total ausente com paginas 100/100/16 deriva termino seguro", () => {
   assert.equal(integrity.totalSource, "DERIVED_SHORT_PAGE");
   assert.equal(integrity.lastDataPage, 3);
   assert.equal(integrity.sentinelPage, null);
+});
+
+test("previa de 382 itens em quatro paginas permanece valida", () => {
+  const integrity = integrityFor({
+    pageCounts: [100, 100, 100, 82],
+    uniqueIdsCount: 382
+  });
+  assert.equal(integrity.paginationComplete, true);
+  assert.equal(integrity.previewComplete, true);
+  assert.equal(integrity.derivedTotal, 382);
+  assert.equal(integrity.totalSource, "DERIVED_SHORT_PAGE");
+  assert.equal(integrity.lastDataPage, 4);
+  assert.deepEqual(integrity.reasons, []);
 });
 
 test("total ausente com pagina cheia seguida de sentinela vazia fica completo", () => {
@@ -466,6 +480,31 @@ test("produto sem correspondencia segura deve ser criado", () => {
   );
 });
 
+test("tres produtos sem SKU ou GTIN continuam importaveis", () => {
+  const normalized = normalizeBlingCatalogPage({
+    data: [
+      { id: "external-1", nome: "Produto um" },
+      { id: "external-2", nome: "Produto dois" },
+      { id: "external-3", nome: "Produto tres" }
+    ]
+  });
+
+  assert.equal(normalized.invalidRows, 0);
+  assert.equal(normalized.products.length, 3);
+  for (const product of normalized.products) {
+    assert.equal(product.sku, null);
+    assert.equal(product.gtin, null);
+    assert.deepEqual(
+      resolveBlingProductImportMatch({
+        mappedProductId: null,
+        sku: product.sku,
+        gtin: product.gtin
+      }),
+      { kind: "CREATE", productId: null, conflictField: null }
+    );
+  }
+});
+
 test("SKU duplicado exige revisao e nao escolhe o primeiro", () => {
   assert.deepEqual(
     resolveBlingProductImportMatch({
@@ -640,5 +679,23 @@ test("mensagem de termino inconclusivo permanece segura", () => {
       uniqueProductsLoaded: 100
     }),
     "Nao foi possivel confirmar o fim da paginacao do Bling. Nenhuma sincronizacao foi iniciada."
+  );
+});
+
+test("falha de compatibilidade possui mensagem publica segura e especifica", () => {
+  assert.equal(
+    publicBlingImportPreviewErrorMessage({
+      correlationId: correlationOne,
+      stage: "PREPARE_SYNC",
+      page: null,
+      expectedPages: null,
+      httpStatus: null,
+      errorCode: "BLING_ERP_CONNECTION_COMPATIBILITY_FAILED",
+      requestIdMasked: null,
+      durationMs: 10,
+      pagesCompleted: 0,
+      uniqueProductsLoaded: 0
+    }),
+    "A conta Bling selecionada nao pode preparar esta sincronizacao. Revise a integracao e gere uma nova previa."
   );
 });

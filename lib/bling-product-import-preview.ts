@@ -556,6 +556,12 @@ export function publicBlingImportPreviewErrorMessage(
   if (diagnostic.stage === "INTEGRITY") {
     return "A consulta retornou dados incompletos ou divergentes. Nenhuma sincronizacao foi iniciada.";
   }
+  if (
+    diagnostic.errorCode === "BLING_ERP_CONNECTION_COMPATIBILITY_FAILED"
+    || diagnostic.errorCode === "BLING_CONNECTION_ORGANIZATION_MISMATCH"
+  ) {
+    return "A conta Bling selecionada nao pode preparar esta sincronizacao. Revise a integracao e gere uma nova previa.";
+  }
   if (diagnostic.stage === "PREPARE_SYNC") {
     return "Nao foi possivel preparar a sincronizacao. Gere uma nova previa antes de tentar novamente.";
   }

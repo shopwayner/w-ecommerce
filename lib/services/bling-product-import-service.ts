@@ -17,6 +17,10 @@ import {
 import { decryptSecret, encryptSecret } from "@/lib/security/encryption";
 import { BlingApiError, blingApiClient } from "@/lib/services/bling-api-client";
 import {
+  BlingErpConnectionCompatibilityError,
+  ensureOrganizationBlingErpConnection
+} from "@/lib/services/bling-erp-connection-compatibility-service";
+import {
   isValidGtin,
   normalizeGtin
 } from "@/lib/services/internal-gtin-catalog-service";
@@ -766,6 +770,7 @@ async function validateConnection(organizationId: string, connectionId: string) 
     where: { id: connectionId, organizationId },
     select: {
       id: true,
+      organizationId: true,
       name: true,
       status: true,
       tokens: {
@@ -2192,12 +2197,10 @@ export class BlingProductImportService {
     const startedAt = Date.now();
     const confirmation = consumeBlingImportPreviewConfirmation(input.confirmationToken, input);
     try {
-      await validateConnection(input.organizationId, input.connectionId);
-      const erpConnection = await prisma.eRPConnection.findUnique({
-        where: { organizationId_provider: { organizationId: input.organizationId, provider: ERPProvider.BLING } },
-        select: { id: true }
-      });
-      if (!erpConnection) throw new Error("A integracao Bling precisa ser configurada antes da sincronizacao.");
+      const connection = await validateConnection(
+        input.organizationId,
+        input.connectionId
+      );
 
       const recentLease = new Date(Date.now() - staleJobLeaseMs);
       const lockKey = `bling-products:${input.organizationId}:${input.connectionId}`;
@@ -2205,6 +2208,12 @@ export class BlingProductImportService {
         await transaction.$queryRaw<Array<{ lockState: string }>>`
           SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS "lockState"
         `;
+        const erpConnection =
+          await ensureOrganizationBlingErpConnection({
+            transaction,
+            organizationId: input.organizationId,
+            connection
+          });
         const existingJob = await transaction.erpSyncJob.findFirst({
           where: {
             organizationId: input.organizationId,
@@ -2262,7 +2271,9 @@ export class BlingProductImportService {
           stage: "PREPARE_SYNC",
           startedAt,
           error,
-          errorCode: "PREPARE_SYNC_FAILED",
+          errorCode: error instanceof BlingErpConnectionCompatibilityError
+            ? error.code
+            : "PREPARE_SYNC_FAILED",
           previewComplete: false,
           jobCreated: false
         })
