@@ -17,11 +17,39 @@ $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $deployDir = "C:\deploy"
 $packagePath = Join-Path $deployDir "w-ecommerce-deploy.tar.gz"
+$manifestPath = Join-Path $deployDir "w-ecommerce-deploy.manifest.json"
+$archivePath = Join-Path $env:TEMP ("w-ecommerce-git-archive-" + [guid]::NewGuid().ToString("N") + ".tar")
 $stageRoot = Join-Path $env:TEMP ("w-ecommerce-deploy-stage-" + [guid]::NewGuid().ToString("N"))
 $remotePackage = "/opt/w-ecommerce-deploy.tar.gz"
+$remoteManifest = "/opt/w-ecommerce-deploy.manifest.json"
 $remoteTarget = "${VpsUser}@${VpsHost}:${remotePackage}"
+$remoteManifestTarget = "${VpsUser}@${VpsHost}:${remoteManifest}"
 $sshOptions = @("-o", "BatchMode=yes", "-o", "ConnectTimeout=12")
 $scpOptions = @("-o", "BatchMode=yes", "-o", "ConnectTimeout=12")
+$requiredDeployPaths = @(
+  "package.json",
+  "package-lock.json",
+  "Dockerfile",
+  "docker-compose.yml",
+  "app",
+  "components",
+  "lib",
+  "prisma",
+  "public",
+  "scripts",
+  "instrumentation.ts",
+  "instrumentation.node.ts"
+)
+$criticalRuntimePaths = @(
+  "instrumentation.ts",
+  "instrumentation.node.ts",
+  "lib/services/bling-product-import-service.ts",
+  "lib/services/bling-product-update-service.ts",
+  "app/api/products/import-from-bling/route.ts",
+  "app/api/products/route.ts",
+  "components/pages/products-page.tsx",
+  "lib/services/bling-oauth-service.ts"
+)
 
 function Assert-Command {
   param([string]$Name)
@@ -42,6 +70,149 @@ function Invoke-Checked {
   if ($LASTEXITCODE -ne 0) {
     throw "Comando falhou: $FilePath $($Arguments -join ' ')"
   }
+}
+
+function Invoke-GitCapture {
+  param([string[]]$Arguments)
+
+  $output = & git.exe -C $projectRoot @Arguments 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "Validacao Git falhou."
+  }
+
+  return (($output | Out-String).Trim())
+}
+
+function Test-GitExitCode {
+  param([string[]]$Arguments)
+
+  & git.exe -C $projectRoot @Arguments *> $null
+  return $LASTEXITCODE -eq 0
+}
+
+function Get-ValidatedGitDeployState {
+  $insideWorkTree = Invoke-GitCapture @("rev-parse", "--is-inside-work-tree")
+  if ($insideWorkTree -ne "true") {
+    throw "Deploy bloqueado: o projeto nao esta em um repositorio Git valido."
+  }
+
+  if (-not (Test-GitExitCode @("remote", "get-url", "origin"))) {
+    throw "Deploy bloqueado: o remote origin nao existe."
+  }
+
+  if (-not (Test-GitExitCode @("fetch", "origin", "--prune"))) {
+    throw "Deploy bloqueado: git fetch origin --prune falhou."
+  }
+
+  if (-not (Test-GitExitCode @("rev-parse", "--verify", "refs/remotes/origin/main^{commit}"))) {
+    throw "Deploy bloqueado: origin/main nao existe."
+  }
+
+  $branchOutput = & git.exe -C $projectRoot symbolic-ref --quiet --short HEAD 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    throw "Deploy bloqueado: HEAD detached."
+  }
+  $branch = (($branchOutput | Out-String).Trim())
+
+  $unmerged = Invoke-GitCapture @("ls-files", "-u")
+  if ($unmerged) {
+    throw "Deploy bloqueado: existem conflitos nao resolvidos."
+  }
+
+  if (-not (Test-GitExitCode @("diff", "--quiet", "--ignore-submodules", "--"))) {
+    throw "Deploy bloqueado: existem alteracoes rastreadas nao commitadas."
+  }
+
+  if (-not (Test-GitExitCode @("diff", "--cached", "--quiet", "--ignore-submodules", "--"))) {
+    throw "Deploy bloqueado: existem alteracoes em staging."
+  }
+
+  $untracked = Invoke-GitCapture @("ls-files", "--others", "--exclude-standard")
+  if ($untracked) {
+    throw "Deploy bloqueado: existem arquivos nao rastreados."
+  }
+
+  if (-not (Test-GitExitCode @("merge-base", "--is-ancestor", "origin/main", "HEAD"))) {
+    throw "Deploy bloqueado: a branch local nao esta baseada no origin/main atual."
+  }
+
+  $localCommit = Invoke-GitCapture @("rev-parse", "HEAD")
+  $remoteCommit = Invoke-GitCapture @("rev-parse", "origin/main")
+  if ($localCommit -ne $remoteCommit) {
+    throw "Deploy bloqueado: HEAD difere de origin/main."
+  }
+
+  Write-Host "GIT_BRANCH=$branch"
+  Write-Host "GIT_LOCAL_COMMIT=$localCommit"
+  Write-Host "GIT_REMOTE_COMMIT=$remoteCommit"
+  Write-Host "GIT_STATE=clean"
+
+  return [pscustomobject]@{
+    Branch = $branch
+    LocalCommit = $localCommit
+    RemoteCommit = $remoteCommit
+  }
+}
+
+function Assert-DeployPackageContent {
+  param(
+    [string]$Root,
+    [string[]]$ArchiveEntries
+  )
+
+  foreach ($requiredPath in $requiredDeployPaths) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Root $requiredPath))) {
+      throw "Pacote invalido: caminho obrigatorio ausente: $requiredPath"
+    }
+  }
+
+  $forbiddenPatterns = @(
+    '(^|/)\.git(/|$)',
+    '(^|/)node_modules(/|$)',
+    '(^|/)\.next(/|$)',
+    '(^|/)\.env$',
+    '(^|/)\.env\.production$',
+    '(^|/)\.env\.local$',
+    '(^|/)\.env\.development$',
+    '(^|/)\.env\.test$',
+    '(^|/)\.deploy-backups(/|$)'
+  )
+
+  foreach ($entry in $ArchiveEntries) {
+    $normalizedEntry = ($entry -replace '^\./', '').TrimEnd('/')
+    foreach ($pattern in $forbiddenPatterns) {
+      if ($normalizedEntry -match $pattern) {
+        throw "Pacote invalido: conteudo proibido encontrado: $normalizedEntry"
+      }
+    }
+  }
+}
+
+function Get-CriticalRuntimeHashes {
+  param([string]$Root)
+
+  return @($criticalRuntimePaths | ForEach-Object {
+    $fullPath = Join-Path $Root $_
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+      throw "Arquivo runtime critico ausente: $_"
+    }
+
+    [pscustomobject]@{
+      path = $_
+      sha256 = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+  })
+}
+
+function Write-Utf8JsonWithoutBom {
+  param(
+    [string]$Path,
+    [object]$Value
+  )
+
+  $json = $Value | ConvertTo-Json -Depth 8
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [IO.File]::WriteAllText($Path, $json, $encoding)
 }
 
 function Get-SafeCommandForError {
@@ -522,6 +693,7 @@ fi
   }
 }
 
+try {
 Set-Location -LiteralPath $projectRoot
 
 Assert-Command "npm.cmd"
@@ -529,8 +701,13 @@ Assert-Command "npx.cmd"
 Assert-Command "ssh.exe"
 Assert-Command "scp.exe"
 Assert-Command "curl.exe"
-Assert-Command "robocopy.exe"
 Assert-Command "tar.exe"
+Assert-Command "git.exe"
+
+$gitDeployState = Get-ValidatedGitDeployState
+$deployCommit = $gitDeployState.LocalCommit
+$deployBranch = $gitDeployState.Branch
+
 Initialize-SshOptions
 Test-SshAccess
 
@@ -539,33 +716,74 @@ Invoke-Checked "npx.cmd" @("prisma", "validate")
 Invoke-Checked "npm.cmd" @("run", "lint")
 Invoke-Checked "npm.cmd" @("run", "build")
 
-Write-Host "==> Preparando pacote sem node_modules, .next, .git e .env"
+Write-Host "==> Preparando pacote exclusivamente a partir do commit $deployCommit"
 if (-not (Test-Path -LiteralPath $deployDir)) {
   New-Item -ItemType Directory -Path $deployDir | Out-Null
 }
-if (Test-Path -LiteralPath $packagePath) {
-  Remove-Item -LiteralPath $packagePath -Force
-}
-if (Test-Path -LiteralPath $stageRoot) {
-  Remove-Item -LiteralPath $stageRoot -Recurse -Force
-}
+Remove-Item -LiteralPath $packagePath, $manifestPath, $archivePath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $stageRoot | Out-Null
 
-& robocopy.exe $projectRoot $stageRoot /E /XD node_modules .next .git /XF .env .env.local .env.production .env.development .env.test *.log | Out-Host
-if ($LASTEXITCODE -gt 7) {
-  throw "Falha ao copiar arquivos para staging. Codigo robocopy: $LASTEXITCODE"
+foreach ($requiredPath in $requiredDeployPaths) {
+  if (-not (Test-GitExitCode @("cat-file", "-e", "${deployCommit}:$requiredPath"))) {
+    throw "Deploy bloqueado: caminho obrigatorio nao rastreado no commit: $requiredPath"
+  }
 }
+
+Invoke-Checked "git.exe" @(
+  "-C",
+  $projectRoot,
+  "archive",
+  "--format=tar",
+  "--output=$archivePath",
+  $deployCommit
+)
+Invoke-Checked "tar.exe" @("-xf", $archivePath, "-C", $stageRoot)
 
 Write-Host "==> Gerando pacote tar.gz compativel com Linux em $packagePath"
-Push-Location -LiteralPath $stageRoot
-try {
-  Invoke-Checked "tar.exe" @("-czf", $packagePath, ".") $stageRoot
-} finally {
-  Pop-Location
-}
+Invoke-Checked "tar.exe" @("-czf", $packagePath, "-C", $stageRoot, ".")
 
-Write-Host "==> Enviando pacote para a VPS"
+$archiveEntries = @(& tar.exe -tzf $packagePath)
+if ($LASTEXITCODE -ne 0) {
+  throw "Pacote invalido: tar nao conseguiu listar o arquivo compactado."
+}
+if ($archiveEntries.Count -eq 0) {
+  throw "Pacote invalido: arquivo compactado vazio."
+}
+Assert-DeployPackageContent -Root $stageRoot -ArchiveEntries $archiveEntries
+
+$criticalRuntimeHashes = Get-CriticalRuntimeHashes -Root $stageRoot
+$packageSha256 = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$deployManifest = [ordered]@{
+  formatVersion = 1
+  commitSha = $deployCommit
+  branch = $deployBranch
+  packagedAtUtc = [DateTime]::UtcNow.ToString("o")
+  packageSha256 = $packageSha256
+  criticalFiles = $criticalRuntimeHashes
+}
+Write-Utf8JsonWithoutBom -Path $manifestPath -Value $deployManifest
+
+$parsedManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if (
+  $parsedManifest.commitSha -ne $deployCommit -or
+  $parsedManifest.packageSha256 -ne $packageSha256 -or
+  $parsedManifest.formatVersion -ne 1
+) {
+  throw "Manifesto local invalido ou divergente do commit validado."
+}
+$manifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+$requiredPathShellEntries = ($requiredDeployPaths | ForEach-Object { "  `"$_`"" }) -join "`n"
+$criticalHashShellEntries = ($criticalRuntimeHashes | ForEach-Object {
+  "  `"$($_.path)|$($_.sha256)`""
+}) -join "`n"
+
+Write-Host "PACKAGE_SHA256=$packageSha256"
+Write-Host "MANIFEST_SHA256=$manifestSha256"
+Write-Host "==> Enviando pacote e manifesto para a VPS"
 Invoke-RemoteChecked "scp.exe" ($scpOptions + @($packagePath, $remoteTarget)) "envio do pacote de deploy"
+Invoke-RemoteChecked "scp.exe" ($scpOptions + @($manifestPath, $remoteManifestTarget)) "envio do manifesto de deploy"
 
 $remoteSeedCommands = if ($RunProductionSeed) {
 @'
@@ -587,14 +805,168 @@ set -euo pipefail
 
 REMOTE_DIR="$RemoteDir"
 REMOTE_PACKAGE="$remotePackage"
+REMOTE_MANIFEST="$remoteManifest"
+EXPECTED_COMMIT="$deployCommit"
+EXPECTED_PACKAGE_SHA="$packageSha256"
+EXPECTED_MANIFEST_SHA="$manifestSha256"
 APP_URL_LINE="APP_URL=$BaseUrl"
-ENV_BACKUP="/tmp/w-ecommerce.env.production.$$"
-COMPOSE_BACKUP="/tmp/w-ecommerce.docker-compose.$$"
-PRESERVE_COMPOSE=0
+ENV_BACKUP=""
+RELEASE_DIR=""
+PERSIST_BACKUP=""
+BACKUP_PATH=""
+BACKUP_SHA=""
+CODE_REPLACED=0
+ROLLBACK_IN_PROGRESS=0
+
+REQUIRED_PATHS=(
+$requiredPathShellEntries
+)
+
+CRITICAL_HASHES=(
+$criticalHashShellEntries
+)
+
+cleanup_remote_temporary() {
+  if [ -n "`$RELEASE_DIR" ] && [ -d "`$RELEASE_DIR" ]; then
+    rm -rf -- "`$RELEASE_DIR"
+  fi
+  if [ -n "`$PERSIST_BACKUP" ] && [ -d "`$PERSIST_BACKUP" ]; then
+    rm -rf -- "`$PERSIST_BACKUP"
+  fi
+  if [ -n "`$ENV_BACKUP" ] && [ -f "`$ENV_BACKUP" ]; then
+    rm -f -- "`$ENV_BACKUP"
+  fi
+  rm -f -- "`$REMOTE_PACKAGE" "`$REMOTE_MANIFEST"
+}
+
+trap cleanup_remote_temporary EXIT
+
+clean_code_root() {
+  local current_dir
+  current_dir="`$(pwd -P)"
+
+  if [ "`$current_dir" != "/opt/w-ecommerce" ]; then
+    echo "ERRO: substituicao de codigo recusada fora de /opt/w-ecommerce: `$current_dir" >&2
+    return 1
+  fi
+
+  find . -mindepth 1 -maxdepth 1 \
+    ! -name '.env.production' \
+    ! -name '.deploy-backups' \
+    ! -name 'uploads' \
+    ! -name 'images' \
+    ! -name 'backups' \
+    -exec rm -rf -- {} +
+}
+
+preserve_nested_persistent_paths() {
+  local source_root="`$1"
+  local destination_root="`$2"
+  local persistent_path
+
+  mkdir -p "`$destination_root"
+  for persistent_path in public/uploads public/images; do
+    if [ -d "`$source_root/`$persistent_path" ]; then
+      mkdir -p "`$destination_root/`$(dirname "`$persistent_path")"
+      cp -a "`$source_root/`$persistent_path" "`$destination_root/`$persistent_path"
+    fi
+  done
+}
+
+restore_nested_persistent_paths() {
+  local source_root="`$1"
+  local destination_root="`$2"
+  local persistent_path
+
+  for persistent_path in public/uploads public/images; do
+    if [ -d "`$source_root/`$persistent_path" ]; then
+      mkdir -p "`$destination_root/`$(dirname "`$persistent_path")"
+      rm -rf -- "`$destination_root/`$persistent_path"
+      cp -a "`$source_root/`$persistent_path" "`$destination_root/`$persistent_path"
+    fi
+  done
+}
+
+validate_critical_hashes() {
+  local root="`$1"
+  local label="`$2"
+  local entry path expected actual
+
+  for entry in "`$`{CRITICAL_HASHES[@]`}`"; do
+    path="`$`{entry%%|*`}"
+    expected="`$`{entry#*|`}"
+    if [ ! -f "`$root/`$path" ]; then
+      echo "ERRO: arquivo critico ausente em `$label: `$path" >&2
+      return 1
+    fi
+    actual="`$(sha256sum "`$root/`$path" | awk '{print `$1}')"
+    if [ "`$actual" != "`$expected" ]; then
+      echo "ERRO: hash divergente em `$label: `$path" >&2
+      return 1
+    fi
+  done
+
+  echo "OK: hashes criticos conferidos em `$label."
+}
+
+validate_container_critical_hashes() {
+  local entry path expected actual
+
+  for entry in "`$`{CRITICAL_HASHES[@]`}`"; do
+    path="`$`{entry%%|*`}"
+    expected="`$`{entry#*|`}"
+    actual="`$(docker exec w-ecommerce-app sha256sum "/app/`$path" 2>/dev/null | awk '{print `$1}')"
+    if [ -z "`$actual" ] || [ "`$actual" != "`$expected" ]; then
+      echo "ERRO: hash divergente no container: `$path" >&2
+      return 1
+    fi
+  done
+
+  echo "OK: hashes criticos conferidos em /app."
+}
+
+rollback_code() {
+  if [ "`$CODE_REPLACED" != "1" ] || [ "`$ROLLBACK_IN_PROGRESS" = "1" ]; then
+    return 0
+  fi
+
+  ROLLBACK_IN_PROGRESS=1
+  echo "==> Rollback restrito ao codigo usando `$BACKUP_PATH" >&2
+
+  if [ -z "`$BACKUP_PATH" ] || [ ! -s "`$BACKUP_PATH" ] || ! tar -tzf "`$BACKUP_PATH" >/dev/null; then
+    echo "ERRO: backup de codigo indisponivel ou invalido; rollback nao executado." >&2
+    return 1
+  fi
+
+  local rollback_env rollback_persistent
+  rollback_env="`$(mktemp /tmp/w-ecommerce.rollback-env.XXXXXX)"
+  rollback_persistent="`$(mktemp -d /tmp/w-ecommerce.rollback-persistent.XXXXXX)"
+  cp "$RemoteDir/.env.production" "`$rollback_env" || return 1
+  preserve_nested_persistent_paths "$RemoteDir" "`$rollback_persistent" || return 1
+
+  cd "$RemoteDir" || return 1
+  clean_code_root || return 1
+  tar -xzf "`$BACKUP_PATH" -C "$RemoteDir" || return 1
+  mv "`$rollback_env" "$RemoteDir/.env.production" || return 1
+  restore_nested_persistent_paths "`$rollback_persistent" "$RemoteDir" || return 1
+  rm -rf -- "`$rollback_persistent"
+
+  if [ ! -f docker-compose.yml ]; then
+    echo "ERRO: backup nao contem docker-compose.yml; app anterior nao foi recriado." >&2
+    return 1
+  fi
+
+  docker compose --env-file .env.production -f docker-compose.yml build app || return 1
+  docker compose --env-file .env.production -f docker-compose.yml up -d --no-deps --force-recreate app || return 1
+  CODE_REPLACED=0
+  echo "ROLLBACK_SOURCE=`$BACKUP_PATH" >&2
+  echo "OK: rollback restaurou somente o codigo e recriou somente o app." >&2
+}
 
 fail_remote() {
   local message="`$1"
   echo "ERRO: `$message" >&2
+  rollback_code || echo "ERRO: rollback restrito ao codigo nao foi concluido." >&2
   if [ -d "$RemoteDir" ]; then
     cd "$RemoteDir" || true
     echo "==> docker compose ps" >&2
@@ -664,96 +1036,6 @@ ensure_dependency_service() {
   docker compose --env-file .env.production -f docker-compose.yml up -d --no-recreate "`$service" || fail_remote "Falha ao iniciar `$container."
 }
 
-clean_managed_source_paths() {
-  local current_dir
-  current_dir="`$(pwd -P)"
-
-  if [ "`$current_dir" != "/opt/w-ecommerce" ]; then
-    echo "ERRO: limpeza segura recusada fora de /opt/w-ecommerce. Diretorio atual: `$current_dir" >&2
-    exit 1
-  fi
-
-  local backup_dir=".deploy-backups"
-  local backup_path="`$backup_dir/source-before-clean-`$(date +%Y%m%d-%H%M%S).tar.gz"
-  mkdir -p "`$backup_dir"
-
-  local managed_paths=(
-    app
-    components
-    lib
-    hooks
-    types
-    prisma
-    scripts
-    Dockerfile
-    package.json
-    package-lock.json
-    next.config.js
-    next.config.mjs
-    tsconfig.json
-    tailwind.config.js
-    tailwind.config.ts
-    postcss.config.js
-    postcss.config.mjs
-    middleware.ts
-    next-env.d.ts
-    .eslintrc.json
-  )
-
-  local existing_paths=()
-  local path
-  for path in "`$`{managed_paths[@]`}`"; do
-    if [ -e "`$path" ]; then
-      existing_paths+=("`$path")
-    fi
-  done
-
-  shopt -s nullglob
-  local managed_glob_paths=(tmp-*.ts tmp-*.tsx tmp-*.js tmp-*.mjs)
-  shopt -u nullglob
-  for path in "`$`{managed_glob_paths[@]`}`"; do
-    if [ -e "`$path" ]; then
-      existing_paths+=("`$path")
-    fi
-  done
-
-  if [ "`$`{#existing_paths[@]`}" -gt 0 ]; then
-    echo "==> Criando backup dos caminhos de codigo atuais em `$REMOTE_DIR/`$backup_path"
-    tar -czf "`$backup_path" "`$`{existing_paths[@]`}" || fail_remote "Falha ao criar backup antes da limpeza segura."
-  else
-    echo "==> Nenhum caminho de codigo existente para backup antes da limpeza segura."
-  fi
-
-  for path in "`$`{managed_paths[@]`}`"; do
-    case "`$path" in
-      ""|"."|".."|/*|*"/../"*|*"../"*)
-        echo "ERRO: caminho inseguro recusado na limpeza: `$path" >&2
-        exit 1
-        ;;
-    esac
-
-    if [ -e "`$path" ]; then
-      rm -rf -- "`$path"
-    fi
-  done
-
-  for path in "`$`{managed_glob_paths[@]`}`"; do
-    case "`$path" in
-      ""|"."|".."|/*|*"/../"*|*"../"*)
-        echo "ERRO: caminho inseguro recusado na limpeza: `$path" >&2
-        exit 1
-        ;;
-    esac
-
-    if [ -e "`$path" ]; then
-      rm -f -- "`$path"
-    fi
-  done
-
-  echo "OK: limpeza segura removeu apenas caminhos de codigo gerenciados em `$REMOTE_DIR."
-  echo "BACKUP_SOURCE_BEFORE_CLEAN=`$REMOTE_DIR/`$backup_path"
-}
-
 mkdir -p "`$REMOTE_DIR"
 cd "`$REMOTE_DIR"
 
@@ -762,40 +1044,97 @@ if [ "`$(pwd -P)" != "/opt/w-ecommerce" ]; then
   exit 1
 fi
 
-if [ -f .env.production ]; then
-  cp .env.production "`$ENV_BACKUP"
-else
+if [ ! -f .env.production ]; then
   echo "ERRO: .env.production nao existe em `$REMOTE_DIR. Crie o arquivo antes do deploy." >&2
   exit 1
 fi
 
-if [ -f docker-compose.yml ] && grep -q "command:" docker-compose.yml && ! grep -q "migrate deploy" docker-compose.yml; then
-  cp docker-compose.yml "`$COMPOSE_BACKUP"
-  PRESERVE_COMPOSE=1
+echo "==> Validando pacote e manifesto recebidos"
+if [ ! -s "`$REMOTE_PACKAGE" ] || [ ! -s "`$REMOTE_MANIFEST" ]; then
+  fail_remote "Pacote ou manifesto remoto ausente/vazio."
 fi
 
-clean_managed_source_paths
+ACTUAL_PACKAGE_SHA="`$(sha256sum "`$REMOTE_PACKAGE" | awk '{print `$1}')"
+ACTUAL_MANIFEST_SHA="`$(sha256sum "`$REMOTE_MANIFEST" | awk '{print `$1}')"
+if [ "`$ACTUAL_PACKAGE_SHA" != "`$EXPECTED_PACKAGE_SHA" ]; then
+  fail_remote "SHA-256 do pacote remoto diverge do manifesto local."
+fi
+if [ "`$ACTUAL_MANIFEST_SHA" != "`$EXPECTED_MANIFEST_SHA" ]; then
+  fail_remote "SHA-256 do manifesto remoto diverge do manifesto local."
+fi
+grep -Fq "\"commitSha\": \"`$EXPECTED_COMMIT\"" "`$REMOTE_MANIFEST" || fail_remote "Manifesto remoto nao identifica o commit esperado."
+grep -Fq "\"packageSha256\": \"`$EXPECTED_PACKAGE_SHA\"" "`$REMOTE_MANIFEST" || fail_remote "Manifesto remoto nao identifica o pacote esperado."
 
-echo "==> Extraindo pacote tar.gz em `$REMOTE_DIR"
-set +e
-tar -xzf "`$REMOTE_PACKAGE" -C "`$REMOTE_DIR"
-TAR_EXIT="`$?"
-set -e
+PACKAGE_LIST="`$(mktemp /tmp/w-ecommerce.package-list.XXXXXX)"
+tar -tzf "`$REMOTE_PACKAGE" > "`$PACKAGE_LIST" || fail_remote "Pacote tar.gz corrompido ou ilegivel."
 
-for required_path in package.json Dockerfile app lib prisma; do
-  if [ ! -e "`$REMOTE_DIR/`$required_path" ]; then
-    echo "ERRO: arquivo/pasta obrigatorio ausente apos extracao: `$required_path" >&2
-    exit 1
+RELEASE_DIR="`$(mktemp -d "/opt/w-ecommerce-release-`$EXPECTED_COMMIT.XXXXXX")"
+tar -xzf "`$REMOTE_PACKAGE" -C "`$RELEASE_DIR" || fail_remote "Extracao do pacote falhou."
+rm -f -- "`$PACKAGE_LIST"
+
+for required_path in "`$`{REQUIRED_PATHS[@]`}`"; do
+  if [ ! -e "`$RELEASE_DIR/`$required_path" ]; then
+    fail_remote "Extracao incompleta: caminho obrigatorio ausente: `$required_path"
   fi
 done
 
-if [ "`$TAR_EXIT" -ne 0 ]; then
-  echo "AVISO: tar retornou codigo `$TAR_EXIT, mas arquivos principais existem; seguindo deploy." >&2
+if find "`$RELEASE_DIR" -mindepth 1 \( \
+  -name '.git' -o \
+  -name 'node_modules' -o \
+  -name '.next' -o \
+  -name '.env' -o \
+  -name '.env.production' \
+\) -print -quit | grep -q .; then
+  fail_remote "Pacote contem caminho proibido."
 fi
 
-mv "`$ENV_BACKUP" "`$REMOTE_DIR/.env.production"
-if [ "`$PRESERVE_COMPOSE" = "1" ]; then
-  mv "`$COMPOSE_BACKUP" "`$REMOTE_DIR/docker-compose.yml"
+validate_critical_hashes "`$RELEASE_DIR" "pacote extraido" || fail_remote "Hashes do pacote extraido divergentes."
+cp "`$REMOTE_MANIFEST" "`$RELEASE_DIR/.deploy-manifest.json" || fail_remote "Falha ao anexar manifesto ao contexto limpo."
+
+echo "==> Criando e validando backup do codigo atual"
+mkdir -p .deploy-backups
+BACKUP_PATH="$RemoteDir/.deploy-backups/source-before-`$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+tar \
+  --exclude='./.env.production' \
+  --exclude='./.deploy-backups' \
+  --exclude='./uploads' \
+  --exclude='./images' \
+  --exclude='./backups' \
+  --exclude='./public/uploads' \
+  --exclude='./public/images' \
+  -czf "`$BACKUP_PATH" . || fail_remote "Falha ao criar backup do codigo atual."
+if [ ! -s "`$BACKUP_PATH" ]; then
+  fail_remote "Backup do codigo atual esta vazio."
+fi
+BACKUP_LIST="`$(tar -tzf "`$BACKUP_PATH")" || fail_remote "Listagem do backup falhou."
+if [ -z "`$(printf '%s\n' "`$BACKUP_LIST" | grep -vE '^\./?$' || true)" ]; then
+  fail_remote "Backup nao contem arquivos de codigo."
+fi
+BACKUP_SHA="`$(sha256sum "`$BACKUP_PATH" | awk '{print `$1}')"
+echo "BACKUP_SOURCE_BEFORE_SWAP=`$BACKUP_PATH"
+echo "BACKUP_SHA256=`$BACKUP_SHA"
+
+ENV_BACKUP="`$(mktemp /tmp/w-ecommerce.env-production.XXXXXX)"
+PERSIST_BACKUP="`$(mktemp -d /tmp/w-ecommerce.persistent.XXXXXX)"
+cp .env.production "`$ENV_BACKUP" || fail_remote "Falha ao preservar .env.production."
+preserve_nested_persistent_paths "$RemoteDir" "`$PERSIST_BACKUP" || fail_remote "Falha ao preservar imagens/uploads publicos."
+
+echo "==> Substituindo deterministicamente somente o conjunto de codigo"
+CODE_REPLACED=1
+clean_code_root || fail_remote "Limpeza deterministica do codigo anterior falhou."
+cp -a "`$RELEASE_DIR"/. "$RemoteDir"/ || fail_remote "Copia do release validado falhou."
+mv "`$ENV_BACKUP" "$RemoteDir/.env.production" || fail_remote "Restauracao de .env.production falhou."
+ENV_BACKUP=""
+restore_nested_persistent_paths "`$PERSIST_BACKUP" "$RemoteDir" || fail_remote "Restauracao de imagens/uploads publicos falhou."
+
+cd "$RemoteDir"
+if [ -e .next ]; then
+  fail_remote "Artefato .next antigo permaneceu no contexto de build."
+fi
+validate_critical_hashes "$RemoteDir" "/opt/w-ecommerce" || fail_remote "Hashes remotos divergentes."
+INSTALLED_MANIFEST_SHA="`$(sha256sum "$RemoteDir/.deploy-manifest.json" | awk '{print `$1}')"
+if [ "`$INSTALLED_MANIFEST_SHA" != "`$EXPECTED_MANIFEST_SHA" ]; then
+  fail_remote "Manifesto instalado diverge do manifesto validado."
 fi
 
 if grep -q "^APP_URL=" .env.production; then
@@ -810,30 +1149,52 @@ if grep -q "migrate deploy" Dockerfile; then
 fi
 
 if [ -f docker-compose.yml ] && grep -q "migrate deploy" docker-compose.yml; then
-  echo "ERRO: docker-compose.yml ainda contem prisma migrate deploy no start." >&2
-  exit 1
+  fail_remote "docker-compose.yml contem prisma migrate deploy."
+fi
+
+POSTGRES_BEFORE="`$(docker inspect -f '{{.Id}}' w-ecommerce-postgres 2>/dev/null || true)"
+REDIS_BEFORE="`$(docker inspect -f '{{.Id}}' w-ecommerce-redis 2>/dev/null || true)"
+if [ -z "`$POSTGRES_BEFORE" ] || [ -z "`$REDIS_BEFORE" ]; then
+  fail_remote "PostgreSQL ou Redis existente nao foi localizado antes do deploy."
 fi
 
 echo "==> Build do app W Ecommerce"
-docker compose --env-file .env.production -f docker-compose.yml build app || fail_remote "Build do app falhou."
+(
+  cd "`$RELEASE_DIR"
+  W_ECOMMERCE_ENV_FILE="$RemoteDir/.env.production" \
+    docker compose --env-file "$RemoteDir/.env.production" -f docker-compose.yml build app
+) || fail_remote "Build do app falhou."
+APP_IMAGE_ID="`$(
+  cd "`$RELEASE_DIR"
+  W_ECOMMERCE_ENV_FILE="$RemoteDir/.env.production" \
+    docker compose --env-file "$RemoteDir/.env.production" -f docker-compose.yml images -q app | head -n 1
+)"
+if [ -z "`$APP_IMAGE_ID" ]; then
+  fail_remote "ID da nova imagem do app nao foi identificado."
+fi
+echo "APP_IMAGE_ID=`$APP_IMAGE_ID"
 
 echo "==> Verificando dependencias dedicadas do W Ecommerce"
 ensure_dependency_service "postgres" "w-ecommerce-postgres"
 ensure_dependency_service "redis" "w-ecommerce-redis"
 
-POSTGRES_BEFORE="`$(docker inspect -f '{{.Id}}' w-ecommerce-postgres 2>/dev/null || true)"
-REDIS_BEFORE="`$(docker inspect -f '{{.Id}}' w-ecommerce-redis 2>/dev/null || true)"
-
 echo "==> Subindo somente o app W Ecommerce sem recriar dependencias saudaveis"
-docker compose --env-file .env.production -f docker-compose.yml up -d --no-deps app || fail_remote "Falha ao subir o w-ecommerce-app."
+docker compose --env-file .env.production -f docker-compose.yml up -d --no-deps --force-recreate app || fail_remote "Falha ao subir o w-ecommerce-app."
 
 POSTGRES_AFTER="`$(docker inspect -f '{{.Id}}' w-ecommerce-postgres 2>/dev/null || true)"
 REDIS_AFTER="`$(docker inspect -f '{{.Id}}' w-ecommerce-redis 2>/dev/null || true)"
-if [ -n "`$POSTGRES_BEFORE" ] && [ "`$POSTGRES_BEFORE" = "`$POSTGRES_AFTER" ]; then
-  echo "OK: w-ecommerce-postgres nao foi recriado."
+if [ "`$POSTGRES_BEFORE" != "`$POSTGRES_AFTER" ]; then
+  fail_remote "O container PostgreSQL foi recriado ou substituido."
 fi
-if [ -n "`$REDIS_BEFORE" ] && [ "`$REDIS_BEFORE" = "`$REDIS_AFTER" ]; then
-  echo "OK: w-ecommerce-redis nao foi recriado."
+if [ "`$REDIS_BEFORE" != "`$REDIS_AFTER" ]; then
+  fail_remote "O container Redis foi recriado ou substituido."
+fi
+echo "OK: PostgreSQL e Redis preservaram os mesmos IDs de container."
+
+validate_container_critical_hashes || fail_remote "Hashes do container divergentes."
+CONTAINER_MANIFEST_SHA="`$(docker exec w-ecommerce-app sha256sum /app/.deploy-manifest.json 2>/dev/null | awk '{print `$1}')"
+if [ "`$CONTAINER_MANIFEST_SHA" != "`$EXPECTED_MANIFEST_SHA" ]; then
+  fail_remote "Manifesto dentro do container diverge do manifesto validado."
 fi
 
 echo "==> Status dos containers W Ecommerce"
@@ -846,6 +1207,11 @@ echo "==> Aguardando /login ficar pronto na VPS"
 Wait-RemoteHttpReady || fail_remote "App nao respondeu em /login dentro do tempo limite."
 
 $remoteSeedCommands
+
+echo "DEPLOY_COMMIT=`$EXPECTED_COMMIT"
+echo "DEPLOY_PACKAGE_SHA256=`$EXPECTED_PACKAGE_SHA"
+echo "DEPLOY_MANIFEST=$RemoteDir/.deploy-manifest.json"
+CODE_REPLACED=0
 "@
 
 Write-Host "==> Executando deploy remoto somente em $RemoteDir"
@@ -899,11 +1265,14 @@ try {
     Write-Host "- Headers: $loginHeaders"
     Write-Host "- Body: $loginBody"
   }
-  Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 if ($ResetMasterPassword) {
   Write-Host "Deploy concluido com validacao de login/logout."
 } else {
   Write-Host "Deploy concluido sem reset de senha master."
+}
+} finally {
+  Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
 }

@@ -1,0 +1,66 @@
+name: w-ecommerce
+
+services:
+  app:
+    container_name: w-ecommerce-app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ${W_ECOMMERCE_ENV_FILE:-.env.production}
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "3010:3000"
+    networks:
+      - w-ecommerce-network
+    restart: unless-stopped
+
+  postgres:
+    container_name: w-ecommerce-postgres
+    image: postgres:17-bookworm
+    env_file:
+      - ${W_ECOMMERCE_ENV_FILE:-.env.production}
+    volumes:
+      - w-ecommerce-postgres-data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    networks:
+      - w-ecommerce-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    container_name: w-ecommerce-redis
+    image: redis:7-bookworm
+    command: ["redis-server", "--appendonly", "yes"]
+    expose:
+      - "6379"
+    networks:
+      - w-ecommerce-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  w-ecommerce-postgres-data:
+    name: w-ecommerce-postgres-data
+
+networks:
+  w-ecommerce-network:
+    name: w-ecommerce-network
+    driver: bridge
