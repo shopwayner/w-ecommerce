@@ -114,6 +114,6 @@ test("cancel restores the product snapshot and back uses the preserved URL", () 
 test("OpenAI and Mercado Livre remain explicit lazy actions", () => {
   assert.match(viewSource, /const MercadoLivrePhotoSearchModal = dynamic\(/);
   assert.match(viewSource, /searchingMercadoLivrePhotos \? \(/);
-  assert.match(viewSource, /const generateTitleSuggestions = useCallback/);
+  assert.match(viewSource, /const generateTitleSuggestion = useCallback/);
   assert.doesNotMatch(pageSource, /ai\/title|mercado-livre|Bling|full-sync/i);
 });

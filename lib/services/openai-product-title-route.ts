@@ -6,8 +6,9 @@ import { normalizeProductBrand } from "@/lib/product-brand";
 import { prisma } from "@/lib/prisma";
 import { consumeSettingsRateLimit, type RateLimitResult } from "@/lib/security/settings-rate-limit";
 import {
-  generateOpenAIProductTitleSuggestions,
+  generateOpenAIProductTitleSuggestion,
   OpenAIProductTitleError,
+  OPENAI_PRODUCT_TITLE_MAX_LENGTH,
   type OpenAIProductTitleLogEvent,
   type OpenAIProductTitleLogger,
   type ProductTitleSuggestion
@@ -37,9 +38,11 @@ type ProductTitleRouteDependencies = {
     key: string,
     options: { limit: number; windowMs: number }
   ) => RateLimitResult;
-  generateSuggestions: (
+  generateSuggestion: (
     input: {
       currentTitle: string;
+      displayedTitle: string;
+      excludedTitles: string[];
       brand: string | null;
       category: string | null;
     },
@@ -47,7 +50,7 @@ type ProductTitleRouteDependencies = {
       correlationId: string;
       logger: OpenAIProductTitleLogger;
     }
-  ) => Promise<ProductTitleSuggestion[]>;
+  ) => Promise<ProductTitleSuggestion>;
   createCorrelationId: () => string;
   logger: OpenAIProductTitleLogger;
 };
@@ -63,7 +66,7 @@ const defaultDependencies: ProductTitleRouteDependencies = {
     select: { id: true, name: true, brand: true, category: true }
   }),
   consumeRateLimit: consumeSettingsRateLimit,
-  generateSuggestions: (input, context) => generateOpenAIProductTitleSuggestions(
+  generateSuggestion: (input, context) => generateOpenAIProductTitleSuggestion(
     input,
     {
       correlationId: context.correlationId,
@@ -74,28 +77,45 @@ const defaultDependencies: ProductTitleRouteDependencies = {
   logger: logProductTitleAiEvent
 };
 
-const emptyRequestSchema = z.object({}).strict();
+const requestSchema = z.object({
+  currentTitle: z.string().trim().min(1).max(OPENAI_PRODUCT_TITLE_MAX_LENGTH).optional(),
+  excludedTitles: z.array(
+    z.string().trim().min(1).max(OPENAI_PRODUCT_TITLE_MAX_LENGTH)
+  ).max(10).optional()
+}).strict();
 const MAX_REQUEST_BODY_BYTES = 1_024;
 
 async function validateRequestBody(request: Request) {
   const contentLength = Number(request.headers.get("content-length") ?? 0);
   if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BODY_BYTES) {
-    return NextResponse.json({ error: "Requisicao invalida." }, { status: 413 });
+    return {
+      ok: false as const,
+      response: NextResponse.json({ error: "Requisicao invalida." }, { status: 413 })
+    };
   }
 
   const rawBody = request.body ? await request.text() : "";
-  if (!rawBody.trim()) return null;
+  if (!rawBody.trim()) return { ok: true as const, value: {} };
   if (new TextEncoder().encode(rawBody).byteLength > MAX_REQUEST_BODY_BYTES) {
-    return NextResponse.json({ error: "Requisicao invalida." }, { status: 413 });
+    return {
+      ok: false as const,
+      response: NextResponse.json({ error: "Requisicao invalida." }, { status: 413 })
+    };
   }
 
   try {
-    const parsed = emptyRequestSchema.safeParse(JSON.parse(rawBody));
+    const parsed = requestSchema.safeParse(JSON.parse(rawBody));
     return parsed.success
-      ? null
-      : NextResponse.json({ error: "Esta operacao nao aceita campos adicionais." }, { status: 400 });
+      ? { ok: true as const, value: parsed.data }
+      : {
+          ok: false as const,
+          response: NextResponse.json({ error: "Requisicao invalida." }, { status: 400 })
+        };
   } catch {
-    return NextResponse.json({ error: "Requisicao invalida." }, { status: 400 });
+    return {
+      ok: false as const,
+      response: NextResponse.json({ error: "Requisicao invalida." }, { status: 400 })
+    };
   }
 }
 
@@ -116,7 +136,7 @@ function productTitleErrorResponse(error: OpenAIProductTitleError) {
     );
   }
   return NextResponse.json(
-    { error: "Nao foi possivel gerar sugestoes validas. Tente novamente." },
+    { error: "Nao foi possivel gerar uma sugestao valida. Tente novamente." },
     { status: 502 }
   );
 }
@@ -133,8 +153,8 @@ export function createProductTitleAiPost(
     const auth = await dependencies.authenticate();
     if (!auth.ok) return auth.response;
 
-    const invalidBodyResponse = await validateRequestBody(request);
-    if (invalidBodyResponse) return invalidBodyResponse;
+    const requestBody = await validateRequestBody(request);
+    if (!requestBody.ok) return requestBody.response;
 
     const { id } = await params;
     const rateLimit = dependencies.consumeRateLimit(
@@ -157,9 +177,11 @@ export function createProductTitleAiPost(
     }
 
     try {
-      const suggestions = await dependencies.generateSuggestions(
+      const suggestion = await dependencies.generateSuggestion(
         {
           currentTitle: product.name,
+          displayedTitle: requestBody.value.currentTitle ?? product.name,
+          excludedTitles: requestBody.value.excludedTitles ?? [],
           brand: normalizeProductBrand(product.brand),
           category: product.category
         },
@@ -168,13 +190,13 @@ export function createProductTitleAiPost(
           logger: dependencies.logger
         }
       );
-      return NextResponse.json({ suggestions });
+      return NextResponse.json({ title: suggestion.title });
     } catch (error) {
       if (error instanceof OpenAIProductTitleError) {
         return productTitleErrorResponse(error);
       }
       return NextResponse.json(
-        { error: "Nao foi possivel gerar sugestoes validas. Tente novamente." },
+        { error: "Nao foi possivel gerar uma sugestao valida. Tente novamente." },
         { status: 502 }
       );
     }

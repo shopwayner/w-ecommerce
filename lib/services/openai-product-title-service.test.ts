@@ -9,14 +9,14 @@ import {
   buildOpenAIProductTitleTextFormat,
   classifyOpenAIProductTitleSdkError,
   createOfficialOpenAIResponse,
-  generateOpenAIProductTitleSuggestions,
-  inspectOpenAIProductTitleSuggestions,
+  generateOpenAIProductTitleSuggestion,
+  inspectOpenAIProductTitleSuggestion,
   OpenAIProductTitleError,
   OPENAI_PRODUCT_TITLE_DEFAULT_MAX_OUTPUT_TOKENS,
   OPENAI_PRODUCT_TITLE_MAX_LENGTH,
   OPENAI_PRODUCT_TITLE_SCHEMA_NAME,
   readOpenAIProductTitleConfig,
-  validateOpenAIProductTitleSuggestions,
+  validateOpenAIProductTitleSuggestion,
   type OpenAIProductTitleCreate,
   type OpenAIProductTitleLogEvent
 } from "./openai-product-title-service";
@@ -27,20 +27,18 @@ const enabledEnv = {
   OPENAI_MODEL: "test-model"
 };
 
-const validTitles = [
-  "Retentor Bengala Fazer 250 Smartfox",
-  "Retentor Fazer 250 GS500 Smartfox",
-  "Retentor Suspensao Fazer 250 Smartfox"
-];
+const validTitle = "Retentor Bengala Fazer 250 Smartfox";
 
 const sourceInput = {
   currentTitle: "RETENTOR BENGALA FAZER 250 12-17/GS500 98/09 SMARTFOX",
+  displayedTitle: "Retentor Bengala Fazer 250 12-17 Smartfox",
+  excludedTitles: ["Retentor Fazer 250 GS500 Smartfox"],
   brand: "Smartfox",
   category: "Suspensao"
 };
 
 function parsedResponse(
-  suggestions: string[],
+  title: string,
   overrides: Partial<Awaited<ReturnType<OpenAIProductTitleCreate>>> = {}
 ): OpenAIProductTitleCreate {
   return async () => ({
@@ -48,9 +46,7 @@ function parsedResponse(
     httpStatus: 200,
     status: "completed",
     incompleteReason: null,
-    outputParsed: {
-      suggestions: suggestions.map((title) => ({ title }))
-    },
+    outputParsed: { title },
     refusalPresent: false,
     usage: {
       inputTokens: 40,
@@ -62,13 +58,11 @@ function parsedResponse(
   });
 }
 
-function textResponse(suggestions: string[]): OpenAIProductTitleCreate {
+function textResponse(title: string): OpenAIProductTitleCreate {
   return async () => ({
     contract: "responses.create",
     status: "completed",
-    output_text: JSON.stringify({
-      suggestions: suggestions.map((title) => ({ title }))
-    })
+    output_text: JSON.stringify({ title })
   });
 }
 
@@ -162,41 +156,21 @@ test("zodTextFormat builds the strict object schema locally without incompatible
     required?: string[];
     additionalProperties?: boolean;
     properties?: {
-      suggestions?: {
+      title?: {
         type?: string;
-        minItems?: number;
-        maxItems?: number;
-        items?: {
-          type?: string;
-          required?: string[];
-          additionalProperties?: boolean;
-          properties?: {
-            title?: {
-              type?: string;
-              minLength?: number;
-              maxLength?: number;
-            };
-          };
-        };
+        minLength?: number;
+        maxLength?: number;
       };
     };
   };
-  const suggestions = schema.properties?.suggestions;
-  const item = suggestions?.items;
-  const title = item?.properties?.title;
+  const title = schema.properties?.title;
 
   assert.equal(format.type, "json_schema");
   assert.equal(format.name, OPENAI_PRODUCT_TITLE_SCHEMA_NAME);
   assert.equal(format.strict, true);
   assert.equal(schema.type, "object");
-  assert.deepEqual(schema.required, ["suggestions"]);
+  assert.deepEqual(schema.required, ["title"]);
   assert.equal(schema.additionalProperties, false);
-  assert.equal(suggestions?.type, "array");
-  assert.equal(suggestions?.minItems, 3);
-  assert.equal(suggestions?.maxItems, 3);
-  assert.equal(item?.type, "object");
-  assert.deepEqual(item?.required, ["title"]);
-  assert.equal(item?.additionalProperties, false);
   assert.deepEqual(title, {
     type: "string",
     minLength: 1,
@@ -244,12 +218,8 @@ test("responses.parse reads valid output_parsed and sends strict JSON Schema in 
           data: {
             status: "completed",
             incomplete_details: null,
-            output_parsed: {
-              suggestions: validTitles.map((title) => ({ title }))
-            },
-            output_text: JSON.stringify({
-              suggestions: validTitles.map((title) => ({ title }))
-            }),
+            output_parsed: { title: validTitle },
+            output_text: JSON.stringify({ title: validTitle }),
             output: [],
             usage: {
               input_tokens: 40,
@@ -265,7 +235,7 @@ test("responses.parse reads valid output_parsed and sends strict JSON Schema in 
     }
   );
 
-  const suggestions = await generateOpenAIProductTitleSuggestions(
+  const suggestion = await generateOpenAIProductTitleSuggestion(
     sourceInput,
     {
       env: enabledEnv,
@@ -276,34 +246,34 @@ test("responses.parse reads valid output_parsed and sends strict JSON Schema in 
   );
 
   assert.equal(parseCalls, 1);
-  assert.deepEqual(suggestions, validTitles.map((title) => ({ title })));
+  assert.deepEqual(suggestion, { title: validTitle });
 });
 
 test("mocked responses.create output_text contract remains parseable", async () => {
-  const suggestions = await generateOpenAIProductTitleSuggestions(
+  const suggestion = await generateOpenAIProductTitleSuggestion(
     sourceInput,
     {
       env: enabledEnv,
-      createResponse: textResponse(validTitles),
+      createResponse: textResponse(validTitle),
       logger: () => undefined
     }
   );
-  assert.deepEqual(suggestions, validTitles.map((title) => ({ title })));
+  assert.deepEqual(suggestion, { title: validTitle });
 });
 
 test("completed response logs only sanitized metadata and token usage", async () => {
   const logs = captureLogs();
-  const suggestions = await generateOpenAIProductTitleSuggestions(
+  const suggestion = await generateOpenAIProductTitleSuggestion(
     sourceInput,
     {
       env: enabledEnv,
-      createResponse: parsedResponse(validTitles),
+      createResponse: parsedResponse(validTitle),
       correlationId: "correlation-completed",
       logger: logs.logger
     }
   );
 
-  assert.equal(suggestions.length, 3);
+  assert.deepEqual(suggestion, { title: validTitle });
   assert.deepEqual(logs.events.map(({ stage }) => stage), [
     "request_started",
     "response_received",
@@ -318,8 +288,8 @@ test("completed response logs only sanitized metadata and token usage", async ()
     incompleteReason: null,
     refusalPresent: false,
     outputParsedPresent: true,
-    receivedCount: 3,
-    acceptedCount: 3,
+    receivedCount: 1,
+    acceptedCount: 1,
     rejectionCodes: [],
     durationMs: logs.events.at(-1)?.durationMs,
     usage: {
@@ -341,7 +311,7 @@ test("incomplete max_output_tokens is classified without retry", async () => {
   let calls = 0;
   const logs = captureLogs();
   await expectTitleError(
-    () => generateOpenAIProductTitleSuggestions(
+    () => generateOpenAIProductTitleSuggestion(
       sourceInput,
       {
         env: enabledEnv,
@@ -372,11 +342,11 @@ test("incomplete max_output_tokens is classified without retry", async () => {
 test("refusal is classified before missing structured output", async () => {
   const logs = captureLogs();
   await expectTitleError(
-    () => generateOpenAIProductTitleSuggestions(
+    () => generateOpenAIProductTitleSuggestion(
       sourceInput,
       {
         env: enabledEnv,
-        createResponse: parsedResponse([], {
+        createResponse: parsedResponse("", {
           outputParsed: null,
           refusalPresent: true
         }),
@@ -390,15 +360,13 @@ test("refusal is classified before missing structured output", async () => {
 
 test("completed parsed response without output_parsed is classified as missing", async () => {
   await expectTitleError(
-    () => generateOpenAIProductTitleSuggestions(
+    () => generateOpenAIProductTitleSuggestion(
       sourceInput,
       {
         env: enabledEnv,
-        createResponse: parsedResponse([], {
+        createResponse: parsedResponse("", {
           outputParsed: null,
-          outputText: JSON.stringify({
-            suggestions: validTitles.map((title) => ({ title }))
-          })
+          outputText: JSON.stringify({ title: validTitle })
         }),
         logger: () => undefined
       }
@@ -409,7 +377,7 @@ test("completed parsed response without output_parsed is classified as missing",
 
 test("malformed output_text and invalid SDK parse are classified as parse failures", async () => {
   await expectTitleError(
-    () => generateOpenAIProductTitleSuggestions(
+    () => generateOpenAIProductTitleSuggestion(
       sourceInput,
       {
         env: enabledEnv,
@@ -425,12 +393,12 @@ test("malformed output_text and invalid SDK parse are classified as parse failur
   );
 
   await expectTitleError(
-    () => generateOpenAIProductTitleSuggestions(
+    () => generateOpenAIProductTitleSuggestion(
       sourceInput,
       {
         env: enabledEnv,
         createResponse: async () => {
-          z.object({ suggestions: z.array(z.string()) }).parse(null);
+          z.object({ title: z.string() }).parse(null);
           return {};
         },
         logger: () => undefined
@@ -440,10 +408,10 @@ test("malformed output_text and invalid SDK parse are classified as parse failur
   );
 });
 
-test("empty JSON object reports unexpected format with zero accepted suggestions", async () => {
+test("empty JSON object reports unexpected format with zero accepted titles", async () => {
   const logs = captureLogs();
   await expectTitleError(
-    () => generateOpenAIProductTitleSuggestions(
+    () => generateOpenAIProductTitleSuggestion(
       sourceInput,
       {
         env: enabledEnv,
@@ -468,62 +436,37 @@ test("accepts exactly 60 characters after whitespace normalization", () => {
   const prefix = "Smart ";
   const sixty = prefix + "a".repeat(OPENAI_PRODUCT_TITLE_MAX_LENGTH - prefix.length);
   assert.equal(sixty.length, 60);
-  assert.deepEqual(validateOpenAIProductTitleSuggestions({
-    suggestions: [
-      { title: `  ${sixty}  ` },
-      { title: "Smart Produto dois" },
-      { title: "Smart Produto tres" }
-    ]
-  }, "Smart"), [
-    { title: sixty },
-    { title: "Smart Produto dois" },
-    { title: "Smart Produto tres" }
-  ]);
+  assert.deepEqual(
+    validateOpenAIProductTitleSuggestion({ title: `  ${sixty}  ` }, "Smart"),
+    { title: sixty }
+  );
 });
 
 test("one suggestion above 60 characters is rejected with a precise reason", () => {
-  const inspection = inspectOpenAIProductTitleSuggestions({
-    suggestions: [
-      { title: `Smart ${"a".repeat(56)}` },
-      { title: "Smart Produto dois" },
-      { title: "Smart Produto tres" }
-    ]
-  }, "Smart");
-  assert.equal(inspection.suggestions.length, 2);
+  const inspection = inspectOpenAIProductTitleSuggestion(
+    { title: `Smart ${"a".repeat(56)}` },
+    "Smart"
+  );
+  assert.equal(inspection.suggestion, null);
   assert.deepEqual(inspection.rejectionCodes, ["OPENAI_SUGGESTION_TOO_LONG"]);
 });
 
-test("three suggestions above 60 characters are all rejected", () => {
-  const inspection = inspectOpenAIProductTitleSuggestions({
-    suggestions: [1, 2, 3].map((index) => ({
-      title: `Smart ${String(index)} ${"a".repeat(55)}`
-    }))
-  }, "Smart");
-  assert.equal(inspection.suggestions.length, 0);
-  assert.deepEqual(inspection.rejectionCodes, ["OPENAI_SUGGESTION_TOO_LONG"]);
-});
-
-test("duplicate suggestions are removed and invalidate the three-title contract", () => {
-  const inspection = inspectOpenAIProductTitleSuggestions({
-    suggestions: [
-      { title: "Smart Produto um" },
-      { title: " smart   produto um " },
-      { title: "Smart Produto tres" }
-    ]
-  }, "Smart");
-  assert.deepEqual(inspection.suggestions, [
-    { title: "Smart Produto um" },
-    { title: "Smart Produto tres" }
-  ]);
+test("suggestion equal to the current or a previous session title is rejected", () => {
+  const inspection = inspectOpenAIProductTitleSuggestion(
+    { title: " smart   produto um " },
+    "Smart",
+    "Smart Produto um",
+    ["Smart Produto um", "Smart Produto anterior"]
+  );
+  assert.equal(inspection.suggestion, null);
   assert.deepEqual(inspection.rejectionCodes, ["OPENAI_SUGGESTION_DUPLICATE"]);
   assert.throws(
-    () => validateOpenAIProductTitleSuggestions({
-      suggestions: [
-        { title: "Smart Produto um" },
-        { title: " smart   produto um " },
-        { title: "Smart Produto tres" }
-      ]
-    }, "Smart"),
+    () => validateOpenAIProductTitleSuggestion(
+      { title: "Smart Produto anterior" },
+      "Smart",
+      "Smart Produto um",
+      ["Smart Produto anterior"]
+    ),
     (error: unknown) => (
       error instanceof OpenAIProductTitleError &&
       error.code === "OPENAI_NO_VALID_SUGGESTIONS"
@@ -531,42 +474,56 @@ test("duplicate suggestions are removed and invalidate the three-title contract"
   );
 });
 
-test("all suggestions can be discarded with explicit validation codes", () => {
-  const inspection = inspectOpenAIProductTitleSuggestions({
-    suggestions: [
-      { title: "" },
-      { title: "Produto sem a marca" },
-      { title: "Smart Produto em promocao" }
-    ]
-  }, "Smart");
-  assert.equal(inspection.suggestions.length, 0);
-  assert.deepEqual(inspection.rejectionCodes, [
-    "OPENAI_SUGGESTION_EMPTY",
-    "OPENAI_SUGGESTION_BRAND_MISSING",
-    "OPENAI_SUGGESTION_PROHIBITED_CONTENT"
-  ]);
+test("provider output equal to the saved original is rejected when the displayed title changed", async () => {
+  await expectTitleError(
+    () => generateOpenAIProductTitleSuggestion(
+      {
+        currentTitle: "Smart Produto original",
+        displayedTitle: "Smart Produto editado",
+        brand: "Smart"
+      },
+      {
+        env: enabledEnv,
+        createResponse: parsedResponse("Smart Produto original"),
+        logger: () => undefined
+      }
+    ),
+    "OPENAI_NO_VALID_SUGGESTIONS"
+  );
+});
+
+test("invalid titles expose precise validation codes", () => {
+  const cases = [
+    { title: "", code: "OPENAI_SUGGESTION_EMPTY" },
+    { title: "Produto sem a marca", code: "OPENAI_SUGGESTION_BRAND_MISSING" },
+    { title: "Smart Produto em promocao", code: "OPENAI_SUGGESTION_PROHIBITED_CONTENT" }
+  ] as const;
+
+  for (const current of cases) {
+    const inspection = inspectOpenAIProductTitleSuggestion(
+      { title: current.title },
+      "Smart"
+    );
+    assert.equal(inspection.suggestion, null);
+    assert.deepEqual(inspection.rejectionCodes, [current.code]);
+  }
 });
 
 test("rejects unsupported facts without rejecting Fazer 150, Factor 150 or Smartfox", () => {
-  assert.deepEqual(validateOpenAIProductTitleSuggestions({
-    suggestions: [
+  assert.deepEqual(
+    validateOpenAIProductTitleSuggestion(
       { title: "Amortecedor Traseiro Fazer 150 Smartfox" },
-      { title: "Amortecedor Factor 150 14 Smartfox" },
-      { title: "Amortecedor Fazer 150 Factor 150 Smartfox" }
-    ]
-  }, "Smartfox", "Amortecedor Traseiro Fazer 150 Factor 150 14 Smartfox"), [
-    { title: "Amortecedor Traseiro Fazer 150 Smartfox" },
-    { title: "Amortecedor Factor 150 14 Smartfox" },
-    { title: "Amortecedor Fazer 150 Factor 150 Smartfox" }
-  ]);
+      "Smartfox",
+      "Amortecedor Traseiro Fazer 150 Factor 150 14 Smartfox"
+    ),
+    { title: "Amortecedor Traseiro Fazer 150 Smartfox" }
+  );
 
-  const inspection = inspectOpenAIProductTitleSuggestions({
-    suggestions: [
-      { title: "Amortecedor Traseiro Fazer 150 Vermelho Smartfox" },
-      { title: "Amortecedor Factor 150 14 Smartfox" },
-      { title: "Amortecedor Fazer 150 Factor 150 Smartfox" }
-    ]
-  }, "Smartfox", "Amortecedor Traseiro Fazer 150 Factor 150 14 Smartfox");
+  const inspection = inspectOpenAIProductTitleSuggestion(
+    { title: "Amortecedor Traseiro Fazer 150 Vermelho Smartfox" },
+    "Smartfox",
+    "Amortecedor Traseiro Fazer 150 Factor 150 14 Smartfox"
+  );
   assert.deepEqual(inspection.rejectionCodes, [
     "OPENAI_SUGGESTION_UNSUPPORTED_FACT"
   ]);
@@ -575,7 +532,7 @@ test("rejects unsupported facts without rejecting Fazer 150, Factor 150 or Smart
 test("empty product title is rejected before the mocked provider is called", async () => {
   let calls = 0;
   await expectTitleError(
-    () => generateOpenAIProductTitleSuggestions(
+    () => generateOpenAIProductTitleSuggestion(
       { currentTitle: "   " },
       {
         env: enabledEnv,
@@ -771,7 +728,7 @@ test("SDK errors are classified, sanitized and never retried", async (t) => {
       let calls = 0;
       const logs = captureLogs();
       await expectTitleError(
-        () => generateOpenAIProductTitleSuggestions(
+        () => generateOpenAIProductTitleSuggestion(
           sourceInput,
           {
             env: enabledEnv,
@@ -817,7 +774,7 @@ test("timeout aborts the single request and never retries", async () => {
   let calls = 0;
   let receivedSignal: AbortSignal | null = null;
   await expectTitleError(
-    () => generateOpenAIProductTitleSuggestions(
+    () => generateOpenAIProductTitleSuggestion(
       { currentTitle: "Produto" },
       {
         env: enabledEnv,
@@ -849,11 +806,7 @@ function allowedRoute(overrides: Parameters<typeof createProductTitleAiPost>[0] 
       category: "Pecas"
     }),
     consumeRateLimit: () => ({ allowed: true, retryAfterSeconds: 0 }),
-    generateSuggestions: async () => [
-      { title: "Smart Produto um" },
-      { title: "Smart Produto dois" },
-      { title: "Smart Produto tres" }
-    ],
+    generateSuggestion: async () => ({ title: "Smart Produto um" }),
     createCorrelationId: () => "correlation-route-test",
     logger: () => undefined,
     ...overrides
@@ -900,9 +853,9 @@ test("route rate limit blocks generation and returns Retry-After", async () => {
   let generations = 0;
   const handler = allowedRoute({
     consumeRateLimit: () => ({ allowed: false, retryAfterSeconds: 37 }),
-    generateSuggestions: async () => {
+    generateSuggestion: async () => {
       generations += 1;
-      return [];
+      return { title: "Smart Produto um" };
     }
   });
   const response = await handler(new Request("http://local"), {
@@ -917,9 +870,9 @@ test("route rejects malformed or additional request fields", async () => {
   for (const body of ["not-json", JSON.stringify({ organizationId: "org-2" })]) {
     let generations = 0;
     const handler = allowedRoute({
-      generateSuggestions: async () => {
+      generateSuggestion: async () => {
         generations += 1;
-        return [];
+        return { title: "Smart Produto um" };
       }
     });
     const response = await handler(new Request("http://local", {
@@ -954,13 +907,13 @@ test("frontend receives sanitized errors for configuration and provider failures
         `secret ${enabledEnv.OPENAI_API_KEY}`
       ),
       status: 502,
-      expectedText: /sugestoes validas/i
+      expectedText: /sugestao valida/i
     }
   ];
 
   for (const current of cases) {
     const handler = allowedRoute({
-      generateSuggestions: async () => {
+      generateSuggestion: async () => {
         throw current.error;
       }
     });
@@ -974,29 +927,35 @@ test("frontend receives sanitized errors for configuration and provider failures
   }
 });
 
-test("route returns only the public suggestion contract and passes correlation metadata", async () => {
+test("route returns one title and passes current session exclusions without trusting organization input", async () => {
   let receivedCorrelationId = "";
+  let receivedInput: unknown = null;
   const response = await allowedRoute({
-    generateSuggestions: async (_input, context) => {
+    generateSuggestion: async (input, context) => {
+      receivedInput = input;
       receivedCorrelationId = context.correlationId;
-      return [
-        { title: "Smart Produto um" },
-        { title: "Smart Produto dois" },
-        { title: "Smart Produto tres" }
-      ];
+      return { title: "Smart Produto novo" };
     }
-  })(new Request("http://local"), {
+  })(new Request("http://local", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      currentTitle: "Smart Produto atual",
+      excludedTitles: ["Smart Produto anterior"]
+    })
+  }), {
     params: Promise.resolve({ id: "product-1" })
   });
   assert.equal(receivedCorrelationId, "correlation-route-test");
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), {
-    suggestions: [
-      { title: "Smart Produto um" },
-      { title: "Smart Produto dois" },
-      { title: "Smart Produto tres" }
-    ]
+  assert.deepEqual(receivedInput, {
+    currentTitle: "Produto Smart",
+    displayedTitle: "Smart Produto atual",
+    excludedTitles: ["Smart Produto anterior"],
+    brand: "Smart",
+    category: "Pecas"
   });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { title: "Smart Produto novo" });
 });
 
 test("server sources do not expose credentials or import OpenAI in the client bundle", () => {

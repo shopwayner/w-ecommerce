@@ -38,7 +38,6 @@ import {
   Save,
   Scale,
   ShieldCheck,
-  Sparkles,
   Tag,
   Trash2,
   X
@@ -74,10 +73,6 @@ type ProductDetailsImage = {
   url: string;
   position: number;
   pending?: boolean;
-};
-
-type ProductTitleSuggestion = {
-  title: string;
 };
 
 export type ProductDetailsProduct = {
@@ -432,6 +427,7 @@ const ProductTitleAiTrigger = memo(function ProductTitleAiTrigger({
 
 const ProductDetailsFieldsGrid = memo(function ProductDetailsFieldsGrid({
   aiDisabled,
+  aiError,
   aiLoading,
   canEditProduct,
   detailValues,
@@ -444,6 +440,7 @@ const ProductDetailsFieldsGrid = memo(function ProductDetailsFieldsGrid({
   onOpenTitleAi
 }: {
   aiDisabled: boolean;
+  aiError: string | null;
   aiLoading: boolean;
   canEditProduct: boolean;
   detailValues: Record<ProductDetailsFieldId, string | number | null | undefined>;
@@ -471,13 +468,20 @@ const ProductDetailsFieldsGrid = memo(function ProductDetailsFieldsGrid({
                   {field.id === "name" ? <ProductTitleAiTrigger disabled={aiDisabled} loading={aiLoading} onClick={onOpenTitleAi} /> : null}
                 </div>
                 {field.id === "name" ? (
-                  <ProductNameEditor
-                    disabled={false}
-                    initialValue={form.name}
-                    onDraftChange={onNameDraftChange}
-                    ref={nameInputRef}
-                    resetKey={nameResetKey}
-                  />
+                  <>
+                    <ProductNameEditor
+                      disabled={false}
+                      initialValue={form.name}
+                      onDraftChange={onNameDraftChange}
+                      ref={nameInputRef}
+                      resetKey={nameResetKey}
+                    />
+                    {aiError ? (
+                      <p className="mt-2 text-xs font-semibold text-red-700" role="alert">
+                        {aiError}
+                      </p>
+                    ) : null}
+                  </>
                 ) : field.id === "condition" ? (
                   <select className={productDetailsInputClass} id={inputId} onChange={(event) => onFieldChange("condition", event.target.value)} value={form.condition}>
                     <option value="">Nao informado</option>
@@ -724,23 +728,21 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const [saving, setSaving] = useState(false);
   const [searchingMercadoLivrePhotos, setSearchingMercadoLivrePhotos] = useState(false);
-  const [titleAiOpen, setTitleAiOpen] = useState(false);
   const [titleAiLoading, setTitleAiLoading] = useState(false);
-  const [titleAiSuggestions, setTitleAiSuggestions] = useState<ProductTitleSuggestion[]>([]);
   const [titleAiError, setTitleAiError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const saveInFlight = useRef(false);
   const pointerDragImageId = useRef<string | null>(null);
   const titleAiRequest = useRef<AbortController | null>(null);
+  const generatedTitleHistory = useRef<Set<string>>(new Set());
   const nameInputRef = useRef<HTMLInputElement>(null);
   const nameDraftRef = useRef(form.name);
-  const cancelTitleAi = useCallback(() => {
+  const resetTitleAiSession = useCallback(() => {
     titleAiRequest.current?.abort();
     titleAiRequest.current = null;
-    setTitleAiOpen(false);
+    generatedTitleHistory.current.clear();
     setTitleAiLoading(false);
-    setTitleAiSuggestions([]);
     setTitleAiError(null);
   }, []);
 
@@ -767,14 +769,13 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     function closeOnEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       if (searchingMercadoLivrePhotos) return setSearchingMercadoLivrePhotos(false);
-      if (titleAiOpen) return cancelTitleAi();
       if (confirmingSave) return setConfirmingSave(false);
       if (confirmingDiscard) return setConfirmingDiscard(false);
       requestClose();
     }
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [cancelTitleAi, confirmingDiscard, confirmingSave, requestClose, searchingMercadoLivrePhotos, titleAiOpen]);
+  }, [confirmingDiscard, confirmingSave, requestClose, searchingMercadoLivrePhotos]);
 
   const statusText = statusLabels[currentProduct.status] ?? displayText(currentProduct.status);
   const originText = displayText(currentProduct.origin ?? currentProduct.source ?? (getBlingName(currentProduct) ? "BLING" : null));
@@ -850,75 +851,78 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
       const next = length >= 2 && length <= PRODUCT_DETAILS_NAME_MAX_LENGTH;
       return current === next ? current : next;
     });
+    setTitleAiError(null);
     setError(null);
     setFeedback(null);
   }, [updateDirtyField]);
   const openPhotoSearch = useCallback(() => setSearchingMercadoLivrePhotos(true), []);
 
-  const generateTitleSuggestions = useCallback(async () => {
-    if (titleAiLoading) return;
-    titleAiRequest.current?.abort();
+  const generateTitleSuggestion = useCallback(async () => {
+    if (titleAiRequest.current) return;
     const controller = new AbortController();
     titleAiRequest.current = controller;
-    setTitleAiOpen(true);
     setTitleAiLoading(true);
-    setTitleAiSuggestions([]);
     setTitleAiError(null);
     setError(null);
     setFeedback(null);
 
     try {
+      const currentTitle = nameDraftRef.current.trim();
+      const generatedTitles = [...generatedTitleHistory.current];
+      const excludedTitles = generatedTitles.slice(-10);
       const response = await fetch(`/api/products/${currentProduct.id}/ai/title`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentTitle, excludedTitles }),
         signal: controller.signal
       });
       const payload = (await response.json()) as {
-        suggestions?: ProductTitleSuggestion[];
+        title?: string;
         error?: string;
       };
       if (!response.ok) {
-        throw new Error(payload.error ?? "Nao foi possivel gerar sugestoes de titulo.");
+        throw new Error(payload.error ?? "Nao foi possivel melhorar o titulo.");
       }
+      const title = payload.title?.trim().replace(/\s+/g, " ") ?? "";
+      if (!title || title.length > PRODUCT_DETAILS_NAME_MAX_LENGTH) {
+        throw new Error("A IA nao retornou uma sugestao valida.");
+      }
+      const normalizedTitle = title.toLocaleLowerCase("pt-BR");
       if (
-        payload.suggestions?.length !== 3 ||
-        payload.suggestions.some(({ title }) => !title.trim() || title.trim().length > PRODUCT_DETAILS_NAME_MAX_LENGTH)
+        normalizedTitle === currentTitle.toLocaleLowerCase("pt-BR") ||
+        generatedTitles.some((previousTitle) => (
+          previousTitle.toLocaleLowerCase("pt-BR") === normalizedTitle
+        ))
       ) {
-        throw new Error("A IA nao retornou tres sugestoes validas.");
+        throw new Error("A IA repetiu um titulo desta sessao.");
       }
-      setTitleAiSuggestions(payload.suggestions);
-    } catch (requestError) {
+
+      const latestForm = form.name === nameDraftRef.current
+        ? form
+        : { ...form, name: nameDraftRef.current };
+      const result = applyProductTitleSuggestion(latestForm, title);
+      if ("error" in result) throw new Error(result.error);
+
+      generatedTitleHistory.current.add(result.form.name);
+      nameDraftRef.current = result.form.name;
+      setForm(result.form);
+      updateDirtyField("name", result.form.name);
+      setNameIsValid(true);
+      setNameEditorResetKey((current) => current + 1);
+      setTitleAiError(null);
+      setError(null);
+      setFeedback(null);
+      requestAnimationFrame(() => nameInputRef.current?.focus());
+    } catch {
       if (controller.signal.aborted) return;
-      setTitleAiError(
-        requestError instanceof Error
-          ? requestError.message
-          : "Nao foi possivel gerar sugestoes de titulo."
-      );
+      setTitleAiError("Não foi possível melhorar o título agora. Tente novamente.");
     } finally {
       if (titleAiRequest.current === controller) {
         titleAiRequest.current = null;
         setTitleAiLoading(false);
       }
     }
-  }, [currentProduct.id, titleAiLoading]);
-
-  const applyTitleSuggestion = useCallback((title: string) => {
-    const latestForm = form.name === nameDraftRef.current ? form : { ...form, name: nameDraftRef.current };
-    const result = applyProductTitleSuggestion(latestForm, title);
-    if ("error" in result) {
-      setTitleAiError(result.error);
-      return;
-    }
-    nameDraftRef.current = result.form.name;
-    setForm(result.form);
-    updateDirtyField("name", result.form.name);
-    setNameIsValid(true);
-    setNameEditorResetKey((current) => current + 1);
-    setTitleAiOpen(false);
-    setTitleAiSuggestions([]);
-    setTitleAiError(null);
-    setError(null);
-    setFeedback("Titulo aplicado ao formulario. Revise e salve as alteracoes quando estiver pronto.");
-  }, [form, updateDirtyField]);
+  }, [currentProduct.id, form, updateDirtyField]);
 
   const reorderImage = useCallback((fromId: string, toId: string) => {
     if (!editing || fromId === toId) return;
@@ -997,17 +1001,18 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
     setBaselineImageKeys(nextImages.map(imageStateKey));
     setSelectedImageId(nextImages[0]?.id ?? null);
-    cancelTitleAi();
+    resetTitleAiSession();
     setEditing(true);
     setFeedback(null);
     setError(null);
-  }, [cancelTitleAi, currentProduct]);
+  }, [currentProduct, resetTitleAiSession]);
 
   const openTitleAiExperience = useCallback(() => {
+    if (titleAiRequest.current) return;
     if (!editing) beginEditing();
     requestAnimationFrame(() => nameInputRef.current?.focus());
-    void generateTitleSuggestions();
-  }, [beginEditing, editing, generateTitleSuggestions]);
+    void generateTitleSuggestion();
+  }, [beginEditing, editing, generateTitleSuggestion]);
 
   const cancelEdit = useCallback(() => {
     const nextImages = orderedImages(currentProduct);
@@ -1021,12 +1026,12 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
     setBaselineImageKeys(nextImages.map(imageStateKey));
     setSelectedImageId(nextImages[0]?.id ?? null);
-    cancelTitleAi();
+    resetTitleAiSession();
     setEditing(false);
     setConfirmingSave(false);
     setError(null);
     setFeedback(null);
-  }, [cancelTitleAi, currentProduct]);
+  }, [currentProduct, resetTitleAiSession]);
 
   function buildPayload() {
     const latestForm = form.name === nameDraftRef.current ? form : { ...form, name: nameDraftRef.current };
@@ -1107,7 +1112,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
       setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
       setBaselineImageKeys(nextImages.map(imageStateKey));
       setSelectedImageId(nextImages[0]?.id ?? null);
-      cancelTitleAi();
+      resetTitleAiSession();
       onProductUpdated(nextProduct);
       setEditing(false);
       setConfirmingSave(false);
@@ -1163,6 +1168,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
 
           <ProductDetailsFieldsGrid
             aiDisabled={saving || titleAiLoading || !canEditProduct}
+            aiError={titleAiError}
             aiLoading={titleAiLoading}
             canEditProduct={canEditProduct}
             detailValues={detailValues}
@@ -1174,68 +1180,6 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
             onNameDraftChange={updateNameDraft}
             onOpenTitleAi={openTitleAiExperience}
           />
-
-          {editing && titleAiOpen ? (
-            <section className="mt-3 rounded-lg border border-matrix-gold/35 bg-matrix-panel2/65 p-4" aria-label="Sugestões de título com IA">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 text-sm font-semibold">
-                    <Sparkles className="h-4 w-4 shrink-0 text-matrix-goldDark" />
-                    Sugestões de título
-                  </div>
-                  <p className="mt-1 text-xs leading-5 text-matrix-muted">
-                    Escolher uma sugestao preenche somente o campo Nome. Nada sera salvo ou enviado ao Bling automaticamente.
-                  </p>
-                </div>
-                <button
-                  aria-label="Cancelar sugestoes de titulo"
-                  className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-matrix-border text-matrix-muted transition hover:border-matrix-gold/60 hover:text-matrix-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold"
-                  onClick={cancelTitleAi}
-                  title="Cancelar"
-                  type="button"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </div>
-
-              {titleAiLoading ? (
-                <div className="mt-4 rounded-md border border-matrix-border bg-matrix-panel px-3 py-4 text-sm text-matrix-muted">
-                  Gerando sugestões...
-                </div>
-              ) : null}
-              {titleAiError ? (
-                <div className="mt-4 flex items-start gap-2 rounded-md border border-red-500/25 bg-red-500/10 px-3 py-3 text-sm text-red-700">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>{titleAiError}</span>
-                </div>
-              ) : null}
-              {titleAiSuggestions.length ? (
-                <div className="mt-4 grid gap-3 lg:grid-cols-3">
-                  {titleAiSuggestions.map(({ title }) => (
-                    <article key={title} className="flex min-w-0 flex-col rounded-md border border-matrix-border bg-matrix-panel p-3">
-                      <p className="break-words text-sm font-semibold leading-6">{title}</p>
-                      <p className={`mt-1 text-right text-xs ${title.length >= 55 ? "text-matrix-goldDark" : "text-matrix-muted"}`}>
-                        {title.length}/{PRODUCT_DETAILS_NAME_MAX_LENGTH}
-                      </p>
-                      <Button className="mt-3 w-full justify-center" onClick={() => applyTitleSuggestion(title)} type="button" variant="secondary">
-                        Usar este título
-                      </Button>
-                    </article>
-                  ))}
-                </div>
-              ) : null}
-
-              <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-                <Button disabled={titleAiLoading} onClick={cancelTitleAi} type="button" variant="secondary">
-                  Cancelar
-                </Button>
-                <Button disabled={titleAiLoading} onClick={() => void generateTitleSuggestions()} type="button">
-                  <Sparkles className="h-4 w-4" />
-                  {titleAiLoading ? "Gerando sugestões..." : "Gerar novas sugestões"}
-                </Button>
-              </div>
-            </section>
-          ) : null}
 
           <section className="mt-3 rounded-lg border border-matrix-border bg-matrix-panel2/65 p-4 [content-visibility:auto] [contain-intrinsic-size:auto_14rem]">
             <div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2 text-sm font-semibold"><FileText className="h-4 w-4 text-matrix-goldDark" />Descricao</div>{canToggleDescription ? <button aria-expanded={descriptionExpanded} className="inline-flex items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-semibold text-matrix-goldDark" onClick={() => setDescriptionExpanded((current) => !current)} type="button">{descriptionExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}{descriptionExpanded ? "Recolher" : "Expandir"}</button> : null}</div>

@@ -2,71 +2,146 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const modalSource = readFileSync(
+const viewSource = readFileSync(
   new URL("../components/product-details-view.tsx", import.meta.url),
   "utf8"
 );
 const envExample = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
 
-test("AI title action uses a compact accessible trigger and the authenticated route", () => {
-  assert.match(modalSource, /Melhorar título com IA/);
-  assert.match(modalSource, /aria-label="Melhorar título com IA"/);
-  assert.match(modalSource, /title="Melhorar título com IA"/);
-  assert.match(modalSource, /role="tooltip"/);
-  assert.match(modalSource, /"✦ IA"/);
-  assert.match(modalSource, /"✦ IA\.\.\."/);
-  assert.match(modalSource, /Gerando sugestões\.\.\./);
-  assert.match(modalSource, /Usar este título/);
-  assert.match(modalSource, /Gerar novas sugestões/);
-  assert.match(modalSource, /\/api\/products\/\$\{currentProduct\.id\}\/ai\/title/);
+function sourceBlock(startMarker: string, endMarker: string) {
+  const start = viewSource.indexOf(startMarker);
+  const end = viewSource.indexOf(endMarker, start);
+  assert.notEqual(start, -1, `Missing source marker: ${startMarker}`);
+  assert.notEqual(end, -1, `Missing source marker: ${endMarker}`);
+  return viewSource.slice(start, end);
+}
+
+test("AI title action uses only the compact accessible trigger", () => {
+  assert.match(viewSource, /aria-label="Melhorar título com IA"/);
+  assert.match(viewSource, /title="Melhorar título com IA"/);
+  assert.match(viewSource, /role="tooltip"/);
+  assert.match(viewSource, /\{loading \? "✦ IA\.\.\." : "✦ IA"\}/);
+  assert.doesNotMatch(viewSource, /Sugestões de título|Usar este título|Gerar novas sugestões/);
+  assert.doesNotMatch(viewSource, /titleAiOpen|titleAiSuggestions/);
 });
 
-test("view trigger enters edit mode, focuses the name and opens the same AI flow", () => {
-  const start = modalSource.indexOf("const openTitleAiExperience = useCallback");
-  const end = modalSource.indexOf("const cancelEdit = useCallback", start);
-  const triggerBlock = modalSource.slice(start, end);
+test("view trigger enters edit mode, focuses the name and generates immediately", () => {
+  const triggerBlock = sourceBlock(
+    "const openTitleAiExperience = useCallback",
+    "const cancelEdit = useCallback"
+  );
   assert.match(triggerBlock, /if \(!editing\) beginEditing\(\)/);
   assert.match(triggerBlock, /nameInputRef\.current\?\.focus\(\)/);
-  assert.match(triggerBlock, /generateTitleSuggestions\(\)/);
-  assert.match(modalSource, /field\.id === "name" && canEditProduct \? <ProductTitleAiTrigger/);
+  assert.match(triggerBlock, /generateTitleSuggestion\(\)/);
+  assert.match(viewSource, /field\.id === "name" && canEditProduct \? <ProductTitleAiTrigger/);
 });
 
-test("compact trigger never saves locally or calls Bling", () => {
-  const start = modalSource.indexOf("const openTitleAiExperience = useCallback");
-  const end = modalSource.indexOf("const cancelEdit = useCallback", start);
-  const triggerAndMarkup = modalSource.slice(start, end);
-  assert.doesNotMatch(triggerAndMarkup, /saveProduct|confirmSave|\/api\/products\/bling|method: "PATCH"/);
-});
-
-test("choosing a suggestion changes only the local form and performs no request", () => {
-  const start = modalSource.indexOf("const applyTitleSuggestion = useCallback");
-  const end = modalSource.indexOf("const reorderImage = useCallback", start);
-  const selectionBlock = modalSource.slice(start, end);
-  assert.match(selectionBlock, /applyProductTitleSuggestion\(latestForm, title\)/);
-  assert.match(selectionBlock, /nameDraftRef\.current = result\.form\.name/);
-  assert.match(selectionBlock, /setForm\(result\.form\)/);
-  assert.doesNotMatch(selectionBlock, /fetch\(|PATCH|Bling|saveProduct|confirmSave/);
-});
-
-test("generation never saves the product or calls Bling", () => {
-  const start = modalSource.indexOf("const generateTitleSuggestions = useCallback");
-  const end = modalSource.indexOf("const applyTitleSuggestion = useCallback", start);
-  const generationBlock = modalSource.slice(start, end);
+test("one click requests one title and applies it directly to the Name draft", () => {
+  const generationBlock = sourceBlock(
+    "const generateTitleSuggestion = useCallback",
+    "const reorderImage = useCallback"
+  );
+  assert.match(generationBlock, /\/api\/products\/\$\{currentProduct\.id\}\/ai\/title/);
   assert.match(generationBlock, /method: "POST"/);
-  assert.doesNotMatch(generationBlock, /\/api\/products\/bling|method: "PATCH"|saveProduct|onProductUpdated/);
+  assert.match(generationBlock, /title\?: string/);
+  assert.match(generationBlock, /applyProductTitleSuggestion\(latestForm, title\)/);
+  assert.match(generationBlock, /nameDraftRef\.current = result\.form\.name/);
+  assert.match(generationBlock, /setForm\(result\.form\)/);
+  assert.match(generationBlock, /updateDirtyField\("name", result\.form\.name\)/);
+  assert.match(generationBlock, /setNameEditorResetKey/);
+  assert.match(generationBlock, /nameInputRef\.current\?\.focus\(\)/);
+  assert.doesNotMatch(generationBlock, /saveProduct|confirmSave|onProductUpdated/);
+  assert.doesNotMatch(generationBlock, /\/bling\/|method: "PATCH"|setImages/);
 });
 
-test("frontend enforces and displays the 60 character limit", () => {
-  assert.match(modalSource, /maxLength=\{PRODUCT_DETAILS_NAME_MAX_LENGTH\}/);
-  assert.match(modalSource, /\{value\.length\}\/\{PRODUCT_DETAILS_NAME_MAX_LENGTH\}/);
-  assert.match(modalSource, /\{title\.length\}\/\{PRODUCT_DETAILS_NAME_MAX_LENGTH\}/);
-  assert.match(modalSource, /!nameIsValid/);
-  assert.match(modalSource, /nameDraftRef\.current/);
+test("each later click sends the displayed title and session history for replacement", () => {
+  const generationBlock = sourceBlock(
+    "const generateTitleSuggestion = useCallback",
+    "const reorderImage = useCallback"
+  );
+  assert.match(generationBlock, /const currentTitle = nameDraftRef\.current\.trim\(\)/);
+  assert.match(generationBlock, /const generatedTitles = \[\.\.\.generatedTitleHistory\.current\]/);
+  assert.match(generationBlock, /JSON\.stringify\(\{ currentTitle, excludedTitles \}\)/);
+  assert.match(generationBlock, /generatedTitleHistory\.current\.add\(result\.form\.name\)/);
+  assert.match(generationBlock, /normalizedTitle === currentTitle\.toLocaleLowerCase/);
 });
 
-test("feature flag is documented as false and no public API key variable exists", () => {
+test("double click while loading cannot create a second request", () => {
+  const generationBlock = sourceBlock(
+    "const generateTitleSuggestion = useCallback",
+    "const reorderImage = useCallback"
+  );
+  const triggerBlock = sourceBlock(
+    "const openTitleAiExperience = useCallback",
+    "const cancelEdit = useCallback"
+  );
+  assert.match(generationBlock, /if \(titleAiRequest\.current\) return/);
+  assert.match(triggerBlock, /if \(titleAiRequest\.current\) return/);
+  assert.match(generationBlock, /titleAiRequest\.current = controller/);
+  assert.match(generationBlock, /titleAiRequest\.current = null/);
+});
+
+test("a failed request keeps the current title and shows the sanitized nearby error", () => {
+  const generationBlock = sourceBlock(
+    "const generateTitleSuggestion = useCallback",
+    "const reorderImage = useCallback"
+  );
+  const catchBlock = generationBlock.slice(
+    generationBlock.indexOf("} catch {"),
+    generationBlock.indexOf("} finally")
+  );
+  assert.match(
+    generationBlock,
+    /setTitleAiError\("Não foi possível melhorar o título agora\. Tente novamente\."\)/
+  );
+  assert.doesNotMatch(catchBlock, /setForm|nameDraftRef\.current\s*=|updateDirtyField/);
+  assert.match(viewSource, /aiError[\s\S]*role="alert"/);
+});
+
+test("Cancel restores the saved snapshot and discards generated session titles", () => {
+  const cancelBlock = sourceBlock(
+    "const cancelEdit = useCallback",
+    "function buildPayload"
+  );
+  const resetBlock = sourceBlock(
+    "const resetTitleAiSession = useCallback",
+    "const baselineForm = useMemo"
+  );
+  assert.match(cancelBlock, /formFromProduct\(currentProduct\)/);
+  assert.match(cancelBlock, /nameDraftRef\.current = nextForm\.name/);
+  assert.match(cancelBlock, /setForm\(nextForm\)/);
+  assert.match(cancelBlock, /resetTitleAiSession\(\)/);
+  assert.match(resetBlock, /generatedTitleHistory\.current\.clear\(\)/);
+});
+
+test("Save persists the latest Name only through the local product PATCH", () => {
+  const saveBlock = sourceBlock("async function confirmSave", "return (");
+  assert.match(saveBlock, /nameDraftRef\.current/);
+  assert.match(saveBlock, /fetch\(`\/api\/products\/\$\{currentProduct\.id\}`/);
+  assert.match(saveBlock, /method: "PATCH"/);
+  assert.doesNotMatch(saveBlock, /\/bling\/|full-sync|OpenAI/);
+});
+
+test("frontend keeps the live 60 character editor without suggestion counters", () => {
+  assert.match(viewSource, /maxLength=\{PRODUCT_DETAILS_NAME_MAX_LENGTH\}/);
+  assert.match(viewSource, /\{value\.length\}\/\{PRODUCT_DETAILS_NAME_MAX_LENGTH\}/);
+  assert.match(viewSource, /nameDraftRef\.current/);
+  assert.doesNotMatch(viewSource, /\{title\.length\}\/\{PRODUCT_DETAILS_NAME_MAX_LENGTH\}/);
+});
+
+test("direct AI application does not mutate or remount the memoized gallery", () => {
+  const generationBlock = sourceBlock(
+    "const generateTitleSuggestion = useCallback",
+    "const reorderImage = useCallback"
+  );
+  assert.match(viewSource, /const ProductGallery = memo/);
+  assert.match(viewSource, /const ProductMainImage = memo/);
+  assert.doesNotMatch(generationBlock, /setImages|orderedImages|setSelectedImageId/);
+});
+
+test("feature flag stays fail-closed and the client has no OpenAI credentials", () => {
   const publicKeyVariableName = "NEXT_PUBLIC_" + "OPENAI_API_KEY";
   assert.match(envExample, /^OPENAI_TITLE_AI_ENABLED=false$/m);
   assert.equal(envExample.includes(publicKeyVariableName), false);
-  assert.doesNotMatch(modalSource, /from ["']openai["']|OPENAI_API_KEY|process\.env/);
+  assert.doesNotMatch(viewSource, /from ["']openai["']|OPENAI_API_KEY|process\.env/);
 });

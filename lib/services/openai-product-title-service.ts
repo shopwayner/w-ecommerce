@@ -6,7 +6,7 @@ import { normalizeProductBrand } from "@/lib/product-brand";
 export const OPENAI_PRODUCT_TITLE_MAX_LENGTH = 60;
 export const OPENAI_PRODUCT_TITLE_TIMEOUT_MS = 12_000;
 export const OPENAI_PRODUCT_TITLE_DEFAULT_MAX_OUTPUT_TOKENS = 1_024;
-export const OPENAI_PRODUCT_TITLE_SCHEMA_NAME = "product_title_suggestions";
+export const OPENAI_PRODUCT_TITLE_SCHEMA_NAME = "product_title_suggestion";
 
 export type ProductTitleSuggestion = {
   title: string;
@@ -14,6 +14,8 @@ export type ProductTitleSuggestion = {
 
 export type OpenAIProductTitleInput = {
   currentTitle: string;
+  displayedTitle?: string | null;
+  excludedTitles?: string[];
   brand?: string | null;
   category?: string | null;
 };
@@ -39,8 +41,7 @@ export type OpenAIProductTitleRejectionCode =
   | "OPENAI_SUGGESTION_UNSUPPORTED_FACT"
   | "OPENAI_SUGGESTION_BRAND_MISSING"
   | "OPENAI_SUGGESTION_PROHIBITED_CONTENT"
-  | "OPENAI_SUGGESTION_UNEXPECTED_FORMAT"
-  | "OPENAI_SUGGESTION_WRONG_COUNT";
+  | "OPENAI_SUGGESTION_UNEXPECTED_FORMAT";
 
 type OpenAIProductTitleErrorCode =
   | "FEATURE_DISABLED"
@@ -162,11 +163,7 @@ export type OpenAIProductTitleLogEvent = {
 export type OpenAIProductTitleLogger = (event: OpenAIProductTitleLogEvent) => void;
 
 const structuredResponseSchema = z.object({
-  suggestions: z.array(
-    z.object({
-      title: z.string().min(1).max(OPENAI_PRODUCT_TITLE_MAX_LENGTH)
-    }).strict()
-  ).length(3)
+  title: z.string().min(1).max(OPENAI_PRODUCT_TITLE_MAX_LENGTH)
 }).strict();
 
 class OpenAIProductTitleSchemaBuildError extends Error {
@@ -266,73 +263,50 @@ function findSuggestionRejection(
   return null;
 }
 
-export function inspectOpenAIProductTitleSuggestions(
+export function inspectOpenAIProductTitleSuggestion(
   value: unknown,
   requiredBrand: string | null = null,
-  allowedSourceText: string | null = null
+  allowedSourceText: string | null = null,
+  excludedTitles: readonly string[] = []
 ) {
   const rejectionCodes: OpenAIProductTitleRejectionCode[] = [];
-  const suggestions: ProductTitleSuggestion[] = [];
-  const seen = new Set<string>();
   const allowedSourceTokens = allowedSourceText
     ? new Set(normalizedTokens(allowedSourceText))
     : null;
+  const excludedKeys = new Set(
+    excludedTitles
+      .map(collapseWhitespace)
+      .filter(Boolean)
+      .map(normalizedComparisonKey)
+  );
 
-  if (!isPlainRecord(value) || !hasOnlyKeys(value, ["suggestions"])) {
+  if (
+    !isPlainRecord(value) ||
+    !hasOnlyKeys(value, ["title"]) ||
+    typeof value.title !== "string"
+  ) {
     return {
-      suggestions,
+      suggestion: null,
       receivedCount: 0,
       rejectionCodes: ["OPENAI_SUGGESTION_UNEXPECTED_FORMAT"] as OpenAIProductTitleRejectionCode[]
     };
   }
 
-  const rawSuggestions = value.suggestions;
-  if (!Array.isArray(rawSuggestions)) {
-    return {
-      suggestions,
-      receivedCount: 0,
-      rejectionCodes: ["OPENAI_SUGGESTION_UNEXPECTED_FORMAT"] as OpenAIProductTitleRejectionCode[]
-    };
-  }
-
-  if (rawSuggestions.length !== 3) {
-    rejectionCodes.push("OPENAI_SUGGESTION_WRONG_COUNT");
-  }
-
-  for (const rawSuggestion of rawSuggestions) {
-    if (
-      !isPlainRecord(rawSuggestion) ||
-      !hasOnlyKeys(rawSuggestion, ["title"]) ||
-      typeof rawSuggestion.title !== "string"
-    ) {
-      rejectionCodes.push("OPENAI_SUGGESTION_UNEXPECTED_FORMAT");
-      continue;
-    }
-
-    const normalized = collapseWhitespace(rawSuggestion.title);
-    const rejection = findSuggestionRejection(
-      normalized,
-      requiredBrand,
-      allowedSourceTokens
-    );
-    if (rejection) {
-      rejectionCodes.push(rejection);
-      continue;
-    }
-
-    const key = normalizedComparisonKey(normalized);
-    if (seen.has(key)) {
-      rejectionCodes.push("OPENAI_SUGGESTION_DUPLICATE");
-      continue;
-    }
-
-    seen.add(key);
-    suggestions.push({ title: normalized });
+  const normalized = collapseWhitespace(value.title);
+  const rejection = findSuggestionRejection(
+    normalized,
+    requiredBrand,
+    allowedSourceTokens
+  );
+  if (rejection) {
+    rejectionCodes.push(rejection);
+  } else if (excludedKeys.has(normalizedComparisonKey(normalized))) {
+    rejectionCodes.push("OPENAI_SUGGESTION_DUPLICATE");
   }
 
   return {
-    suggestions,
-    receivedCount: rawSuggestions.length,
+    suggestion: rejectionCodes.length ? null : { title: normalized },
+    receivedCount: 1,
     rejectionCodes: uniqueRejectionCodes(rejectionCodes)
   };
 }
@@ -370,28 +344,30 @@ export function readOpenAIProductTitleConfig(
   };
 }
 
-export function validateOpenAIProductTitleSuggestions(
+export function validateOpenAIProductTitleSuggestion(
   value: unknown,
   requiredBrand: string | null = null,
-  allowedSourceText: string | null = null
-): ProductTitleSuggestion[] {
-  const result = inspectOpenAIProductTitleSuggestions(
+  allowedSourceText: string | null = null,
+  excludedTitles: readonly string[] = []
+): ProductTitleSuggestion {
+  const result = inspectOpenAIProductTitleSuggestion(
     value,
     requiredBrand,
-    allowedSourceText
+    allowedSourceText,
+    excludedTitles
   );
-  if (result.suggestions.length !== 3 || result.rejectionCodes.length > 0) {
+  if (!result.suggestion || result.rejectionCodes.length > 0) {
     throw new OpenAIProductTitleError(
       "OPENAI_NO_VALID_SUGGESTIONS",
-      "A IA nao retornou tres sugestoes validas.",
+      "A IA nao retornou uma sugestao valida.",
       {
         receivedCount: result.receivedCount,
-        acceptedCount: result.suggestions.length,
+        acceptedCount: result.suggestion ? 1 : 0,
         rejectionCodes: result.rejectionCodes
       }
     );
   }
-  return result.suggestions;
+  return result.suggestion;
 }
 
 export function buildOpenAIProductTitleTextFormat() {
@@ -410,6 +386,11 @@ function buildResponseRequest(
   config: OpenAIProductTitleConfig
 ) {
   const currentTitle = collapseWhitespace(input.currentTitle);
+  const displayedTitle = collapseWhitespace(input.displayedTitle ?? currentTitle);
+  const excludedTitles = (input.excludedTitles ?? [])
+    .map(collapseWhitespace)
+    .filter(Boolean)
+    .slice(0, 10);
   const brand = normalizeProductBrand(input.brand);
   const category = collapseWhitespace(input.category ?? "") || null;
 
@@ -421,19 +402,22 @@ function buildResponseRequest(
       {
         role: "system" as const,
         content: [
-          "Retorne exatamente tres titulos diferentes em portugues do Brasil.",
-          "Cada titulo deve ter no maximo 60 caracteres.",
+          "Retorne exatamente um titulo em portugues do Brasil.",
+          "O titulo deve ter no maximo 60 caracteres.",
           "Preserve o produto real e a marca valida quando ela for informada.",
           "Nao invente compatibilidade, modelo, cor, tamanho, material ou aplicacao.",
           "Nao use emojis, preco, promocao ou frete.",
           "Remova termos redundantes antes de reduzir o titulo.",
-          "Nunca corte palavras no meio e nao use reticencias para mascarar excesso."
+          "Nunca corte palavras no meio e nao use reticencias para mascarar excesso.",
+          "Nao repita o titulo atual nem os titulos anteriores informados."
         ].join(" ")
       },
       {
         role: "user" as const,
         content: JSON.stringify({
-          tituloAtual: currentTitle.slice(0, 240),
+          tituloOriginal: currentTitle.slice(0, 240),
+          tituloAtualNaoRepetir: displayedTitle.slice(0, OPENAI_PRODUCT_TITLE_MAX_LENGTH),
+          titulosAnterioresNaoRepetir: excludedTitles,
           marca: brand?.slice(0, 120) ?? null,
           categoria: category?.slice(0, 120) ?? null
         })
@@ -665,7 +649,7 @@ function decodeProviderOutput(response: OpenAIProductTitleProviderResponse) {
   }
 }
 
-export async function generateOpenAIProductTitleSuggestions(
+export async function generateOpenAIProductTitleSuggestion(
   input: OpenAIProductTitleInput,
   options: {
     env?: OpenAIProductTitleEnv;
@@ -674,7 +658,7 @@ export async function generateOpenAIProductTitleSuggestions(
     correlationId?: string;
     logger?: OpenAIProductTitleLogger;
   } = {}
-): Promise<ProductTitleSuggestion[]> {
+): Promise<ProductTitleSuggestion> {
   const currentTitle = collapseWhitespace(input.currentTitle);
   if (!currentTitle) {
     throw new OpenAIProductTitleError(
@@ -736,7 +720,7 @@ export async function generateOpenAIProductTitleSuggestions(
         controller.abort();
         reject(new OpenAIProductTitleError(
           "TIMEOUT",
-          "A geracao das sugestoes demorou mais que o esperado."
+          "A geracao da sugestao demorou mais que o esperado."
         ));
       }, timeoutMs);
     });
@@ -797,16 +781,21 @@ export async function generateOpenAIProductTitleSuggestions(
     errorStage = "response_parse";
     const decoded = decodeProviderOutput(providerResponse);
     errorStage = "response_validation";
-    const validation = inspectOpenAIProductTitleSuggestions(
+    const validation = inspectOpenAIProductTitleSuggestion(
       decoded,
       normalizeProductBrand(input.brand),
-      [currentTitle, input.brand, input.category].filter(Boolean).join(" ")
+      [currentTitle, input.brand, input.category].filter(Boolean).join(" "),
+      [
+        currentTitle,
+        collapseWhitespace(input.displayedTitle ?? currentTitle),
+        ...(input.excludedTitles ?? [])
+      ]
     );
 
-    if (validation.suggestions.length !== 3 || validation.rejectionCodes.length > 0) {
+    if (!validation.suggestion || validation.rejectionCodes.length > 0) {
       throw new OpenAIProductTitleError(
         "OPENAI_NO_VALID_SUGGESTIONS",
-        "A IA nao retornou tres sugestoes validas.",
+        "A IA nao retornou uma sugestao valida.",
         {
           httpStatus: providerResponse.httpStatus ?? null,
           responseStatus,
@@ -814,7 +803,7 @@ export async function generateOpenAIProductTitleSuggestions(
             providerResponse.outputParsed !== undefined &&
             providerResponse.outputParsed !== null,
           receivedCount: validation.receivedCount,
-          acceptedCount: validation.suggestions.length,
+          acceptedCount: validation.suggestion ? 1 : 0,
           rejectionCodes: validation.rejectionCodes
         }
       );
@@ -823,9 +812,9 @@ export async function generateOpenAIProductTitleSuggestions(
     terminalEventLogged = true;
     log("request_completed", {
       receivedCount: validation.receivedCount,
-      acceptedCount: validation.suggestions.length
+      acceptedCount: validation.suggestion ? 1 : 0
     });
-    return validation.suggestions;
+    return validation.suggestion;
   } catch (error) {
     let normalizedError = error;
     if (error instanceof OpenAIProductTitleSchemaBuildError) {
