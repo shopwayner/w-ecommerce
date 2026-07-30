@@ -13,8 +13,10 @@ import {
   consumeBlingImportPreviewConfirmation,
   createBlingImportPreviewConfirmation,
   createBlingImportPreviewFingerprint,
+  processBlingImportItemsIndependently,
   registerBlingImportPreviewCorrelation,
   resetBlingImportPreviewCorrelationsForTests,
+  resolveBlingProductImportMatch,
   verifyBlingImportPreviewConfirmation,
   type BlingImportPreviewProof
 } from "./services/bling-product-import-service";
@@ -82,7 +84,16 @@ function createConfirmation(correlationId = correlationOne, proofValue = proof()
     existing: 200,
     newProducts: 16,
     importable: 216,
-    skuConflicts: 0
+    skuConflicts: 0,
+    matchSummary: {
+      updatedByMapping: 200,
+      linkedBySku: 0,
+      linkedByGtin: 0,
+      created: 16,
+      needsReview: 0,
+      skuConflicts: 0,
+      gtinConflicts: 0
+    }
   };
   const previewFingerprint = createBlingImportPreviewFingerprint({
     correlationId,
@@ -91,7 +102,8 @@ function createConfirmation(correlationId = correlationOne, proofValue = proof()
     existing: common.existing,
     newProducts: common.newProducts,
     importable: common.importable,
-    skuConflicts: common.skuConflicts
+    skuConflicts: common.skuConflicts,
+    matchSummary: common.matchSummary
   });
   return {
     common,
@@ -199,14 +211,15 @@ test("externalId duplicado bloqueia a previa", () => {
   assert.ok(integrity.reasons.includes("DUPLICATE_EXTERNAL_ID"));
 });
 
-test("produto obrigatorio invalido bloqueia a previa", () => {
+test("produto individual invalido e isolado sem cancelar a previa", () => {
   const integrity = integrityFor({
     pageCounts: [2],
     uniqueIdsCount: 1,
     invalidCount: 1
   });
-  assert.equal(integrity.previewComplete, false);
-  assert.ok(integrity.reasons.includes("INVALID_PRODUCT_DATA"));
+  assert.equal(integrity.previewComplete, true);
+  assert.equal(integrity.derivedTotal, 2);
+  assert.ok(!integrity.reasons.includes("INVALID_PRODUCT_DATA"));
 });
 
 test("pagina 1 vazia representa catalogo vazio completo", () => {
@@ -311,6 +324,22 @@ test("confirmacao backend com metadados adulterados e bloqueada", () => {
   );
 });
 
+test("confirmacao de outra organizacao e bloqueada", () => {
+  const confirmation = createConfirmation();
+  assert.throws(
+    () => verifyBlingImportPreviewConfirmation(
+      confirmation.confirmationToken,
+      {
+        ...confirmation.common,
+        organizationId: "org-de-outro-tenant",
+        previewFingerprint: confirmation.previewFingerprint
+      },
+      new Date("2026-07-29T16:05:00.000Z")
+    ),
+    BlingImportPreviewError
+  );
+});
+
 test("nova consulta invalida o token anterior", () => {
   const confirmation = createConfirmation(correlationOne);
   registerBlingImportPreviewCorrelation({
@@ -386,6 +415,214 @@ test("backend consome a confirmacao antes de tentar criar job", () => {
   const createAt = service.indexOf("transaction.erpSyncJob.create", prepareStart);
   assert.ok(prepareStart >= 0);
   assert.ok(consumeAt > prepareStart && consumeAt < createAt);
+});
+
+test("mapping da conexao atual possui prioridade sobre SKU e GTIN", () => {
+  assert.deepEqual(
+    resolveBlingProductImportMatch({
+      mappedProductId: "product-mapped",
+      sku: "SKU-1",
+      gtin: "4006381333931",
+      skuCandidates: [{ id: "product-sku" }],
+      gtinCandidates: [{ id: "product-gtin" }]
+    }),
+    { kind: "MAPPING", productId: "product-mapped", conflictField: null }
+  );
+});
+
+test("mapping de outra conexao nao bloqueia vinculo por SKU", () => {
+  assert.deepEqual(
+    resolveBlingProductImportMatch({
+      mappedProductId: null,
+      sku: "SKU-1",
+      gtin: null,
+      skuCandidates: [{ id: "shared-product" }]
+    }),
+    { kind: "SKU", productId: "shared-product", conflictField: null }
+  );
+});
+
+test("GTIN exato e valido vincula quando SKU nao encontra produto", () => {
+  assert.deepEqual(
+    resolveBlingProductImportMatch({
+      mappedProductId: null,
+      sku: "SKU-SEM-MATCH",
+      gtin: "4006381333931",
+      skuCandidates: [],
+      gtinCandidates: [{ id: "product-gtin" }]
+    }),
+    { kind: "GTIN", productId: "product-gtin", conflictField: null }
+  );
+});
+
+test("produto sem correspondencia segura deve ser criado", () => {
+  assert.deepEqual(
+    resolveBlingProductImportMatch({
+      mappedProductId: null,
+      sku: null,
+      gtin: null
+    }),
+    { kind: "CREATE", productId: null, conflictField: null }
+  );
+});
+
+test("SKU duplicado exige revisao e nao escolhe o primeiro", () => {
+  assert.deepEqual(
+    resolveBlingProductImportMatch({
+      mappedProductId: null,
+      sku: "SKU-DUPLICADO",
+      gtin: "4006381333931",
+      skuCandidates: [{ id: "product-1" }, { id: "product-2" }],
+      gtinCandidates: [{ id: "product-3" }]
+    }),
+    { kind: "NEEDS_REVIEW", productId: null, conflictField: "SKU" }
+  );
+});
+
+test("GTIN duplicado exige revisao e nao escolhe o primeiro", () => {
+  assert.deepEqual(
+    resolveBlingProductImportMatch({
+      mappedProductId: null,
+      sku: null,
+      gtin: "4006381333931",
+      gtinCandidates: [{ id: "product-1" }, { id: "product-2" }]
+    }),
+    { kind: "NEEDS_REVIEW", productId: null, conflictField: "GTIN" }
+  );
+});
+
+test("GTIN invalido nao participa do matching", () => {
+  assert.deepEqual(
+    resolveBlingProductImportMatch({
+      mappedProductId: null,
+      sku: null,
+      gtin: "4006381333932",
+      gtinCandidates: [{ id: "must-not-match" }]
+    }),
+    { kind: "CREATE", productId: null, conflictField: null }
+  );
+});
+
+test("servico restringe mapping e produtos a organizacao e conexao atuais", () => {
+  const service = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-product-import-service.ts"),
+    "utf8"
+  );
+  assert.match(
+    service,
+    /productExternalMapping\.findFirst\(\{[\s\S]*?organizationId: input\.organizationId,[\s\S]*?connectionId: input\.connectionId,[\s\S]*?externalProductId: input\.product\.externalProductId/
+  );
+  assert.match(
+    service,
+    /product\.findMany\(\{[\s\S]*?organizationId: input\.organizationId, sku/
+  );
+  assert.match(
+    service,
+    /product\.findMany\(\{[\s\S]*?organizationId: input\.organizationId, ean/
+  );
+  assert.doesNotMatch(
+    service,
+    /productExternalMapping\.find(?:First|Many)\(\{\s*where:\s*\{\s*externalProductId/
+  );
+});
+
+test("mesmo Product pode receber mappings de conexoes diferentes", () => {
+  const service = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-product-import-service.ts"),
+    "utf8"
+  );
+  assert.match(
+    service,
+    /productId: resolved\.match\.productId,[\s\S]*?connectionId: input\.connectionId,[\s\S]*?externalProductId: input\.product\.externalProductId/
+  );
+  const schema = readFileSync(path.join(process.cwd(), "prisma/schema.prisma"), "utf8");
+  assert.match(schema, /@@unique\(\[connectionId, externalProductId\]\)/);
+  assert.doesNotMatch(schema, /@@unique\(\[productId, connectionId\]\)/);
+});
+
+test("falha de item e registrada e o lote continua", async () => {
+  const processed: number[] = [];
+  const failed: number[] = [];
+  const state = await processBlingImportItemsIndependently({
+    items: [1, 2, 3],
+    initialState: { completed: 0, failed: 0 },
+    processItem: async (item, current) => {
+      if (item === 2) throw new Error("falha individual");
+      processed.push(item);
+      return { ...current, completed: current.completed + 1 };
+    },
+    recordFailure: async (item, current) => {
+      failed.push(item);
+      return { ...current, failed: current.failed + 1 };
+    }
+  });
+  assert.deepEqual(processed, [1, 3]);
+  assert.deepEqual(failed, [2]);
+  assert.deepEqual(state, { completed: 2, failed: 1 });
+});
+
+test("job processa uma pagina por requisicao e transacoes curtas por item", () => {
+  const service = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-product-import-service.ts"),
+    "utf8"
+  );
+  const runAt = service.indexOf("async runPreparedSync");
+  const statusAt = service.indexOf("async getJobStatus", runAt);
+  const runSource = service.slice(runAt, statusAt);
+  assert.equal((runSource.match(/fetchCatalogPage\(/g) ?? []).length, 1);
+  assert.doesNotMatch(runSource, /for\s*\(\s*;\s*page\s*<=/);
+  assert.match(runSource, /status: completed \? "COMPLETED" : "PENDING"/);
+  assert.match(service, /async function applyProduct[\s\S]*TransactionIsolationLevel\.Serializable/);
+});
+
+test("PREPARE_SYNC cria somente o job e armazena plano minimo", () => {
+  const service = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-product-import-service.ts"),
+    "utf8"
+  );
+  const prepareAt = service.indexOf("async prepareSync");
+  const reconcileAt = service.indexOf("async reconcileProductStatuses", prepareAt);
+  const prepareSource = service.slice(prepareAt, reconcileAt);
+  assert.equal((prepareSource.match(/erpSyncJob\.create\(/g) ?? []).length, 1);
+  assert.doesNotMatch(prepareSource, /product\.(?:create|update|upsert)/);
+  assert.doesNotMatch(prepareSource, /blingProductImportDraft\.(?:create|update|upsert)/);
+  assert.match(prepareSource, /pageCounts: confirmation\.pageCounts/);
+  assert.match(prepareSource, /matchSummary/);
+});
+
+test("advisory locks sao convertidos para tipo suportado pelo Prisma", () => {
+  const service = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-product-import-service.ts"),
+    "utf8"
+  );
+  const locks = service.match(/pg_advisory_xact_lock[\s\S]{0,100}?::text AS "lockState"/g) ?? [];
+  assert.equal(locks.length, 2);
+  assert.doesNotMatch(service, /pg_advisory_xact_lock\(hashtext\([^)]*\)\)`/);
+});
+
+test("preview de conexao A nao confirma conexao B", () => {
+  const confirmation = createConfirmation();
+  assert.throws(
+    () => verifyBlingImportPreviewConfirmation(
+      confirmation.confirmationToken,
+      {
+        ...confirmation.common,
+        connectionId: "connection-2",
+        previewFingerprint: confirmation.previewFingerprint
+      },
+      new Date("2026-07-29T16:05:00.000Z")
+    ),
+    BlingImportPreviewError
+  );
+});
+
+test("interface rejeita preview quando a conexao selecionada mudou", () => {
+  const source = readFileSync(
+    path.join(process.cwd(), "components/pages/products-page.tsx"),
+    "utf8"
+  );
+  assert.match(source, /preview\.connectionId !== connectionId/);
+  assert.match(source, /blingImportPreview\.connectionId !== connectionId/);
 });
 
 test("mensagem de termino inconclusivo permanece segura", () => {

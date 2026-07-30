@@ -102,10 +102,12 @@ type ProductAccountContext = {
   mode: "MATRIX" | "ERP_ACCOUNT";
   provider: "BLING" | null;
   connectionId: string | null;
-  selectedOption?: { status?: string } | null;
+  selectedOption?: { status?: string; label?: string } | null;
 };
 
 type BlingImportPreview = {
+  connectionId: string;
+  connectionName: string;
   correlationId: string;
   reportedTotal: number | null;
   derivedTotal: number | null;
@@ -127,14 +129,22 @@ type BlingImportPreview = {
   active: number;
   inactive: number;
   withoutSku: number;
+  withoutGtin: number;
   existing: number;
   new: number;
   wouldUpdate: number;
   importable: number;
+  updatedByMapping: number;
+  linkedBySku: number;
+  linkedByGtin: number;
+  wouldCreate: number;
+  needsReview: number;
+  invalid: number;
   errors: number;
   ignored: number;
   duplicateExternalIds: number;
   skuConflicts: number;
+  gtinConflicts: number;
   completed: boolean;
   paginationComplete: boolean;
   previewComplete: boolean;
@@ -157,6 +167,16 @@ type BlingSyncJob = {
   totalErrors: number;
   currentPage: number;
   errorMessage: string | null;
+  previewTotal: number;
+  processed: number;
+  created: number;
+  updated: number;
+  linkedBySku: number;
+  linkedByGtin: number;
+  noChanges: number;
+  needsReview: number;
+  invalid: number;
+  failed: number;
 };
 
 type ProductEnrichmentDraft = {
@@ -1309,8 +1329,9 @@ export function ProductsPage() {
       if (
         !preview
         || !canConfirmBlingImportPreview(preview, correlationId)
+        || preview.connectionId !== connectionId
         || preview.pagesCompleted !== preview.pagesExpected
-        || preview.uniqueProductsLoaded !== preview.totalFound
+        || preview.uniqueProductsLoaded !== (preview.totalFound - preview.invalid)
       ) {
         setBlingImportPreview(null);
         setBlingSyncJob(null);
@@ -1347,32 +1368,37 @@ export function ProductsPage() {
   }
 
   async function runPreparedBlingSync(connectionId: string, jobId: string) {
-    let finished = false;
-    const runPromise = fetch("/api/products/import-from-bling", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode: "run", connectionId, jobId, confirmed: true })
-    }).finally(() => {
-      finished = true;
-    });
-
-    while (!finished) {
-      await new Promise((resolve) => window.setTimeout(resolve, 1_500));
-      await loadBlingSyncJob(connectionId, jobId);
+    while (true) {
+      const response = await fetch("/api/products/import-from-bling", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "run", connectionId, jobId, confirmed: true })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        await loadBlingSyncJob(connectionId, jobId);
+        throw new Error(payload.error ?? "Nao foi possivel concluir a sincronizacao.");
+      }
+      const job = payload.job as BlingSyncJob | undefined;
+      if (job) setBlingSyncJob(job);
+      if (!job || job.status === "COMPLETED" || job.status === "FAILED") break;
+      await new Promise((resolve) => window.setTimeout(resolve, 150));
     }
-
-    const response = await runPromise;
-    const payload = await response.json().catch(() => ({}));
-    await loadBlingSyncJob(connectionId, jobId);
-    if (!response.ok) throw new Error(payload.error ?? "Nao foi possivel concluir a sincronizacao.");
-    setBlingImportMessage("Sincronizacao concluida em todas as paginas encontradas.");
+    const completed = await loadBlingSyncJob(connectionId, jobId);
+    if (completed?.status === "FAILED") {
+      throw new Error(completed.errorMessage ?? "Nao foi possivel concluir a sincronizacao.");
+    }
+    setBlingImportMessage("Sincronizacao concluida em todos os lotes encontrados.");
     await loadProducts();
   }
 
   async function startBlingSync() {
     const connectionId = accountContext?.mode === "ERP_ACCOUNT" && accountContext.provider === "BLING" ? accountContext.connectionId : null;
     if (!connectionId || !blingImportPreview || blingImportBusy) return;
-    if (!canConfirmBlingImportPreview(blingImportPreview, blingImportCorrelationId)) {
+    if (
+      blingImportPreview.connectionId !== connectionId
+      || !canConfirmBlingImportPreview(blingImportPreview, blingImportCorrelationId)
+    ) {
       setBlingImportPreview(null);
       setBlingImportCorrelationId(null);
       blingImportCorrelationRef.current = null;
@@ -1814,6 +1840,9 @@ export function ProductsPage() {
               <div>
                 <h3 className="text-xl font-semibold text-matrix-fg">Produtos da conta Bling</h3>
                 <p className="mt-1 text-sm text-matrix-muted">Revise a consulta antes de iniciar qualquer atualização local.</p>
+                <p className="mt-1 text-xs font-semibold text-matrix-gold">
+                  Conta selecionada: {blingImportPreview?.connectionName ?? accountContext?.selectedOption?.label ?? "Bling"}
+                </p>
               </div>
               <button aria-label="Fechar consulta Bling" className="grid h-9 w-9 place-items-center rounded-md border border-matrix-border text-matrix-muted" disabled={blingImportBusy} onClick={() => setBlingImportOpen(false)} type="button"><X className="h-4 w-4" /></button>
             </div>
@@ -1823,13 +1852,17 @@ export function ProductsPage() {
               <>
                 <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <KpiCard label="Encontrados" value={String(blingImportPreview.totalFound)} hint={`${blingImportPreview.pagesFound} paginas`} />
-                  <KpiCard label="Importáveis" value={String(blingImportPreview.importable)} hint="Por identidade externa" tone="success" />
-                  <KpiCard label="Já existentes" value={String(blingImportPreview.existing)} hint="Seriam atualizados" tone="purple" />
-                  <KpiCard label="Novos" value={String(blingImportPreview.new)} hint="Seriam criados" tone="info" />
+                  <KpiCard label="Importáveis" value={String(blingImportPreview.importable)} hint="Somente desta conta" tone="success" />
+                  <KpiCard label="Por mapping" value={String(blingImportPreview.updatedByMapping)} hint="Seriam atualizados" tone="purple" />
+                  <KpiCard label="Vínculo por SKU" value={String(blingImportPreview.linkedBySku)} hint="Produto local reutilizado" tone="info" />
+                  <KpiCard label="Vínculo por GTIN" value={String(blingImportPreview.linkedByGtin)} hint="Produto local reutilizado" tone="info" />
+                  <KpiCard label="Novos" value={String(blingImportPreview.wouldCreate)} hint="Seriam criados" tone="success" />
+                  <KpiCard label="Precisam de revisão" value={String(blingImportPreview.needsReview)} hint="Conflitos isolados" tone="danger" />
+                  <KpiCard label="Inválidos" value={String(blingImportPreview.invalid)} hint="Não cancelam os demais" tone="danger" />
                   <KpiCard label="Ativos" value={String(blingImportPreview.active)} hint="Na conta consultada" />
                   <KpiCard label="Inativos" value={String(blingImportPreview.inactive)} hint="Mantidos sem exclusão" tone="warning" />
                   <KpiCard label="Sem SKU" value={String(blingImportPreview.withoutSku)} hint="Identificados pelo Bling" tone="warning" />
-                  <KpiCard label="Precisam de revisão" value={String(blingImportPreview.ignored)} hint="Conflitos ou dados inválidos" tone="danger" />
+                  <KpiCard label="Sem GTIN" value={String(blingImportPreview.withoutGtin)} hint="Sem correspondência por GTIN" tone="warning" />
                 </div>
                 <dl className="mt-4 grid gap-x-6 gap-y-2 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm sm:grid-cols-2">
                   <div className="flex justify-between gap-4">
@@ -1848,6 +1881,7 @@ export function ProductsPage() {
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Dados inválidos</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.errors}</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">IDs repetidos</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.duplicateExternalIds}</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Conflitos de SKU</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.skuConflicts}</dd></div>
+                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Conflitos de GTIN</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.gtinConflicts}</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Paginas verificadas</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.pagesCompleted}/{blingImportPreview.pagesExpected}</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Integridade da previa</dt><dd className="font-semibold text-emerald-300">Completa</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Alterações realizadas</dt><dd className="font-semibold text-matrix-fg">Nenhuma</dd></div>
@@ -1858,7 +1892,13 @@ export function ProductsPage() {
             {blingSyncJob ? (
               <section className="mt-5 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm text-matrix-muted">
                 <div className="flex items-center justify-between gap-3"><span>Próxima página</span><strong className="text-matrix-fg">{blingSyncJob.currentPage}</strong></div>
-                <div className="mt-2 flex items-center justify-between gap-3"><span>Registros processados</span><strong className="text-matrix-fg">{blingSyncJob.totalFetched}</strong></div>
+                <div className="mt-2 flex items-center justify-between gap-3"><span>Registros processados</span><strong className="text-matrix-fg">{blingSyncJob.processed}/{blingSyncJob.previewTotal}</strong></div>
+                <div className="mt-2 flex items-center justify-between gap-3"><span>Criados</span><strong className="text-matrix-fg">{blingSyncJob.created}</strong></div>
+                <div className="mt-2 flex items-center justify-between gap-3"><span>Atualizados</span><strong className="text-matrix-fg">{blingSyncJob.updated}</strong></div>
+                <div className="mt-2 flex items-center justify-between gap-3"><span>Vinculados por SKU</span><strong className="text-matrix-fg">{blingSyncJob.linkedBySku}</strong></div>
+                <div className="mt-2 flex items-center justify-between gap-3"><span>Vinculados por GTIN</span><strong className="text-matrix-fg">{blingSyncJob.linkedByGtin}</strong></div>
+                <div className="mt-2 flex items-center justify-between gap-3"><span>Sem alterações</span><strong className="text-matrix-fg">{blingSyncJob.noChanges}</strong></div>
+                <div className="mt-2 flex items-center justify-between gap-3"><span>Revisão / inválidos / falhas</span><strong className="text-matrix-fg">{blingSyncJob.needsReview + blingSyncJob.invalid + blingSyncJob.failed}</strong></div>
                 <div className="mt-2 flex items-center justify-between gap-3"><span>Status</span><Badge tone={blingSyncJob.status === "COMPLETED" ? "success" : blingSyncJob.status === "FAILED" ? "danger" : "warning"}>{blingSyncJob.status === "COMPLETED" ? "Concluído" : blingSyncJob.status === "FAILED" ? "Interrompido" : "Em andamento"}</Badge></div>
               </section>
             ) : null}

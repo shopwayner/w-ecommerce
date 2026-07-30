@@ -16,6 +16,10 @@ import {
 } from "@/lib/product-brand";
 import { decryptSecret, encryptSecret } from "@/lib/security/encryption";
 import { BlingApiError, blingApiClient } from "@/lib/services/bling-api-client";
+import {
+  isValidGtin,
+  normalizeGtin
+} from "@/lib/services/internal-gtin-catalog-service";
 
 const pageSize = 100;
 const maxSafetyPages = 1_000;
@@ -56,6 +60,130 @@ type NormalizedBlingProduct = {
   format: string;
   isVariation: boolean;
 };
+
+export type BlingProductImportItemStatus =
+  | "CREATED"
+  | "UPDATED"
+  | "LINKED_BY_SKU"
+  | "LINKED_BY_GTIN"
+  | "NO_CHANGES"
+  | "NEEDS_REVIEW"
+  | "INVALID"
+  | "FAILED";
+
+export type BlingProductImportMatchKind =
+  | "MAPPING"
+  | "SKU"
+  | "GTIN"
+  | "CREATE"
+  | "NEEDS_REVIEW";
+
+export type BlingProductImportMatch = {
+  kind: BlingProductImportMatchKind;
+  productId: string | null;
+  conflictField: "SKU" | "GTIN" | null;
+};
+
+type ProductIdentityCandidate = {
+  id: string;
+};
+
+export function resolveBlingProductImportMatch(input: {
+  mappedProductId?: string | null;
+  sku: string | null;
+  gtin: string | null;
+  skuCandidates?: ProductIdentityCandidate[];
+  gtinCandidates?: ProductIdentityCandidate[];
+}): BlingProductImportMatch {
+  if (input.mappedProductId) {
+    return { kind: "MAPPING", productId: input.mappedProductId, conflictField: null };
+  }
+
+  const sku = input.sku?.trim() || null;
+  const skuCandidates = sku ? input.skuCandidates ?? [] : [];
+  if (skuCandidates.length > 1) {
+    return { kind: "NEEDS_REVIEW", productId: null, conflictField: "SKU" };
+  }
+  if (skuCandidates.length === 1) {
+    return { kind: "SKU", productId: skuCandidates[0].id, conflictField: null };
+  }
+
+  const gtin = normalizeGtin(input.gtin);
+  const gtinCandidates = gtin && isValidGtin(gtin) ? input.gtinCandidates ?? [] : [];
+  if (gtinCandidates.length > 1) {
+    return { kind: "NEEDS_REVIEW", productId: null, conflictField: "GTIN" };
+  }
+  if (gtinCandidates.length === 1) {
+    return { kind: "GTIN", productId: gtinCandidates[0].id, conflictField: null };
+  }
+
+  return { kind: "CREATE", productId: null, conflictField: null };
+}
+
+export async function processBlingImportItemsIndependently<T, TState>(input: {
+  items: T[];
+  initialState: TState;
+  processItem: (item: T, state: TState) => Promise<TState>;
+  recordFailure: (item: T, state: TState, error: unknown) => Promise<TState>;
+}) {
+  let state = input.initialState;
+  for (const item of input.items) {
+    try {
+      state = await input.processItem(item, state);
+    } catch (error) {
+      state = await input.recordFailure(item, state, error);
+    }
+  }
+  return state;
+}
+
+type BlingProductImportMatchSummary = {
+  updatedByMapping: number;
+  linkedBySku: number;
+  linkedByGtin: number;
+  created: number;
+  needsReview: number;
+  skuConflicts: number;
+  gtinConflicts: number;
+};
+
+type BlingProductImportProgress = {
+  processed: number;
+  created: number;
+  updated: number;
+  linkedBySku: number;
+  linkedByGtin: number;
+  noChanges: number;
+  needsReview: number;
+  invalid: number;
+  failed: number;
+};
+
+type BlingProductImportJobCursor = {
+  version: 1;
+  preview: {
+    total: number;
+    pageCounts: number[];
+    summary: BlingProductImportMatchSummary;
+    invalid: number;
+  };
+  progress: BlingProductImportProgress;
+  page: number;
+};
+
+function emptyImportProgress(): BlingProductImportProgress {
+  return {
+    processed: 0,
+    created: 0,
+    updated: 0,
+    linkedBySku: 0,
+    linkedByGtin: 0,
+    noChanges: 0,
+    needsReview: 0,
+    invalid: 0,
+    failed: 0
+  };
+}
 
 export type CanonicalBlingProductStatus = "ACTIVE" | "INACTIVE" | "DELETED" | "UNKNOWN";
 
@@ -101,6 +229,8 @@ export type BlingProductStatusConditionalUpdateInput = {
 
 export type BlingProductDryRun = {
   connectionReady: true;
+  connectionId: string;
+  connectionName: string;
   correlationId: string;
   reportedTotal: number | null;
   derivedTotal: number | null;
@@ -122,14 +252,22 @@ export type BlingProductDryRun = {
   active: number;
   inactive: number;
   withoutSku: number;
+  withoutGtin: number;
   existing: number;
   new: number;
   wouldUpdate: number;
   importable: number;
+  updatedByMapping: number;
+  linkedBySku: number;
+  linkedByGtin: number;
+  wouldCreate: number;
+  needsReview: number;
+  invalid: number;
   errors: number;
   ignored: number;
   duplicateExternalIds: number;
   skuConflicts: number;
+  gtinConflicts: number;
   completed: boolean;
   paginationComplete: true;
   previewComplete: true;
@@ -143,7 +281,7 @@ export type BlingProductDryRun = {
 };
 
 type BlingImportPreviewConfirmation = {
-  version: 2;
+  version: 3;
   operation: "BLING_PRODUCT_IMPORT_PREVIEW";
   userId: string;
   organizationId: string;
@@ -165,6 +303,7 @@ type BlingImportPreviewConfirmation = {
   newProducts: number;
   importable: number;
   skuConflicts: number;
+  matchSummary: BlingProductImportMatchSummary;
   previewFingerprint: string;
   issuedAt: string;
   expiresAt: string;
@@ -272,7 +411,8 @@ function extractReportedTotal(payload: BlingCatalogResponse) {
 function normalizeOne(rawValue: unknown, parent?: NormalizedBlingProduct): NormalizedBlingProduct | null {
   const raw = record(rawValue);
   const externalProductId = firstText(raw.id, raw.idProduto, raw.externalId);
-  if (!externalProductId) return null;
+  const name = firstText(raw.nome, raw.descricao, parent?.name);
+  if (!externalProductId || !name) return null;
 
   const stock = record(raw.estoque);
   const dimensions = record(raw.dimensoes);
@@ -284,7 +424,7 @@ function normalizeOne(rawValue: unknown, parent?: NormalizedBlingProduct): Norma
   return {
     externalProductId,
     parentExternalProductId: parent?.externalProductId ?? null,
-    name: firstText(raw.nome, raw.descricao, parent?.name) ?? "Produto Bling",
+    name,
     sku: firstText(raw.codigo, raw.sku),
     gtin: firstText(raw.gtin, raw.ean),
     description: firstText(raw.descricaoComplementar, raw.descricaoCurta, parent?.description),
@@ -459,28 +599,119 @@ async function loadMappings(organizationId: string, connectionId: string, extern
   return mappings;
 }
 
-async function loadSkuConflicts(organizationId: string, products: NormalizedBlingProduct[], mappedIds: Set<string>) {
-  const skus = [...new Set(products.filter((product) => !mappedIds.has(product.externalProductId)).map((product) => product.sku).filter((sku): sku is string => Boolean(sku)))];
-  const conflicts = new Set<string>();
-  for (let start = 0; start < skus.length; start += 1_000) {
+async function loadIdentityCandidates(
+  organizationId: string,
+  field: "sku" | "ean",
+  values: string[]
+) {
+  const candidates = new Map<string, ProductIdentityCandidate[]>();
+  const uniqueValues = [...new Set(values.filter(Boolean))];
+  for (let start = 0; start < uniqueValues.length; start += 1_000) {
+    const chunk = uniqueValues.slice(start, start + 1_000);
     const rows = await prisma.product.findMany({
-      where: { organizationId, sku: { in: skus.slice(start, start + 1_000) } },
-      select: { sku: true }
+      where: {
+        organizationId,
+        [field]: { in: chunk }
+      },
+      select: { id: true, sku: true, ean: true }
     });
-    for (const row of rows) if (row.sku) conflicts.add(row.sku);
+    for (const row of rows) {
+      const rawIdentity = field === "sku" ? row.sku?.trim() : normalizeGtin(row.ean);
+      if (!rawIdentity) continue;
+      const current = candidates.get(rawIdentity) ?? [];
+      current.push({ id: row.id });
+      candidates.set(rawIdentity, current);
+    }
   }
-  return conflicts;
+  return candidates;
+}
+
+async function classifyBlingProductsForConnection(input: {
+  organizationId: string;
+  connectionId: string;
+  products: NormalizedBlingProduct[];
+}) {
+  const mappings = await loadMappings(
+    input.organizationId,
+    input.connectionId,
+    input.products.map((product) => product.externalProductId)
+  );
+  const unmatched = input.products.filter((product) => !mappings.has(product.externalProductId));
+  const skuCandidates = await loadIdentityCandidates(
+    input.organizationId,
+    "sku",
+    unmatched.map((product) => product.sku?.trim() ?? "").filter(Boolean)
+  );
+  const productsWithoutSkuMatch = unmatched.filter((product) => {
+    const sku = product.sku?.trim();
+    return !sku || (skuCandidates.get(sku)?.length ?? 0) === 0;
+  });
+  const gtinCandidates = await loadIdentityCandidates(
+    input.organizationId,
+    "ean",
+    productsWithoutSkuMatch
+      .map((product) => normalizeGtin(product.gtin))
+      .filter((gtin): gtin is string => Boolean(gtin && isValidGtin(gtin)))
+  );
+
+  const matches = new Map<string, BlingProductImportMatch>();
+  const summary: BlingProductImportMatchSummary = {
+    updatedByMapping: 0,
+    linkedBySku: 0,
+    linkedByGtin: 0,
+    created: 0,
+    needsReview: 0,
+    skuConflicts: 0,
+    gtinConflicts: 0
+  };
+
+  for (const product of input.products) {
+    const sku = product.sku?.trim() ?? null;
+    const gtin = normalizeGtin(product.gtin);
+    const match = resolveBlingProductImportMatch({
+      mappedProductId: mappings.get(product.externalProductId),
+      sku,
+      gtin,
+      skuCandidates: sku ? skuCandidates.get(sku) : undefined,
+      gtinCandidates: gtin && isValidGtin(gtin) ? gtinCandidates.get(gtin) : undefined
+    });
+    matches.set(product.externalProductId, match);
+    if (match.kind === "MAPPING") summary.updatedByMapping += 1;
+    else if (match.kind === "SKU") summary.linkedBySku += 1;
+    else if (match.kind === "GTIN") summary.linkedByGtin += 1;
+    else if (match.kind === "CREATE") summary.created += 1;
+    else {
+      summary.needsReview += 1;
+      if (match.conflictField === "SKU") summary.skuConflicts += 1;
+      if (match.conflictField === "GTIN") summary.gtinConflicts += 1;
+    }
+  }
+
+  return { mappings, matches, summary };
 }
 
 async function validateConnection(organizationId: string, connectionId: string) {
   const connection = await prisma.blingConnection.findFirst({
     where: { id: connectionId, organizationId },
-    select: { id: true, status: true, tokens: { orderBy: { updatedAt: "desc" }, take: 1, select: { id: true } } }
+    select: {
+      id: true,
+      name: true,
+      status: true,
+      tokens: {
+        orderBy: { updatedAt: "desc" },
+        take: 1,
+        select: { id: true, expiresAt: true }
+      }
+    }
   });
   if (!connection) {
     throw new BlingApiError("Conta Bling nao encontrada.", 404, "CONNECTION_NOT_FOUND");
   }
-  if (connection.status === "DISCONNECTED" || !connection.tokens.length) {
+  if (
+    connection.status !== "ACTIVE"
+    || !connection.tokens.length
+    || connection.tokens[0].expiresAt.getTime() <= Date.now()
+  ) {
     throw new BlingApiError("Reconecte a conta Bling antes de continuar.", 401, "TOKEN_MISSING");
   }
   return connection;
@@ -796,8 +1027,13 @@ function draftData(product: NormalizedBlingProduct, organizationId: string, erpC
   };
 }
 
-async function updateLocalPrice(transaction: Prisma.TransactionClient, organizationId: string, productId: string, product: NormalizedBlingProduct) {
-  if (product.price === null && product.costPrice === null) return;
+async function updateLocalPrice(
+  transaction: Prisma.TransactionClient,
+  organizationId: string,
+  productId: string,
+  product: NormalizedBlingProduct
+) {
+  if (product.price === null && product.costPrice === null) return false;
   const latest = await transaction.productPrice.findFirst({
     where: { organizationId, productId },
     orderBy: { createdAt: "desc" },
@@ -806,19 +1042,447 @@ async function updateLocalPrice(transaction: Prisma.TransactionClient, organizat
   const salePrice = product.price ?? Number(latest?.salePrice ?? 0);
   const costPrice = product.costPrice ?? Number(latest?.costPrice ?? 0);
   if (latest) {
+    if (
+      Number(latest.salePrice) === salePrice
+      && Number(latest.costPrice) === costPrice
+    ) {
+      return false;
+    }
     await transaction.productPrice.update({ where: { id: latest.id }, data: { salePrice, costPrice } });
   } else {
     await transaction.productPrice.create({ data: { organizationId, productId, salePrice, costPrice } });
   }
+  return true;
 }
 
-async function updateLocalInventory(transaction: Prisma.TransactionClient, organizationId: string, connectionId: string, productId: string, stock: number | null) {
-  if (stock === null) return;
-  await transaction.inventoryBalance.upsert({
+async function updateLocalInventory(
+  transaction: Prisma.TransactionClient,
+  organizationId: string,
+  connectionId: string,
+  productId: string,
+  stock: number | null
+) {
+  if (stock === null) return false;
+  const current = await transaction.inventoryBalance.findUnique({
     where: { productId_connectionId_warehouse: { productId, connectionId, warehouse: "Bling" } },
-    create: { organizationId, productId, connectionId, warehouse: "Bling", physicalQuantity: stock },
-    update: { physicalQuantity: stock }
+    select: { id: true, physicalQuantity: true }
   });
+  if (current?.physicalQuantity === stock) return false;
+  if (current) {
+    await transaction.inventoryBalance.update({
+      where: { id: current.id },
+      data: { physicalQuantity: stock }
+    });
+  } else {
+    await transaction.inventoryBalance.create({
+      data: { organizationId, productId, connectionId, warehouse: "Bling", physicalQuantity: stock }
+    });
+  }
+  return true;
+}
+
+function sameNullableNumber(left: Prisma.Decimal | number | null, right: number | null) {
+  if (left === null || right === null) return left === null && right === null;
+  return Number(left) === right;
+}
+
+function blingAttributeIdentity(value: Prisma.JsonValue | Prisma.InputJsonValue | null) {
+  const bling = record(record(value).bling);
+  return {
+    externalProductId: text(bling.externalProductId) || null,
+    parentExternalProductId: text(bling.parentExternalProductId) || null,
+    sku: text(bling.sku) || null,
+    connectionId: text(bling.connectionId) || null,
+    status: text(bling.status) || null,
+    externalStatus: text(bling.externalStatus) || null,
+    format: text(bling.format) || null,
+    source: text(bling.source) || null
+  };
+}
+
+function nextProgress(
+  current: BlingProductImportProgress,
+  status: BlingProductImportItemStatus,
+  amount = 1
+) {
+  const next = { ...current, processed: current.processed + amount };
+  if (status === "CREATED") next.created += amount;
+  else if (status === "UPDATED") next.updated += amount;
+  else if (status === "LINKED_BY_SKU") next.linkedBySku += amount;
+  else if (status === "LINKED_BY_GTIN") next.linkedByGtin += amount;
+  else if (status === "NO_CHANGES") next.noChanges += amount;
+  else if (status === "NEEDS_REVIEW") next.needsReview += amount;
+  else if (status === "INVALID") next.invalid += amount;
+  else next.failed += amount;
+  return next;
+}
+
+function jobCounterUpdate(status: BlingProductImportItemStatus, amount = 1) {
+  return {
+    totalFetched: { increment: amount },
+    ...(status === "CREATED" ? { totalCreatedDrafts: { increment: amount } } : {}),
+    ...(status === "UPDATED" ? { totalUpdatedDrafts: { increment: amount } } : {}),
+    ...(["LINKED_BY_SKU", "LINKED_BY_GTIN", "NO_CHANGES", "NEEDS_REVIEW"].includes(status)
+      ? { totalExistingProducts: { increment: amount } }
+      : {}),
+    ...(["INVALID", "FAILED"].includes(status)
+      ? { totalErrors: { increment: amount } }
+      : {})
+  };
+}
+
+async function persistItemProgress(input: {
+  transaction: Prisma.TransactionClient;
+  jobId: string;
+  cursor: BlingProductImportJobCursor;
+  status: BlingProductImportItemStatus;
+  amount?: number;
+}) {
+  const amount = input.amount ?? 1;
+  const progress = nextProgress(input.cursor.progress, input.status, amount);
+  const cursor = { ...input.cursor, progress };
+  await input.transaction.erpSyncJob.update({
+    where: { id: input.jobId },
+    data: {
+      ...jobCounterUpdate(input.status, amount),
+      lastCursor: JSON.stringify(cursor)
+    }
+  });
+  return cursor;
+}
+
+async function upsertImportDraft(
+  transaction: Prisma.TransactionClient,
+  product: NormalizedBlingProduct,
+  organizationId: string,
+  erpConnectionId: string,
+  connectionId: string,
+  importStatus: BlingProductImportItemStatus
+) {
+  const data = draftData(product, organizationId, erpConnectionId, connectionId);
+  return transaction.blingProductImportDraft.upsert({
+    where: {
+      organizationId_blingConnectionId_externalId: {
+        organizationId,
+        blingConnectionId: connectionId,
+        externalId: product.externalProductId
+      }
+    },
+    create: { ...data, importStatus },
+    update: { ...data, importStatus }
+  });
+}
+
+async function resolveMatchInTransaction(
+  transaction: Prisma.TransactionClient,
+  input: {
+    organizationId: string;
+    connectionId: string;
+    product: NormalizedBlingProduct;
+  }
+) {
+  const mapping = await transaction.productExternalMapping.findFirst({
+    where: {
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      externalProductId: input.product.externalProductId
+    },
+    select: { id: true, productId: true }
+  });
+  if (mapping) {
+    return {
+      mappingId: mapping.id,
+      match: resolveBlingProductImportMatch({
+        mappedProductId: mapping.productId,
+        sku: input.product.sku,
+        gtin: input.product.gtin
+      })
+    };
+  }
+
+  const sku = input.product.sku?.trim() || null;
+  const skuCandidates = sku
+    ? await transaction.product.findMany({
+        where: { organizationId: input.organizationId, sku },
+        select: { id: true },
+        take: 2
+      })
+    : [];
+  const normalizedGtin = normalizeGtin(input.product.gtin);
+  const gtinCandidates =
+    skuCandidates.length === 0
+    && normalizedGtin
+    && isValidGtin(normalizedGtin)
+      ? await transaction.product.findMany({
+          where: { organizationId: input.organizationId, ean: normalizedGtin },
+          select: { id: true },
+          take: 2
+        })
+      : [];
+
+  return {
+    mappingId: null,
+    match: resolveBlingProductImportMatch({
+      sku,
+      gtin: normalizedGtin,
+      skuCandidates,
+      gtinCandidates
+    })
+  };
+}
+
+async function updateMatchedProduct(
+  transaction: Prisma.TransactionClient,
+  input: {
+    organizationId: string;
+    connectionId: string;
+    productId: string;
+    product: NormalizedBlingProduct;
+  }
+) {
+  const current = await transaction.product.findFirst({
+    where: { id: input.productId, organizationId: input.organizationId },
+    select: {
+      id: true,
+      sku: true,
+      ean: true,
+      name: true,
+      description: true,
+      category: true,
+      brand: true,
+      ncm: true,
+      weight: true,
+      height: true,
+      width: true,
+      depth: true,
+      source: true,
+      attributes: true
+    }
+  });
+  if (!current) throw new Error("O produto vinculado nao pertence a organizacao atual.");
+
+  let nextSku = current.sku;
+  const remoteSku = input.product.sku?.trim() || null;
+  if (remoteSku && remoteSku !== current.sku) {
+    const conflict = await transaction.product.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        sku: remoteSku,
+        id: { not: current.id }
+      },
+      select: { id: true }
+    });
+    if (!conflict) nextSku = remoteSku;
+  }
+  const normalizedRemoteGtin = normalizeGtin(input.product.gtin);
+  const nextEan =
+    normalizedRemoteGtin && isValidGtin(normalizedRemoteGtin)
+      ? normalizedRemoteGtin
+      : current.ean;
+  const nextBrand = resolveProductBrandFromBling(current.brand, input.product.brand);
+  const update: Prisma.ProductUncheckedUpdateInput = {};
+  if (nextSku !== current.sku) update.sku = nextSku;
+  if (nextEan !== current.ean) update.ean = nextEan;
+  if (input.product.name !== current.name) update.name = input.product.name;
+  if (input.product.description !== current.description) update.description = input.product.description;
+  if (input.product.category !== current.category) update.category = input.product.category;
+  if (nextBrand !== current.brand) update.brand = nextBrand;
+  if (input.product.ncm !== current.ncm) update.ncm = input.product.ncm;
+  if (!sameNullableNumber(current.weight, input.product.weight)) update.weight = input.product.weight;
+  if (!sameNullableNumber(current.height, input.product.height)) update.height = input.product.height;
+  if (!sameNullableNumber(current.width, input.product.width)) update.width = input.product.width;
+  if (!sameNullableNumber(current.depth, input.product.depth)) update.depth = input.product.depth;
+  if (current.source !== "BLING") update.source = "BLING";
+
+  const nextAttributes = safeProductAttributes(current.attributes, input.product, input.connectionId);
+  if (
+    JSON.stringify(blingAttributeIdentity(current.attributes))
+    !== JSON.stringify(blingAttributeIdentity(nextAttributes))
+  ) {
+    update.attributes = nextAttributes;
+  }
+
+  const productChanged = Object.keys(update).length > 0;
+  if (productChanged) {
+    await transaction.product.update({
+      where: { id: current.id },
+      data: update
+    });
+  }
+  const priceChanged = await updateLocalPrice(
+    transaction,
+    input.organizationId,
+    current.id,
+    input.product
+  );
+  const inventoryChanged = await updateLocalInventory(
+    transaction,
+    input.organizationId,
+    input.connectionId,
+    current.id,
+    input.product.stock
+  );
+  return productChanged || priceChanged || inventoryChanged;
+}
+
+async function applyProduct(input: {
+  organizationId: string;
+  connectionId: string;
+  erpConnectionId: string;
+  jobId: string;
+  page: number;
+  product: NormalizedBlingProduct;
+  cursor: BlingProductImportJobCursor;
+}) {
+  return prisma.$transaction(async (transaction) => {
+    const resolved = await resolveMatchInTransaction(transaction, input);
+    if (resolved.match.kind === "NEEDS_REVIEW") {
+      await upsertImportDraft(
+        transaction,
+        input.product,
+        input.organizationId,
+        input.erpConnectionId,
+        input.connectionId,
+        "NEEDS_REVIEW"
+      );
+      const cursor = await persistItemProgress({
+        transaction,
+        jobId: input.jobId,
+        cursor: input.cursor,
+        status: "NEEDS_REVIEW"
+      });
+      return { status: "NEEDS_REVIEW" as const, cursor };
+    }
+
+    if (resolved.match.kind === "CREATE") {
+      const normalizedGtin = normalizeGtin(input.product.gtin);
+      const createdProduct = await transaction.product.create({
+        data: {
+          organizationId: input.organizationId,
+          sku: input.product.sku?.trim() || null,
+          ean: normalizedGtin && isValidGtin(normalizedGtin) ? normalizedGtin : null,
+          name: input.product.name,
+          description: input.product.description,
+          category: input.product.category,
+          brand: normalizeProductBrand(input.product.brand),
+          ncm: input.product.ncm,
+          status: "DRAFT",
+          enrichmentStatus: "IMPORTED",
+          syncStatus: "NOT_SYNCED",
+          source: "BLING",
+          weight: input.product.weight,
+          height: input.product.height,
+          width: input.product.width,
+          depth: input.product.depth,
+          attributes: safeProductAttributes(null, input.product, input.connectionId)
+        },
+        select: { id: true }
+      });
+      await transaction.productExternalMapping.create({
+        data: {
+          organizationId: input.organizationId,
+          productId: createdProduct.id,
+          connectionId: input.connectionId,
+          externalProductId: input.product.externalProductId,
+          lastExternalSyncAt: new Date()
+        }
+      });
+      await updateLocalPrice(transaction, input.organizationId, createdProduct.id, input.product);
+      await updateLocalInventory(
+        transaction,
+        input.organizationId,
+        input.connectionId,
+        createdProduct.id,
+        input.product.stock
+      );
+      await upsertImportDraft(
+        transaction,
+        input.product,
+        input.organizationId,
+        input.erpConnectionId,
+        input.connectionId,
+        "CREATED"
+      );
+      const cursor = await persistItemProgress({
+        transaction,
+        jobId: input.jobId,
+        cursor: input.cursor,
+        status: "CREATED"
+      });
+      return { status: "CREATED" as const, cursor };
+    }
+
+    if (!resolved.match.productId) throw new Error("Identidade local do produto nao foi resolvida.");
+    const changed = await updateMatchedProduct(transaction, {
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      productId: resolved.match.productId,
+      product: input.product
+    });
+
+    let status: BlingProductImportItemStatus;
+    if (resolved.match.kind === "SKU") status = "LINKED_BY_SKU";
+    else if (resolved.match.kind === "GTIN") status = "LINKED_BY_GTIN";
+    else status = changed ? "UPDATED" : "NO_CHANGES";
+
+    if (resolved.match.kind === "SKU" || resolved.match.kind === "GTIN") {
+      await transaction.productExternalMapping.create({
+        data: {
+          organizationId: input.organizationId,
+          productId: resolved.match.productId,
+          connectionId: input.connectionId,
+          externalProductId: input.product.externalProductId,
+          lastExternalSyncAt: new Date()
+        }
+      });
+    } else if (resolved.mappingId) {
+      await transaction.productExternalMapping.update({
+        where: { id: resolved.mappingId },
+        data: { lastExternalSyncAt: new Date() }
+      });
+    }
+    await upsertImportDraft(
+      transaction,
+      input.product,
+      input.organizationId,
+      input.erpConnectionId,
+      input.connectionId,
+      status
+    );
+    const cursor = await persistItemProgress({
+      transaction,
+      jobId: input.jobId,
+      cursor: input.cursor,
+      status
+    });
+    return { status, cursor };
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+}
+
+async function recordFailedProduct(input: {
+  organizationId: string;
+  connectionId: string;
+  erpConnectionId: string;
+  jobId: string;
+  product: NormalizedBlingProduct;
+  cursor: BlingProductImportJobCursor;
+}) {
+  return prisma.$transaction(async (transaction) => {
+    await upsertImportDraft(
+      transaction,
+      input.product,
+      input.organizationId,
+      input.erpConnectionId,
+      input.connectionId,
+      "FAILED"
+    );
+    return persistItemProgress({
+      transaction,
+      jobId: input.jobId,
+      cursor: input.cursor,
+      status: "FAILED"
+    });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
 
 async function applyPage(input: {
@@ -828,138 +1492,70 @@ async function applyPage(input: {
   jobId: string;
   page: number;
   products: NormalizedBlingProduct[];
-  sourceRowCount: number;
-  totalReportedByBling: number | null;
+  invalidRows: number;
+  cursor: BlingProductImportJobCursor;
 }) {
-  return prisma.$transaction(async (transaction) => {
-    let created = 0;
-    let updated = 0;
-    let ignored = 0;
-    const errors = 0;
-
-    for (const product of input.products) {
-      const draft = draftData(product, input.organizationId, input.erpConnectionId, input.connectionId);
-      const draftRecord = await transaction.blingProductImportDraft.upsert({
-          where: {
-            organizationId_blingConnectionId_externalId: {
-              organizationId: input.organizationId,
-              blingConnectionId: input.connectionId,
-              externalId: product.externalProductId
-            }
-          },
-          create: { ...draft, importStatus: "PENDING" },
-          update: draft
+  let cursor = await processBlingImportItemsIndependently({
+    items: input.products,
+    initialState: input.cursor,
+    processItem: async (product, currentCursor) => {
+      const result = await applyProduct({
+        organizationId: input.organizationId,
+        connectionId: input.connectionId,
+        erpConnectionId: input.erpConnectionId,
+        jobId: input.jobId,
+        page: input.page,
+        product,
+        cursor: currentCursor
       });
-
-      const mapping = await transaction.productExternalMapping.findUnique({
-          where: {
-            connectionId_externalProductId: {
-              connectionId: input.connectionId,
-              externalProductId: product.externalProductId
-            }
-          },
-          include: { product: { select: { id: true, sku: true, brand: true, attributes: true } } }
-      });
-
-      if (mapping) {
-        let nextSku = mapping.product.sku;
-        if (product.sku && product.sku !== mapping.product.sku) {
-          const conflict = await transaction.product.findFirst({
-              where: { organizationId: input.organizationId, sku: product.sku, id: { not: mapping.product.id } },
-              select: { id: true }
-          });
-          if (!conflict) nextSku = product.sku;
-        }
-        await transaction.product.update({
-            where: { id: mapping.product.id },
-            data: {
-              sku: nextSku,
-              ean: product.gtin,
-              name: product.name,
-              description: product.description,
-              category: product.category,
-              brand: resolveProductBrandFromBling(mapping.product.brand, product.brand),
-              ncm: product.ncm,
-              weight: product.weight,
-              height: product.height,
-              width: product.width,
-              depth: product.depth,
-              source: "BLING",
-              attributes: safeProductAttributes(mapping.product.attributes, product, input.connectionId)
-            }
-        });
-        await updateLocalPrice(transaction, input.organizationId, mapping.product.id, product);
-        await updateLocalInventory(transaction, input.organizationId, input.connectionId, mapping.product.id, product.stock);
-        await transaction.productExternalMapping.update({ where: { id: mapping.id }, data: { lastExternalSyncAt: new Date() } });
-        await transaction.blingProductImportDraft.update({ where: { id: draftRecord.id }, data: { importStatus: "IMPORTED" } });
-        updated += 1;
-        continue;
-      }
-
-      const skuConflict = product.sku
-        ? await transaction.product.findFirst({ where: { organizationId: input.organizationId, sku: product.sku }, select: { id: true } })
-        : null;
-      if (skuConflict) {
-        await transaction.blingProductImportDraft.update({
-            where: { organizationId_blingConnectionId_externalId: { organizationId: input.organizationId, blingConnectionId: input.connectionId, externalId: product.externalProductId } },
-            data: { importStatus: "REVIEW_REQUIRED" }
-        });
-        ignored += 1;
-        continue;
-      }
-
-      const createdProduct = await transaction.product.create({
-          data: {
-            organizationId: input.organizationId,
-            sku: product.sku,
-            ean: product.gtin,
-            name: product.name,
-            description: product.description,
-            category: product.category,
-            brand: normalizeProductBrand(product.brand),
-            ncm: product.ncm,
-            status: "DRAFT",
-            enrichmentStatus: "IMPORTED",
-            syncStatus: "NOT_SYNCED",
-            source: "BLING",
-            weight: product.weight,
-            height: product.height,
-            width: product.width,
-            depth: product.depth,
-            attributes: safeProductAttributes(null, product, input.connectionId),
-            mappings: {
-              create: {
-                organizationId: input.organizationId,
-                connectionId: input.connectionId,
-                externalProductId: product.externalProductId,
-                lastExternalSyncAt: new Date()
-              }
-            }
-          }
-      });
-      await updateLocalPrice(transaction, input.organizationId, createdProduct.id, product);
-      await updateLocalInventory(transaction, input.organizationId, input.connectionId, createdProduct.id, product.stock);
-      await transaction.blingProductImportDraft.update({
-          where: { organizationId_blingConnectionId_externalId: { organizationId: input.organizationId, blingConnectionId: input.connectionId, externalId: product.externalProductId } },
-          data: { importStatus: "IMPORTED" }
-      });
-      created += 1;
-    }
-
-    await transaction.erpSyncJob.update({
-      where: { id: input.jobId },
-      data: {
-        totalFetched: { increment: input.products.length },
-        totalCreatedDrafts: { increment: created },
-        totalUpdatedDrafts: { increment: updated },
-        totalExistingProducts: { increment: ignored },
-        totalErrors: { increment: errors },
-        currentPage: input.page + 1,
-        lastCursor: JSON.stringify({ page: input.page, sourceRows: input.sourceRowCount, totalReported: input.totalReportedByBling })
-      }
-    });
-    return { created, updated, ignored, errors };
+      return result.cursor;
+    },
+    recordFailure: (product, currentCursor) =>
+      recordFailedProduct({
+        organizationId: input.organizationId,
+        connectionId: input.connectionId,
+        erpConnectionId: input.erpConnectionId,
+        jobId: input.jobId,
+        product,
+        cursor: currentCursor
+      })
   });
+
+  if (input.invalidRows > 0) {
+    cursor = await prisma.$transaction((transaction) =>
+      persistItemProgress({
+        transaction,
+        jobId: input.jobId,
+        cursor,
+        status: "INVALID",
+        amount: input.invalidRows
+      })
+    );
+  }
+  return cursor;
+}
+
+function parseBlingProductImportJobCursor(value: string | null): BlingProductImportJobCursor | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as BlingProductImportJobCursor;
+    if (
+      parsed.version !== 1
+      || !Array.isArray(parsed.preview?.pageCounts)
+      || !parsed.preview.pageCounts.every(validNonNegativeInteger)
+      || !validNonNegativeInteger(parsed.preview.total)
+      || !parsed.preview.summary
+      || !Object.values(parsed.preview.summary).every(validNonNegativeInteger)
+      || !parsed.progress
+      || !Object.values(parsed.progress).every(validNonNegativeInteger)
+      || !validNonNegativeInteger(parsed.page)
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 export type BlingImportPreviewProof = {
@@ -984,6 +1580,7 @@ type BlingImportPreviewFingerprintInput = BlingImportPreviewProof & {
   newProducts: number;
   importable: number;
   skuConflicts: number;
+  matchSummary: BlingProductImportMatchSummary;
 };
 
 const latestPreviewCorrelations = new Map<string, string>();
@@ -1042,7 +1639,8 @@ export function createBlingImportPreviewFingerprint(
     existing: input.existing,
     newProducts: input.newProducts,
     importable: input.importable,
-    skuConflicts: input.skuConflicts
+    skuConflicts: input.skuConflicts,
+    matchSummary: input.matchSummary
   })).digest("hex");
 }
 
@@ -1058,6 +1656,7 @@ export function createBlingImportPreviewConfirmation(
     newProducts: number;
     importable: number;
     skuConflicts: number;
+    matchSummary: BlingProductImportMatchSummary;
   },
   now = new Date()
 ) {
@@ -1068,14 +1667,15 @@ export function createBlingImportPreviewConfirmation(
     existing: input.existing,
     newProducts: input.newProducts,
     importable: input.importable,
-    skuConflicts: input.skuConflicts
+    skuConflicts: input.skuConflicts,
+    matchSummary: input.matchSummary
   });
   if (recalculatedFingerprint !== input.previewFingerprint) {
     throw new Error("A prova da previa nao corresponde ao fingerprint informado.");
   }
   registerBlingImportPreviewCorrelation(input);
   const confirmation: BlingImportPreviewConfirmation = {
-    version: 2,
+    version: 3,
     operation: "BLING_PRODUCT_IMPORT_PREVIEW",
     userId: input.userId,
     organizationId: input.organizationId,
@@ -1086,6 +1686,7 @@ export function createBlingImportPreviewConfirmation(
     newProducts: input.newProducts,
     importable: input.importable,
     skuConflicts: input.skuConflicts,
+    matchSummary: input.matchSummary,
     previewFingerprint: input.previewFingerprint,
     issuedAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + previewConfirmationLifetimeMs).toISOString()
@@ -1175,6 +1776,24 @@ export function verifyBlingImportPreviewConfirmation(
           invalidCount: confirmation.invalidCount
         })
       : null;
+    const validMatchSummary =
+      Boolean(confirmation.matchSummary)
+      && Object.values(confirmation.matchSummary).every(validNonNegativeInteger)
+      && confirmation.matchSummary.updatedByMapping
+        + confirmation.matchSummary.linkedBySku
+        + confirmation.matchSummary.linkedByGtin
+        + confirmation.matchSummary.created
+        + confirmation.matchSummary.needsReview === confirmation.uniqueIdsCount
+      && confirmation.existing === confirmation.matchSummary.updatedByMapping
+      && confirmation.newProducts === confirmation.matchSummary.created
+      && confirmation.importable ===
+        confirmation.matchSummary.updatedByMapping
+        + confirmation.matchSummary.linkedBySku
+        + confirmation.matchSummary.linkedByGtin
+        + confirmation.matchSummary.created
+      && confirmation.skuConflicts === confirmation.matchSummary.skuConflicts
+      && confirmation.matchSummary.skuConflicts
+        + confirmation.matchSummary.gtinConflicts === confirmation.matchSummary.needsReview;
     const recalculatedFingerprint = createBlingImportPreviewFingerprint({
       correlationId: confirmation.correlationId,
       connectionId: confirmation.connectionId,
@@ -1193,10 +1812,11 @@ export function verifyBlingImportPreviewConfirmation(
       existing: confirmation.existing,
       newProducts: confirmation.newProducts,
       importable: confirmation.importable,
-      skuConflicts: confirmation.skuConflicts
+      skuConflicts: confirmation.skuConflicts,
+      matchSummary: confirmation.matchSummary
     });
     if (
-      confirmation.version !== 2
+      confirmation.version !== 3
       || confirmation.operation !== "BLING_PRODUCT_IMPORT_PREVIEW"
       || confirmation.userId !== input.userId
       || confirmation.organizationId !== input.organizationId
@@ -1218,7 +1838,7 @@ export function verifyBlingImportPreviewConfirmation(
       || !validNonNegativeInteger(confirmation.duplicateCount)
       || !validNonNegativeInteger(confirmation.invalidCount)
       || confirmation.duplicateCount !== 0
-      || confirmation.invalidCount !== 0
+      || !validMatchSummary
       || !validTotalSource
       || proofValidation?.proofMatches !== true
       || !/^[a-f0-9]{64}$/.test(confirmation.listFingerprint)
@@ -1254,8 +1874,9 @@ export class BlingProductImportService {
   }): Promise<BlingProductDryRun> {
     const startedAt = Date.now();
     registerBlingImportPreviewCorrelation(input);
+    let connection: Awaited<ReturnType<typeof validateConnection>>;
     try {
-      await validateConnection(input.organizationId, input.connectionId);
+      connection = await validateConnection(input.organizationId, input.connectionId);
     } catch (error) {
       throw new BlingImportPreviewError(
         "A conexao Bling nao esta pronta para a consulta.",
@@ -1326,16 +1947,13 @@ export class BlingProductImportService {
       );
     }
 
-    let mappings: Map<string, string>;
-    let skuConflicts: Set<string>;
+    let matching: Awaited<ReturnType<typeof classifyBlingProductsForConnection>>;
     try {
-      mappings = await loadMappings(
-        input.organizationId,
-        input.connectionId,
-        products.map((product) => product.externalProductId)
-      );
-      const mappedIdsForComparison = new Set(mappings.keys());
-      skuConflicts = await loadSkuConflicts(input.organizationId, products, mappedIdsForComparison);
+      matching = await classifyBlingProductsForConnection({
+        organizationId: input.organizationId,
+        connectionId: input.connectionId,
+        products
+      });
     } catch (error) {
       throw new BlingImportPreviewError(
         "A comparacao local obrigatoria nao foi concluida.",
@@ -1361,11 +1979,13 @@ export class BlingProductImportService {
         })
       );
     }
-    const mappedIds = new Set(mappings.keys());
-    const conflictCount = products.filter((product) => !mappedIds.has(product.externalProductId) && product.sku && skuConflicts.has(product.sku)).length;
-    const existing = mappedIds.size;
-    const newProducts = products.length - existing - conflictCount;
-    const importable = existing + newProducts;
+    const existing = matching.summary.updatedByMapping;
+    const newProducts = matching.summary.created;
+    const importable =
+      matching.summary.updatedByMapping
+      + matching.summary.linkedBySku
+      + matching.summary.linkedByGtin
+      + matching.summary.created;
     const proof: BlingImportPreviewProof = {
       pageSize,
       firstPage: integrity.firstPage,
@@ -1387,7 +2007,8 @@ export class BlingProductImportService {
       existing,
       newProducts,
       importable,
-      skuConflicts: conflictCount
+      skuConflicts: matching.summary.skuConflicts,
+      matchSummary: matching.summary
     });
     const confirmation = createBlingImportPreviewConfirmation({
       userId: input.userId,
@@ -1399,17 +2020,20 @@ export class BlingProductImportService {
       existing,
       newProducts,
       importable,
-      skuConflicts: conflictCount
+      skuConflicts: matching.summary.skuConflicts,
+      matchSummary: matching.summary
     });
 
     return {
       connectionReady: true,
+      connectionId: connection.id,
+      connectionName: connection.name,
       correlationId: input.correlationId,
       reportedTotal: integrity.reportedTotal,
       derivedTotal: integrity.derivedTotal,
       totalSource: integrity.totalSource,
       totalReportedByBling: fetched.totalReportedByBling,
-      totalFound: products.length,
+      totalFound: products.length + fetched.invalidRows,
       pagesFound: fetched.pagesFound,
       pagesCompleted: fetched.completedPages.length,
       pagesExpected: integrity.pagesExpected,
@@ -1425,14 +2049,28 @@ export class BlingProductImportService {
       active: products.filter((product) => product.status === "A").length,
       inactive: products.filter((product) => product.status !== "A").length,
       withoutSku: products.filter((product) => !product.sku).length,
+      withoutGtin: products.filter((product) => {
+        const gtin = normalizeGtin(product.gtin);
+        return !gtin || !isValidGtin(gtin);
+      }).length,
       existing,
       new: newProducts,
-      wouldUpdate: existing,
+      wouldUpdate:
+        matching.summary.updatedByMapping
+        + matching.summary.linkedBySku
+        + matching.summary.linkedByGtin,
       importable,
+      updatedByMapping: matching.summary.updatedByMapping,
+      linkedBySku: matching.summary.linkedBySku,
+      linkedByGtin: matching.summary.linkedByGtin,
+      wouldCreate: matching.summary.created,
+      needsReview: matching.summary.needsReview,
+      invalid: fetched.invalidRows,
       errors: fetched.errors,
-      ignored: conflictCount + fetched.errors,
+      ignored: matching.summary.needsReview + fetched.errors,
       duplicateExternalIds,
-      skuConflicts: conflictCount,
+      skuConflicts: matching.summary.skuConflicts,
+      gtinConflicts: matching.summary.gtinConflicts,
       completed: true,
       paginationComplete: true,
       previewComplete: true,
@@ -1455,7 +2093,7 @@ export class BlingProductImportService {
     confirmationToken: string;
   }) {
     const startedAt = Date.now();
-    consumeBlingImportPreviewConfirmation(input.confirmationToken, input);
+    const confirmation = consumeBlingImportPreviewConfirmation(input.confirmationToken, input);
     try {
       await validateConnection(input.organizationId, input.connectionId);
       const erpConnection = await prisma.eRPConnection.findUnique({
@@ -1466,8 +2104,10 @@ export class BlingProductImportService {
 
       const recentLease = new Date(Date.now() - staleJobLeaseMs);
       const lockKey = `bling-products:${input.organizationId}:${input.connectionId}`;
-      return await prisma.$transaction(async (transaction) => {
-        await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+      const job = await prisma.$transaction(async (transaction) => {
+        await transaction.$queryRaw<Array<{ lockState: string }>>`
+          SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS "lockState"
+        `;
         const existingJob = await transaction.erpSyncJob.findFirst({
           where: {
             organizationId: input.organizationId,
@@ -1490,10 +2130,31 @@ export class BlingProductImportService {
             provider: ERPProvider.BLING,
             type: "PRODUCTS_FULL_SYNC",
             status: "PENDING",
-            currentPage: 1
+            currentPage: 1,
+            lastCursor: JSON.stringify({
+              version: 1,
+              preview: {
+                total: confirmation.uniqueIdsCount + confirmation.invalidCount,
+                pageCounts: confirmation.pageCounts,
+                summary: confirmation.matchSummary,
+                invalid: confirmation.invalidCount
+              },
+              progress: emptyImportProgress(),
+              page: 1
+            } satisfies BlingProductImportJobCursor)
           },
-          select: { id: true, status: true, currentPage: true }
+          select: {
+            id: true,
+            status: true,
+            currentPage: true,
+            lastCursor: true
+          }
         });
+      });
+      return this.getJobStatus({
+        organizationId: input.organizationId,
+        connectionId: input.connectionId,
+        jobId: job.id
       });
     } catch (error) {
       if (error instanceof BlingImportPreviewError) throw error;
@@ -1541,18 +2202,19 @@ export class BlingProductImportService {
         organizationId: input.organizationId,
         blingConnectionId: input.connectionId,
         type: "PRODUCTS_FULL_SYNC",
-        OR: [
-          { status: { in: ["PENDING", "FAILED"] } },
-          { status: "PROCESSING", updatedAt: { lt: staleBefore } }
-        ]
+        status: "PENDING"
       }
     });
     if (!job) throw new Error("Sincronizacao nao encontrada, ja concluida ou em andamento.");
     await validateConnection(input.organizationId, input.connectionId);
+    const initialCursor = parseBlingProductImportJobCursor(job.lastCursor);
+    if (!initialCursor) throw new Error("O plano da sincronizacao nao esta integro.");
 
     const lockKey = `bling-products:${input.organizationId}:${input.connectionId}`;
     const claimed = await prisma.$transaction(async (transaction) => {
-      await transaction.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+      await transaction.$queryRaw<Array<{ lockState: string }>>`
+        SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS "lockState"
+      `;
       const competingJob = await transaction.erpSyncJob.findFirst({
         where: {
           id: { not: job.id },
@@ -1571,47 +2233,60 @@ export class BlingProductImportService {
           organizationId: input.organizationId,
           blingConnectionId: input.connectionId,
           type: "PRODUCTS_FULL_SYNC",
-          OR: [
-            { status: { in: ["PENDING", "FAILED"] } },
-            { status: "PROCESSING", updatedAt: { lt: staleBefore } }
-          ]
+          status: "PENDING"
         },
         data: { status: "PROCESSING", startedAt: job.startedAt ?? new Date(), errorMessage: null }
       });
     });
     if (claimed.count !== 1) throw new Error("Esta sincronizacao ja esta em andamento.");
 
-    let page = Math.max(1, job.currentPage);
-    let totalReportedByBling: number | null = null;
+    const page = Math.max(1, job.currentPage);
     try {
-      await this.reconcileProductStatuses({
+      const expectedPageCount = initialCursor.preview.pageCounts[page - 1];
+      if (expectedPageCount === undefined) {
+        throw new Error("A pagina solicitada nao pertence a previa confirmada.");
+      }
+      const payload = await fetchCatalogPage({
         organizationId: input.organizationId,
         connectionId: input.connectionId,
-        confirm: true
+        page,
+        readOnly: false
       });
-
-      for (; page <= maxSafetyPages; page += 1) {
-        const payload = await fetchCatalogPage({ organizationId: input.organizationId, connectionId: input.connectionId, page, readOnly: false });
-        const normalized = normalizePage(payload);
-        totalReportedByBling = normalized.totalReported ?? totalReportedByBling;
-        await applyPage({
-          organizationId: input.organizationId,
-          connectionId: input.connectionId,
-          erpConnectionId: job.erpConnectionId,
-          jobId: job.id,
-          page,
-          products: normalized.products,
-          sourceRowCount: normalized.sourceRowCount,
-          totalReportedByBling
-        });
-
-        if (normalized.sourceRowCount < pageSize) break;
+      const normalized = normalizePage(payload);
+      if (normalized.sourceRowCount !== expectedPageCount) {
+        throw new Error("A pagina atual diverge da previa confirmada.");
       }
+      const cursor = await applyPage({
+        organizationId: input.organizationId,
+        connectionId: input.connectionId,
+        erpConnectionId: job.erpConnectionId,
+        jobId: job.id,
+        page,
+        products: normalized.products,
+        invalidRows: normalized.invalidRows,
+        cursor: initialCursor
+      });
+      const completed = page >= initialCursor.preview.pageCounts.length;
+      const nextCursor = { ...cursor, page: page + 1 };
 
-      await prisma.$transaction([
-        prisma.erpSyncJob.update({ where: { id: job.id }, data: { status: "COMPLETED", finishedAt: new Date(), errorMessage: null } }),
-        prisma.blingConnection.update({ where: { id: input.connectionId }, data: { lastProductSyncAt: new Date() } })
-      ]);
+      await prisma.$transaction(async (transaction) => {
+        await transaction.erpSyncJob.update({
+          where: { id: job.id },
+          data: {
+            status: completed ? "COMPLETED" : "PENDING",
+            currentPage: page + 1,
+            finishedAt: completed ? new Date() : null,
+            errorMessage: null,
+            lastCursor: JSON.stringify(nextCursor)
+          }
+        });
+        if (completed) {
+          await transaction.blingConnection.updateMany({
+            where: { id: input.connectionId, organizationId: input.organizationId },
+            data: { lastProductSyncAt: new Date() }
+          });
+        }
+      });
       return this.getJobStatus(input);
     } catch (error) {
       await prisma.erpSyncJob.update({
@@ -1636,11 +2311,30 @@ export class BlingProductImportService {
         currentPage: true,
         startedAt: true,
         finishedAt: true,
-        errorMessage: true
+        errorMessage: true,
+        lastCursor: true
       }
     });
     if (!job) throw new Error("Sincronizacao nao encontrada.");
-    return job;
+    const cursor = parseBlingProductImportJobCursor(job.lastCursor);
+    return {
+      ...job,
+      previewTotal: cursor?.preview.total ?? 0,
+      updatedByMapping: cursor?.preview.summary.updatedByMapping ?? 0,
+      plannedLinkedBySku: cursor?.preview.summary.linkedBySku ?? 0,
+      plannedLinkedByGtin: cursor?.preview.summary.linkedByGtin ?? 0,
+      plannedCreated: cursor?.preview.summary.created ?? 0,
+      plannedNeedsReview: cursor?.preview.summary.needsReview ?? 0,
+      processed: cursor?.progress.processed ?? job.totalFetched,
+      created: cursor?.progress.created ?? job.totalCreatedDrafts,
+      updated: cursor?.progress.updated ?? job.totalUpdatedDrafts,
+      linkedBySku: cursor?.progress.linkedBySku ?? 0,
+      linkedByGtin: cursor?.progress.linkedByGtin ?? 0,
+      noChanges: cursor?.progress.noChanges ?? 0,
+      needsReview: cursor?.progress.needsReview ?? 0,
+      invalid: cursor?.progress.invalid ?? 0,
+      failed: cursor?.progress.failed ?? job.totalErrors
+    };
   }
 }
 

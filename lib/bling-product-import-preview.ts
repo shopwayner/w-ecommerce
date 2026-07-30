@@ -358,7 +358,6 @@ export function evaluateBlingImportPreviewIntegrity(input: {
     if (laterHasData && count < pageSize) pushReason(reasons, "PAGE_GAP");
   });
 
-  if (input.invalidRows > 0) pushReason(reasons, "INVALID_PRODUCT_DATA");
   if (input.duplicateExternalIds > 0) pushReason(reasons, "DUPLICATE_EXTERNAL_ID");
   if (input.reportedTotalInvalid) pushReason(reasons, "TOTAL_MISMATCH");
   if (input.totalChangedDuringFetch) pushReason(reasons, "TOTAL_MISMATCH");
@@ -376,7 +375,7 @@ export function evaluateBlingImportPreviewIntegrity(input: {
     if (!reportedTotalValid) pushReason(reasons, "TOTAL_MISMATCH");
     pagesExpected = expectedPagesFromTotal(input.totalReportedByBling, pageSize) ?? 0;
     if (
-      input.uniqueProductsLoaded !== input.totalReportedByBling
+      input.uniqueProductsLoaded + input.invalidRows !== input.totalReportedByBling
       || input.sourceRowsFetched !== input.totalReportedByBling
       || input.completedPages.length !== pagesExpected
     ) {
@@ -407,14 +406,14 @@ export function evaluateBlingImportPreviewIntegrity(input: {
 
     if (shortPageTermination) {
       totalSource = "DERIVED_SHORT_PAGE";
-      derivedTotal = input.uniqueProductsLoaded;
+      derivedTotal = input.sourceRowsFetched;
     } else if (emptySentinelTermination) {
       const previousCount = precedingCounts.at(-1);
       totalSource =
         typeof previousCount === "number" && previousCount > 0 && previousCount < pageSize
           ? "DERIVED_SHORT_PAGE"
           : "DERIVED_EMPTY_SENTINEL";
-      derivedTotal = input.uniqueProductsLoaded;
+      derivedTotal = input.sourceRowsFetched;
     } else {
       pushReason(reasons, "PAGINATION_NOT_TERMINATED");
     }
@@ -434,7 +433,6 @@ export function evaluateBlingImportPreviewIntegrity(input: {
     "INVALID_PAGE_COUNT",
     "BLING_REQUEST_FAILED",
     "PAGE_GAP",
-    "INVALID_PRODUCT_DATA",
     "DUPLICATE_EXTERNAL_ID",
     "TOTAL_MISMATCH"
   ]);
