@@ -31,6 +31,7 @@ import {
   GripVertical,
   ImageIcon,
   ImagePlus,
+  Loader2,
   Maximize2,
   Minimize2,
   Package,
@@ -406,6 +407,41 @@ const ProductTitleAiTrigger = memo(function ProductTitleAiTrigger({
   );
 });
 
+const ProductDescriptionAiTrigger = memo(function ProductDescriptionAiTrigger({
+  disabled,
+  loading,
+  onClick
+}: {
+  disabled: boolean;
+  loading: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <span className="group/description-ai relative inline-flex shrink-0">
+      <button
+        aria-describedby="product-description-ai-tooltip"
+        aria-label="Gerar descrição com IA"
+        className="inline-flex h-8 min-w-[3.5rem] shrink-0 items-center justify-center rounded-md border border-matrix-gold/35 bg-matrix-goldSoft/25 px-2.5 text-xs font-bold text-matrix-goldDark transition hover:border-matrix-gold/70 hover:bg-matrix-goldSoft/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold disabled:cursor-not-allowed disabled:opacity-55"
+        disabled={disabled}
+        onClick={onClick}
+        title="Gerar descrição com IA"
+        type="button"
+      >
+        {loading ? (
+          <><Loader2 className="h-3.5 w-3.5 animate-spin" />Gerando...</>
+        ) : "✦ IA"}
+      </button>
+      <span
+        className="pointer-events-none invisible absolute right-0 top-full z-30 mt-2 w-max max-w-[min(15rem,calc(100vw-2rem))] rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-medium text-matrix-fg opacity-0 shadow-glow transition group-hover/description-ai:visible group-hover/description-ai:opacity-100 group-focus-within/description-ai:visible group-focus-within/description-ai:opacity-100"
+        id="product-description-ai-tooltip"
+        role="tooltip"
+      >
+        Gerar descrição com IA
+      </span>
+    </span>
+  );
+});
+
 const ProductDetailsFieldsGrid = memo(function ProductDetailsFieldsGrid({
   aiDisabled,
   aiError,
@@ -712,12 +748,16 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
   const [searchingMercadoLivrePhotos, setSearchingMercadoLivrePhotos] = useState(false);
   const [titleAiLoading, setTitleAiLoading] = useState(false);
   const [titleAiError, setTitleAiError] = useState<string | null>(null);
+  const [descriptionAiLoading, setDescriptionAiLoading] = useState(false);
+  const [descriptionAiError, setDescriptionAiError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const saveInFlight = useRef(false);
   const pointerDragImageId = useRef<string | null>(null);
   const titleAiRequest = useRef<AbortController | null>(null);
+  const descriptionAiRequest = useRef<AbortController | null>(null);
   const generatedTitleHistory = useRef<Set<string>>(new Set());
+  const generatedDescriptionHistory = useRef<Set<string>>(new Set());
   const nameInputRef = useRef<HTMLInputElement>(null);
   const nameDraftRef = useRef(form.name);
   const descriptionDraftRef = useRef(form.description);
@@ -727,6 +767,13 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     generatedTitleHistory.current.clear();
     setTitleAiLoading(false);
     setTitleAiError(null);
+  }, []);
+  const resetDescriptionAiSession = useCallback(() => {
+    descriptionAiRequest.current?.abort();
+    descriptionAiRequest.current = null;
+    generatedDescriptionHistory.current.clear();
+    setDescriptionAiLoading(false);
+    setDescriptionAiError(null);
   }, []);
 
   const baselineForm = useMemo(() => formFromProduct(currentProduct), [currentProduct]);
@@ -745,7 +792,10 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
   }, [hasPendingChanges, onBack, saving]);
 
   useEffect(() => {
-    return () => titleAiRequest.current?.abort();
+    return () => {
+      titleAiRequest.current?.abort();
+      descriptionAiRequest.current?.abort();
+    };
   }, []);
 
   useEffect(() => {
@@ -839,6 +889,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
   const updateDescriptionDraft = useCallback((value: string) => {
     descriptionDraftRef.current = value;
     updateDirtyField("description", value);
+    setDescriptionAiError(null);
     setError(null);
     setFeedback(null);
   }, [updateDirtyField]);
@@ -910,6 +961,95 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
       }
     }
   }, [currentProduct.id, form, updateDirtyField]);
+
+  const generateDescription = useCallback(async () => {
+    if (descriptionAiRequest.current) return;
+    const currentDescription = sanitizeProductDescription(descriptionDraftRef.current);
+    const savedDescription = sanitizeProductDescription(baselineForm.description);
+    if (
+      currentDescription &&
+      currentDescription !== savedDescription &&
+      !window.confirm(
+        "A descrição possui alterações não salvas. Deseja substituí-las por uma nova descrição gerada com IA?"
+      )
+    ) {
+      return;
+    }
+
+    const controller = new AbortController();
+    descriptionAiRequest.current = controller;
+    setDescriptionAiLoading(true);
+    setDescriptionAiError(null);
+    setError(null);
+    setFeedback(null);
+
+    try {
+      const generatedDescriptions = [...generatedDescriptionHistory.current];
+      const response = await fetch(
+        `/api/products/${currentProduct.id}/ai/description`,
+        {
+          method: "POST",
+          signal: controller.signal
+        }
+      );
+      const payload = (await response.json()) as {
+        html?: string;
+        code?: string;
+        error?: string;
+        usedWebSearch?: boolean;
+        warnings?: string[];
+        evidenceLevel?: "LOCAL_ONLY" | "LOCAL_AND_WEB";
+      };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Não foi possível gerar a descrição.");
+      }
+      const nextDescription = sanitizeProductDescription(payload.html);
+      if (!nextDescription || nextDescription.length > 12_000) {
+        throw new Error("A IA não retornou uma descrição válida.");
+      }
+      const normalizedDescription = nextDescription
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLocaleLowerCase("pt-BR");
+      if (
+        normalizedDescription === currentDescription
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLocaleLowerCase("pt-BR") ||
+        generatedDescriptions.some((previousDescription) => (
+          previousDescription
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLocaleLowerCase("pt-BR") === normalizedDescription
+        ))
+      ) {
+        throw new Error("A IA repetiu uma descrição desta sessão.");
+      }
+
+      generatedDescriptionHistory.current.add(nextDescription);
+      descriptionDraftRef.current = nextDescription;
+      setForm((current) => ({ ...current, description: nextDescription }));
+      updateDirtyField("description", nextDescription);
+      setDescriptionEditorResetKey((current) => current + 1);
+      setDescriptionAiError(null);
+      setError(null);
+      setFeedback(null);
+    } catch (caughtError) {
+      if (controller.signal.aborted) return;
+      setDescriptionAiError(
+        caughtError instanceof Error &&
+          caughtError.message ===
+            "Geração de descrição com IA está temporariamente desativada."
+          ? caughtError.message
+          : "Não foi possível gerar a descrição agora. Tente novamente."
+      );
+    } finally {
+      if (descriptionAiRequest.current === controller) {
+        descriptionAiRequest.current = null;
+        setDescriptionAiLoading(false);
+      }
+    }
+  }, [baselineForm.description, currentProduct.id, updateDirtyField]);
 
   const reorderImage = useCallback((fromId: string, toId: string) => {
     if (!editing || fromId === toId) return;
@@ -991,10 +1131,11 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     setBaselineImageKeys(nextImages.map(imageStateKey));
     setSelectedImageId(nextImages[0]?.id ?? null);
     resetTitleAiSession();
+    resetDescriptionAiSession();
     setEditing(true);
     setFeedback(null);
     setError(null);
-  }, [currentProduct, resetTitleAiSession]);
+  }, [currentProduct, resetDescriptionAiSession, resetTitleAiSession]);
 
   const openTitleAiExperience = useCallback(() => {
     if (titleAiRequest.current) return;
@@ -1002,6 +1143,12 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     requestAnimationFrame(() => nameInputRef.current?.focus());
     void generateTitleSuggestion();
   }, [beginEditing, editing, generateTitleSuggestion]);
+
+  const openDescriptionAiExperience = useCallback(() => {
+    if (descriptionAiRequest.current) return;
+    if (!editing) beginEditing();
+    void generateDescription();
+  }, [beginEditing, editing, generateDescription]);
 
   const cancelEdit = useCallback(() => {
     const nextImages = orderedImages(currentProduct);
@@ -1018,11 +1165,12 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     setBaselineImageKeys(nextImages.map(imageStateKey));
     setSelectedImageId(nextImages[0]?.id ?? null);
     resetTitleAiSession();
+    resetDescriptionAiSession();
     setEditing(false);
     setConfirmingSave(false);
     setError(null);
     setFeedback(null);
-  }, [currentProduct, resetTitleAiSession]);
+  }, [currentProduct, resetDescriptionAiSession, resetTitleAiSession]);
 
   function buildPayload() {
     const latestForm = {
@@ -1110,6 +1258,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
       setBaselineImageKeys(nextImages.map(imageStateKey));
       setSelectedImageId(nextImages[0]?.id ?? null);
       resetTitleAiSession();
+      resetDescriptionAiSession();
       onProductUpdated(nextProduct);
       setEditing(false);
       setConfirmingSave(false);
@@ -1180,27 +1329,46 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
 
           <section className="mt-3 min-w-0 rounded-lg border border-matrix-border bg-matrix-panel2/65 p-4 [content-visibility:auto] [contain-intrinsic-size:auto_14rem]">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2 text-sm font-semibold"><FileText className="h-4 w-4 text-matrix-goldDark" />Descricao</div>
-              <button
-                aria-expanded={isDescriptionExpanded}
-                aria-label={isDescriptionExpanded ? "Recolher descricao" : "Expandir descricao"}
-                className="inline-flex items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-semibold text-matrix-goldDark transition hover:border-matrix-gold/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold"
-                onClick={() => setIsDescriptionExpanded((current) => !current)}
-                title={isDescriptionExpanded ? "Recolher descricao" : "Expandir descricao"}
-                type="button"
-              >
-                {isDescriptionExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-                {isDescriptionExpanded ? "Recolher" : "Expandir"}
-              </button>
+              <div className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                <FileText className="h-4 w-4 shrink-0 text-matrix-goldDark" />
+                Descrição
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                {canEditProduct ? (
+                  <ProductDescriptionAiTrigger
+                    disabled={saving || descriptionAiLoading}
+                    loading={descriptionAiLoading}
+                    onClick={openDescriptionAiExperience}
+                  />
+                ) : null}
+                <button
+                  aria-expanded={isDescriptionExpanded}
+                  aria-label={isDescriptionExpanded ? "Recolher descrição" : "Expandir descrição"}
+                  className="inline-flex items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-semibold text-matrix-goldDark transition hover:border-matrix-gold/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold"
+                  onClick={() => setIsDescriptionExpanded((current) => !current)}
+                  title={isDescriptionExpanded ? "Recolher descrição" : "Expandir descrição"}
+                  type="button"
+                >
+                  {isDescriptionExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                  {isDescriptionExpanded ? "Recolher" : "Expandir"}
+                </button>
+              </div>
             </div>
             {editing ? (
-              <ProductDescriptionEditor
-                disabled={saving}
-                expanded={isDescriptionExpanded}
-                initialValue={form.description}
-                onDraftChange={updateDescriptionDraft}
-                resetKey={descriptionEditorResetKey}
-              />
+              <>
+                <ProductDescriptionEditor
+                  disabled={saving || descriptionAiLoading}
+                  expanded={isDescriptionExpanded}
+                  initialValue={form.description}
+                  onDraftChange={updateDescriptionDraft}
+                  resetKey={descriptionEditorResetKey}
+                />
+                {descriptionAiError ? (
+                  <p className="mt-2 text-xs font-semibold text-red-700" role="alert">
+                    {descriptionAiError}
+                  </p>
+                ) : null}
+              </>
             ) : (
               <div
                 className={`matrix-scroll mt-3 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-6 [&_li]:ml-5 [&_ol]:list-decimal [&_p+p]:mt-3 [&_ul]:list-disc ${
@@ -1217,7 +1385,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
           <p className="text-xs text-matrix-muted">{editing ? "As mudancas permanecem locais ate a confirmacao do salvamento." : !canEditProduct ? "Seu usuario pode visualizar, mas nao editar produtos." : "Visualizacao do cadastro local do W Ecommerce."}</p>
           <div className="grid grid-cols-2 gap-2 sm:flex sm:justify-end">
             {editing ? (
-              <><Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">Cancelar</Button><Button disabled={saving || !hasPendingChanges || !nameIsValid} onClick={requestSave} type="button"><Save className="h-4 w-4" />{saving ? "Salvando produto..." : "Salvar produto"}</Button></>
+              <><Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">Cancelar</Button><Button disabled={saving || titleAiLoading || descriptionAiLoading || !hasPendingChanges || !nameIsValid} onClick={requestSave} type="button"><Save className="h-4 w-4" />{saving ? "Salvando produto..." : "Salvar produto"}</Button></>
             ) : <><Button onClick={requestClose} type="button" variant="secondary"><ArrowLeft className="h-4 w-4" />Voltar para produtos</Button>{canEditProduct ? <Button onClick={beginEditing} type="button"><Edit3 className="h-4 w-4" />Editar</Button> : null}</>}
           </div>
         </footer>
@@ -1234,7 +1402,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
         />
       ) : null}
 
-          {confirmingSave ? <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4"><div className="w-full max-w-lg rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-glow"><div className="flex gap-3"><AlertTriangle className="h-5 w-5 shrink-0 text-matrix-goldDark" /><div><h3 className="text-lg font-bold">Salvar produto?</h3><p className="mt-2 text-sm leading-6 text-matrix-muted">As alteracoes serao gravadas somente no W Ecommerce. Para envia-las ao Bling, selecione o produto na lista e use Atualizar selecionados no Bling.</p></div></div><div className="mt-5 flex justify-end gap-2"><Button disabled={saving} onClick={() => setConfirmingSave(false)} type="button" variant="secondary">Voltar</Button><Button disabled={saving} onClick={() => void confirmSave()} type="button">{saving ? "Salvando produto..." : "Salvar produto"}</Button></div></div></div> : null}
+          {confirmingSave ? <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4"><div className="w-full max-w-lg rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-glow"><div className="flex gap-3"><AlertTriangle className="h-5 w-5 shrink-0 text-matrix-goldDark" /><div><h3 className="text-lg font-bold">Salvar produto?</h3><p className="mt-2 text-sm leading-6 text-matrix-muted">As alteracoes serao gravadas somente no W Ecommerce. Para envia-las ao Bling, selecione o produto na lista e use Atualizar selecionados no Bling.</p></div></div><div className="mt-5 flex justify-end gap-2"><Button disabled={saving} onClick={() => setConfirmingSave(false)} type="button" variant="secondary">Voltar</Button><Button disabled={saving || titleAiLoading || descriptionAiLoading} onClick={() => void confirmSave()} type="button">{saving ? "Salvando produto..." : "Salvar produto"}</Button></div></div></div> : null}
 
       {confirmingDiscard ? <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4"><div className="w-full max-w-md rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-glow"><h3 className="text-lg font-bold">Descartar alteracoes?</h3><p className="mt-2 text-sm leading-6 text-matrix-muted">A ordem e as fotos removidas serao restauradas na visualizacao e nada sera salvo.</p><div className="mt-5 flex justify-end gap-2"><Button onClick={() => setConfirmingDiscard(false)} type="button" variant="secondary">Continuar editando</Button><Button onClick={onBack} type="button"><Trash2 className="h-4 w-4" />Descartar</Button></div></div></div> : null}
     </div>
