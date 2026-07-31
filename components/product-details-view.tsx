@@ -43,8 +43,10 @@ import {
   X
 } from "lucide-react";
 import { Button } from "@/components/ui";
+import { ProductDescriptionEditor } from "@/components/product-description-editor";
 import { INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES } from "@/lib/intelligent-product-preview";
 import { normalizeMercadoLivreReferenceImageUrl } from "@/lib/mercado-livre-reference-images";
+import { sanitizeProductDescription } from "@/lib/product-description";
 import {
   applyProductTitleSuggestion,
   buildProductDetailsPatch,
@@ -154,27 +156,6 @@ function productAttributeValue(attributes: unknown, aliases: string[]) {
     }
   }
   return null;
-}
-
-function sanitizeDescription(value: string | null | undefined) {
-  if (!value?.trim()) return "";
-  return value
-    .replace(/<\s*(script|style)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, " ")
-    .replace(/<\s*br\b[^>]*>/gi, "\n")
-    .replace(/<\/?\s*(p|div|section|article|li|h[1-6])\b[^>]*>/gi, "\n")
-    .replace(/<[^>]*>/g, " ")
-    .replace(/&nbsp;|&#160;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, "\"")
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .map((line) => line.replace(/[ \t]+/g, " ").trim())
-    .filter(Boolean)
-    .join("\n")
-    .trim();
 }
 
 function displayText(value: string | number | null | undefined, emptyLabel = "Nao informado") {
@@ -319,7 +300,7 @@ function formFromProduct(product: ProductDetailsProduct): ProductDetailsEditForm
     itemsPerBox: product.itemsPerBox,
     dimensionUnit: product.dimensionUnit,
     packagingGtin: product.packagingGtin,
-    description: sanitizeDescription(product.description)
+    description: sanitizeProductDescription(product.description)
   });
 }
 
@@ -709,11 +690,12 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
   saveProduct?: (productId: string, payload: unknown) => Promise<T>;
 }) {
   const [currentProduct, setCurrentProduct] = useState<T>(product);
-  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+  const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
   const [editing, setEditing] = useState(initialEditing && canEditProduct);
   const [form, setForm] = useState<ProductDetailsEditForm>(() => formFromProduct(product));
   const [dirtyFields, setDirtyFields] = useState<Set<keyof ProductDetailsEditForm>>(() => new Set());
   const [nameEditorResetKey, setNameEditorResetKey] = useState(0);
+  const [descriptionEditorResetKey, setDescriptionEditorResetKey] = useState(0);
   const [nameIsValid, setNameIsValid] = useState(() => {
     const length = formFromProduct(product).name.trim().length;
     return length >= 2 && length <= PRODUCT_DETAILS_NAME_MAX_LENGTH;
@@ -738,6 +720,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
   const generatedTitleHistory = useRef<Set<string>>(new Set());
   const nameInputRef = useRef<HTMLInputElement>(null);
   const nameDraftRef = useRef(form.name);
+  const descriptionDraftRef = useRef(form.description);
   const resetTitleAiSession = useCallback(() => {
     titleAiRequest.current?.abort();
     titleAiRequest.current = null;
@@ -779,9 +762,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
 
   const statusText = statusLabels[currentProduct.status] ?? displayText(currentProduct.status);
   const originText = displayText(currentProduct.origin ?? currentProduct.source ?? (getBlingName(currentProduct) ? "BLING" : null));
-  const description = editing ? form.description : sanitizeDescription(currentProduct.description);
-  const canToggleDescription = !editing && (description.length > 360 || description.split(/\r?\n/).length > 4);
-  const descriptionCollapsed = canToggleDescription && !descriptionExpanded;
+  const description = sanitizeProductDescription(currentProduct.description);
   const dimensionUnit = dimensionUnitAbbreviation(currentProduct.dimensionUnit);
 
   const detailValues = useMemo<Record<ProductDetailsFieldId, string | number | null | undefined>>(() => ({
@@ -852,6 +833,12 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
       return current === next ? current : next;
     });
     setTitleAiError(null);
+    setError(null);
+    setFeedback(null);
+  }, [updateDirtyField]);
+  const updateDescriptionDraft = useCallback((value: string) => {
+    descriptionDraftRef.current = value;
+    updateDirtyField("description", value);
     setError(null);
     setFeedback(null);
   }, [updateDirtyField]);
@@ -993,8 +980,10 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     const nextForm = formFromProduct(currentProduct);
     setForm(nextForm);
     nameDraftRef.current = nextForm.name;
+    descriptionDraftRef.current = nextForm.description;
     setDirtyFields(new Set());
     setNameEditorResetKey((current) => current + 1);
+    setDescriptionEditorResetKey((current) => current + 1);
     setNameIsValid(nextForm.name.trim().length >= 2 && nextForm.name.trim().length <= PRODUCT_DETAILS_NAME_MAX_LENGTH);
     const nextImages = orderedImages(currentProduct);
     setImages(nextImages);
@@ -1019,8 +1008,10 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     const nextForm = formFromProduct(currentProduct);
     setForm(nextForm);
     nameDraftRef.current = nextForm.name;
+    descriptionDraftRef.current = nextForm.description;
     setDirtyFields(new Set());
     setNameEditorResetKey((current) => current + 1);
+    setDescriptionEditorResetKey((current) => current + 1);
     setNameIsValid(nextForm.name.trim().length >= 2 && nextForm.name.trim().length <= PRODUCT_DETAILS_NAME_MAX_LENGTH);
     setImages(nextImages);
     setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
@@ -1034,7 +1025,11 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
   }, [currentProduct, resetTitleAiSession]);
 
   function buildPayload() {
-    const latestForm = form.name === nameDraftRef.current ? form : { ...form, name: nameDraftRef.current };
+    const latestForm = {
+      ...form,
+      name: nameDraftRef.current,
+      description: descriptionDraftRef.current
+    };
     const fieldsResult = buildProductDetailsPatch(baselineForm, latestForm);
     if ("error" in fieldsResult) return fieldsResult;
     const keptImageIds = images.filter((image) => !image.pending).map((image) => image.id);
@@ -1105,8 +1100,10 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
       setCurrentProduct(nextProduct);
       setForm(nextForm);
       nameDraftRef.current = nextForm.name;
+      descriptionDraftRef.current = nextForm.description;
       setDirtyFields(new Set());
       setNameEditorResetKey((current) => current + 1);
+      setDescriptionEditorResetKey((current) => current + 1);
       setNameIsValid(nextForm.name.trim().length >= 2 && nextForm.name.trim().length <= PRODUCT_DETAILS_NAME_MAX_LENGTH);
       setImages(nextImages);
       setBaselineImageIds(nextImages.filter((image) => !image.pending).map((image) => image.id));
@@ -1181,9 +1178,37 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
             onOpenTitleAi={openTitleAiExperience}
           />
 
-          <section className="mt-3 rounded-lg border border-matrix-border bg-matrix-panel2/65 p-4 [content-visibility:auto] [contain-intrinsic-size:auto_14rem]">
-            <div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2 text-sm font-semibold"><FileText className="h-4 w-4 text-matrix-goldDark" />Descricao</div>{canToggleDescription ? <button aria-expanded={descriptionExpanded} className="inline-flex items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-semibold text-matrix-goldDark" onClick={() => setDescriptionExpanded((current) => !current)} type="button">{descriptionExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}{descriptionExpanded ? "Recolher" : "Expandir"}</button> : null}</div>
-            {editing ? <textarea className="mt-3 min-h-44 w-full resize-y rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-sm leading-6 outline-none focus:border-matrix-gold/70 focus:ring-2 focus:ring-matrix-gold/20" onChange={(event) => updateField("description", event.target.value)} value={form.description} /> : <div className={`relative mt-3 ${descriptionCollapsed ? "max-h-28 overflow-hidden" : ""}`}><p className="whitespace-pre-line break-words text-sm leading-6">{description || "Nao informado"}</p>{descriptionCollapsed ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-matrix-panel2 to-transparent" /> : null}</div>}
+          <section className="mt-3 min-w-0 rounded-lg border border-matrix-border bg-matrix-panel2/65 p-4 [content-visibility:auto] [contain-intrinsic-size:auto_14rem]">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-sm font-semibold"><FileText className="h-4 w-4 text-matrix-goldDark" />Descricao</div>
+              <button
+                aria-expanded={isDescriptionExpanded}
+                aria-label={isDescriptionExpanded ? "Recolher descricao" : "Expandir descricao"}
+                className="inline-flex items-center gap-2 rounded-md border border-matrix-border bg-matrix-panel px-2.5 py-1.5 text-xs font-semibold text-matrix-goldDark transition hover:border-matrix-gold/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold"
+                onClick={() => setIsDescriptionExpanded((current) => !current)}
+                title={isDescriptionExpanded ? "Recolher descricao" : "Expandir descricao"}
+                type="button"
+              >
+                {isDescriptionExpanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                {isDescriptionExpanded ? "Recolher" : "Expandir"}
+              </button>
+            </div>
+            {editing ? (
+              <ProductDescriptionEditor
+                disabled={saving}
+                expanded={isDescriptionExpanded}
+                initialValue={form.description}
+                onDraftChange={updateDescriptionDraft}
+                resetKey={descriptionEditorResetKey}
+              />
+            ) : (
+              <div
+                className={`matrix-scroll mt-3 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-6 [&_li]:ml-5 [&_ol]:list-decimal [&_p+p]:mt-3 [&_ul]:list-disc ${
+                  isDescriptionExpanded ? "h-[70vh] min-h-80" : "max-h-72 min-h-56"
+                }`}
+                dangerouslySetInnerHTML={{ __html: description || "Nao informado" }}
+              />
+            )}
           </section>
           </>
         </main>

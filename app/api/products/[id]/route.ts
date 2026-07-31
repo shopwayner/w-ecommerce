@@ -19,6 +19,7 @@ import {
   readCanonicalBlingStatusFromAttributes
 } from "@/lib/services/bling-product-import-service";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
+import { normalizeProductDescriptionForStorage } from "@/lib/product-description";
 import { productUpdateSchema } from "@/lib/validation";
 
 function normalizeOptionalText(value: string | null | undefined) {
@@ -390,7 +391,9 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
   const metadata = getMetadata(existing.blockedFields);
   const imageUrl = normalizeOptionalText(parsed.data.imageUrl);
-  const description = normalizeOptionalText(parsed.data.description);
+  const description = parsed.data.description === undefined
+    ? undefined
+    : normalizeProductDescriptionForStorage(parsed.data.description);
   let imageUpdatePlan: ReturnType<typeof validateProductImageUpdate> | null = null;
 
   if (parsed.data.images) {
