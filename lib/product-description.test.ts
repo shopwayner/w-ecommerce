@@ -109,6 +109,81 @@ test("normalizes CRLF without removing blank lines", () => {
   assert.equal(sanitizeProductDescription("Um\r\n\r\nDois"), "Um\n\nDois");
 });
 
+test("normalizes a simple marked paragraph list as one compact list", () => {
+  assert.equal(
+    sanitizeProductDescription("<p>\u2022 Marca: Andaluz</p><p>\u2022 Material: PVC</p>"),
+    "<ul><li>Marca: Andaluz</li><li>Material: PVC</li></ul>"
+  );
+});
+
+test("normalizes a long list without adding paragraphs between items", () => {
+  const input = Array.from(
+    { length: 12 },
+    (_, index) => `<p>- Item ${index + 1}</p>`
+  ).join("");
+  const result = sanitizeProductDescription(input);
+
+  assert.equal(result.match(/<li>/g)?.length, 12);
+  assert.doesNotMatch(result, /<\/li>\s*<p>/);
+});
+
+test("keeps a paragraph after a compact list", () => {
+  assert.equal(
+    sanitizeProductDescription("<p>* Item A</p><p>* Item B</p><p>Observacao final.</p>"),
+    "<ul><li>Item A</li><li>Item B</li></ul><p>Observacao final.</p>"
+  );
+});
+
+test("keeps a paragraph before a compact list", () => {
+  assert.equal(
+    sanitizeProductDescription("<p>Ficha Tecnica:</p><p>\u2022 Marca: Andaluz</p><p>\u2022 Material: PVC</p>"),
+    "<p>Ficha Tecnica:</p><ul><li>Marca: Andaluz</li><li>Material: PVC</li></ul>"
+  );
+});
+
+test("keeps two lists separated by a title", () => {
+  assert.equal(
+    sanitizeProductDescription(
+      "<p>\u2022 Marca: Andaluz</p><p>\u2022 Material: PVC</p><p>Aplicacoes:</p><p>- Uso residencial</p><p>* Uso industrial</p>"
+    ),
+    "<ul><li>Marca: Andaluz</li><li>Material: PVC</li></ul><p>Aplicacoes:</p><ul><li>Uso residencial</li><li>Uso industrial</li></ul>"
+  );
+});
+
+test("compacts a list pasted from Bling block elements", () => {
+  assert.equal(
+    sanitizeProductDescription(
+      "<div>\u2022 Marca: Andaluz</div><div>\u2022 Modelo: Abracadeira</div><div>\u2022 Material: PVC</div>"
+    ),
+    "<ul><li>Marca: Andaluz</li><li>Modelo: Abracadeira</li><li>Material: PVC</li></ul>"
+  );
+});
+
+test("preserves inline bold content inside compact list items", () => {
+  assert.equal(
+    sanitizeProductDescription(
+      "<p>\u2022 <strong>Marca:</strong> Andaluz</p><p>\u2022 <strong>Material:</strong> PVC</p>"
+    ),
+    "<ul><li><strong>Marca:</strong> Andaluz</li><li><strong>Material:</strong> PVC</li></ul>"
+  );
+});
+
+test("preserves real blank lines between list sections", () => {
+  assert.equal(
+    sanitizeProductDescription(
+      "<p>Ficha Tecnica:</p><p>\u2022 Marca: Andaluz</p><p>\u2022 Material: PVC</p><p><br></p><p>Aplicacoes:</p><p>\u2022 Uso residencial</p><p>\u2022 Uso industrial</p>"
+    ),
+    "<p>Ficha Tecnica:</p><ul><li>Marca: Andaluz</li><li>Material: PVC</li></ul><p><br /></p><p>Aplicacoes:</p><ul><li>Uso residencial</li><li>Uso industrial</li></ul>"
+  );
+});
+
+test("does not merge ordinary consecutive paragraphs", () => {
+  assert.equal(
+    sanitizeProductDescription("<p>Primeiro paragrafo.</p><p>Segundo paragrafo.</p>"),
+    "<p>Primeiro paragrafo.</p><p>Segundo paragrafo.</p>"
+  );
+});
+
 test("builds a local description patch with formatted content", () => {
   const baseline = createProductDetailsEditForm({ name: "Produto", description: "Texto" });
   assert.deepEqual(buildProductDetailsPatch(baseline, {

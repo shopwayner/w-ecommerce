@@ -32,9 +32,25 @@ const productDescriptionSanitizeOptions: sanitizeHtml.IOptions = {
   }
 };
 
+const markedParagraphSequencePattern =
+  /(?:<p>\s*[\u2022*-](?:\s|&nbsp;)+[\s\S]*?<\/p>\s*)+/g;
+const markedParagraphPattern =
+  /<p>\s*[\u2022*-](?:\s|&nbsp;)+([\s\S]*?)<\/p>/g;
+
+function normalizeMarkedParagraphLists(value: string) {
+  return value.replace(markedParagraphSequencePattern, (sequence) => {
+    const items = Array.from(sequence.matchAll(markedParagraphPattern), ([, item]) => item.trim());
+    return `<ul>${items.map((item) => `<li>${item}</li>`).join("")}</ul>`;
+  });
+}
+
 export function sanitizeProductDescription(value: string | null | undefined) {
   if (!value) return "";
-  return sanitizeHtml(value.replace(/\r\n?/g, "\n"), productDescriptionSanitizeOptions).trim();
+  const sanitized = sanitizeHtml(
+    value.replace(/\r\n?/g, "\n"),
+    productDescriptionSanitizeOptions
+  ).trim();
+  return normalizeMarkedParagraphLists(sanitized);
 }
 
 export function productDescriptionHasVisibleContent(value: string | null | undefined) {
