@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireApiAuth } from "@/lib/auth/api";
-import { can } from "@/lib/auth/permissions";
+import { hasSystemPermission } from "@/lib/auth/system-superuser";
 import {
   BlingImportPreviewError,
   publicBlingImportPreviewErrorMessage,
@@ -230,7 +230,10 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!can(auth.context.role, "products:write") || !can(auth.context.role, "integrations:write")) {
+    if (
+      !hasSystemPermission(auth.context, "products:write")
+      || !hasSystemPermission(auth.context, "integrations:write")
+    ) {
       return NextResponse.json({ error: "Permissao insuficiente." }, { status: 403 });
     }
 

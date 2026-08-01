@@ -1,6 +1,7 @@
 import { MarketplaceProvider } from "@prisma/client";
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 import { prisma } from "@/lib/prisma";
 import { decryptSecret } from "@/lib/security/encryption";
 
@@ -65,10 +66,6 @@ class MercadoLivreApiError extends Error {
     this.name = "MercadoLivreApiError";
     this.status = status;
   }
-}
-
-function canManageMarketplace(role: string) {
-  return role === "OWNER" || role === "ADMIN";
 }
 
 function wholesaleExternalWriteEnabled() {
@@ -331,14 +328,14 @@ function buildWholesaleUpdatePayload(input: {
   };
 }
 
-async function wholesalePayload(item: MercadoLivreItem, accessToken: string, input: { role: string }) {
+async function wholesalePayload(item: MercadoLivreItem, accessToken: string, input: { canManage: boolean }) {
   const sellerSku =
     item.seller_custom_field?.trim() ||
     item.variations?.find((variation) => variation.seller_custom_field?.trim())?.seller_custom_field?.trim() ||
     null;
   const simulations = await Promise.all(sampleQuantities.map((quantity) => fetchSalePriceSimulation(item.id, accessToken, quantity)));
   const externalWrite = wholesaleExternalWriteEnabled();
-  const canManage = canManageMarketplace(input.role);
+  const canManage = input.canManage;
   const currentPrices = await fetchItemPrices(item.id, accessToken).catch(() => null);
   const prices = officialWholesalePricesFromPrices(currentPrices);
   const canEdit = externalWrite && canManage && hasPreservableBasePrice(currentPrices);
@@ -403,7 +400,7 @@ export async function GET(_request: Request, { params }: Params) {
     }
 
     const { item, accessToken } = await loadOwnedItem(auth.context.organizationId, itemId);
-    return NextResponse.json(await wholesalePayload(item, accessToken, { role: auth.context.role }));
+    return NextResponse.json(await wholesalePayload(item, accessToken, { canManage: hasAdministrativeAccess(auth.context) }));
   } catch (error) {
     const message = safeErrorMessage(error);
     const status = error instanceof MercadoLivreApiError ? error.status : statusForError(message);
@@ -414,7 +411,7 @@ export async function GET(_request: Request, { params }: Params) {
 export async function PATCH(request: Request, { params }: Params) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
-  if (!canManageMarketplace(auth.context.role)) {
+  if (!hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Permissao insuficiente", externalWrite: false, canEdit: false }, { status: 403 });
   }
   if (!wholesaleExternalWriteEnabled()) {
@@ -455,7 +452,7 @@ export async function PATCH(request: Request, { params }: Params) {
       }
     );
 
-    const nextPayload = await wholesalePayload(item, accessToken, { role: auth.context.role });
+    const nextPayload = await wholesalePayload(item, accessToken, { canManage: true });
     return NextResponse.json({
       ...nextPayload,
       changedFields: ["wholesalePrices"],

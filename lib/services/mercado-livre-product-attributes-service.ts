@@ -1,6 +1,7 @@
 import { MarketplaceProductAttributeSource, MarketplaceProductAttributeStatus, Prisma } from "@prisma/client";
 import ExcelJS from "exceljs";
 import type { TenantContext } from "@/lib/auth/server";
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 import { prisma } from "@/lib/prisma";
 import { createAuditLog } from "@/lib/services/audit-log-service";
 import { normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
@@ -1456,7 +1457,7 @@ export async function applyMercadoLivreAttributeAISuggestions(
   if (input.confirm !== MERCADO_LIVRE_ATTRIBUTES_AI_SUGGESTIONS_CONFIRMATION) {
     throw new Error("Confirmacao obrigatoria para salvar sugestoes de IA Mercado Livre.");
   }
-  if (!["OWNER", "ADMIN"].includes(authContext.role)) {
+  if (!hasAdministrativeAccess(authContext)) {
     throw new Error("Somente OWNER ou ADMIN pode salvar sugestoes de atributos Mercado Livre.");
   }
 

@@ -52,7 +52,13 @@ export async function GET(request: NextRequest) {
         return publicResultRedirect("connected-import-failed");
       }
     }
-    return publicResultRedirect(result.mode === "reconnect" ? "reconnected" : "connected");
+    return publicResultRedirect(
+      result.mode === "reauthorize"
+        ? "reauthorized"
+        : result.mode === "reconnect"
+          ? "reconnected"
+          : "connected"
+    );
   } catch (callbackError) {
     if (callbackError instanceof BlingAccountAlreadyConnectedError) {
       return publicResultRedirect("already-connected");

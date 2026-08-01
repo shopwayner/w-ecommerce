@@ -7,6 +7,7 @@ import {
   updateMembershipRole
 } from "@/lib/services/settings-membership-service";
 import { settingsMembershipRemovalSchema, settingsMembershipRoleSchema } from "@/lib/validation";
+import { effectiveAdministrativeRole } from "@/lib/auth/system-superuser";
 
 function errorResponse(error: unknown) {
   if (error instanceof SettingsMembershipError) {
@@ -42,7 +43,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ me
     const membership = await updateMembershipRole({
       organizationId: auth.context.organizationId,
       actorUserId: auth.context.user.id,
-      actorRole: auth.context.role,
+      actorRole: effectiveAdministrativeRole(auth.context),
       membershipId,
       nextRole: parsed.data.role
     });
@@ -72,7 +73,7 @@ export async function DELETE(request: Request, { params }: { params: Promise<{ m
     const result = await removeMembership({
       organizationId: auth.context.organizationId,
       actorUserId: auth.context.user.id,
-      actorRole: auth.context.role,
+      actorRole: effectiveAdministrativeRole(auth.context),
       membershipId
     });
     return NextResponse.json({ data: result, status: "removed" });

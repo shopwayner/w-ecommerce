@@ -1,5 +1,6 @@
 import { Prisma, type ConnectionStatus, type OrganizationStatus, type Role, type UserStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { isSystemSuperuserSubject } from "@/lib/auth/system-superuser";
 
 export const DEFAULT_BLING_CONNECTION_LIMIT = 1;
 export const BLING_COUNTED_CONNECTION_STATUSES = [
@@ -7,7 +8,7 @@ export const BLING_COUNTED_CONNECTION_STATUSES = [
   "PENDING",
   "EXPIRED",
   "ERROR",
-  "DISABLED"
+  "DISCONNECTED"
 ] as const satisfies readonly ConnectionStatus[];
 
 export type BlingConnectionEntitlement = {
@@ -46,6 +47,7 @@ type ResolveBlingConnectionEntitlementInput = {
   used: number;
   configuredLimit: number;
   allowlistValue?: string;
+  systemSuperuserAllowlistValue?: string;
 };
 
 type EntitlementDatabase = Pick<
@@ -73,11 +75,21 @@ export function resolveBlingConnectionEntitlement(
     && input.userStatus === "ACTIVE"
     && input.organizationStatus === "ACTIVE";
   const email = normalizeBlingUnlimitedOwnerEmail(input.email);
-  const unlimited = subjectIsActive
+  const systemSuperuser = isSystemSuperuserSubject({
+    email,
+    userStatus: input.userStatus,
+    organizationStatus: input.organizationStatus,
+    membershipExists: input.membershipExists,
+    sessionValid: input.membershipExists,
+    allowlistValue: input.systemSuperuserAllowlistValue
+  });
+  const unlimited = systemSuperuser || (
+    subjectIsActive
     && input.role === "OWNER"
-    && parseBlingUnlimitedOwnerEmails(input.allowlistValue).has(email);
+    && parseBlingUnlimitedOwnerEmails(input.allowlistValue).has(email)
+  );
   const canManageConnections = subjectIsActive
-    && (input.role === "OWNER" || input.role === "ADMIN");
+    && (systemSuperuser || input.role === "OWNER" || input.role === "ADMIN");
   const limit = Math.max(0, input.configuredLimit);
   const canCreate = canManageConnections && (unlimited || input.used < limit);
 
@@ -169,7 +181,8 @@ export class BlingConnectionEntitlementService {
       membershipExists: Boolean(membership),
       used,
       configuredLimit,
-      allowlistValue: process.env.BLING_UNLIMITED_OWNER_EMAILS
+      allowlistValue: process.env.BLING_UNLIMITED_OWNER_EMAILS,
+      systemSuperuserAllowlistValue: process.env.SYSTEM_SUPERUSER_EMAILS
     });
   }
 }

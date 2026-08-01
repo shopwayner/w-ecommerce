@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { requireApiAuth } from "@/lib/auth/api";
-import { can } from "@/lib/auth/permissions";
+import { hasSystemPermission } from "@/lib/auth/system-superuser";
 import { parseDecimalPrice } from "@/lib/decimal-price";
 import { normalizeProductBrand } from "@/lib/product-brand";
 import {
@@ -301,7 +301,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   return NextResponse.json({
     data: formatProductResponse(product),
     permissions: {
-      canEdit: can(auth.context.role, "products:write")
+      canEdit: hasSystemPermission(auth.context, "products:write")
     }
   });
 }

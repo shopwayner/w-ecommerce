@@ -1,7 +1,11 @@
 import { cookies } from "next/headers";
 import type { Organization, Role, User } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { can, type PermissionAction } from "@/lib/auth/permissions";
+import type { PermissionAction } from "@/lib/auth/permissions";
+import {
+  hasSystemPermission,
+  isSystemSuperuserContext
+} from "@/lib/auth/system-superuser";
 import { SESSION_COOKIE_NAME, verifySessionToken, type SessionPayload } from "@/lib/auth/token";
 
 export class AuthError extends Error {
@@ -92,7 +96,7 @@ export async function requireOrganization() {
 
 export async function requireRole(roles: Role[]) {
   const context = await getTenantContext();
-  if (!roles.includes(context.role)) {
+  if (!isSystemSuperuserContext(context) && !roles.includes(context.role)) {
     throw new AuthError("Permissao insuficiente.", 403);
   }
 
@@ -101,7 +105,7 @@ export async function requireRole(roles: Role[]) {
 
 export async function requirePermission(action: PermissionAction) {
   const context = await getTenantContext();
-  if (!can(context.role, action)) {
+  if (!hasSystemPermission(context, action)) {
     throw new AuthError("Permissao insuficiente.", 403);
   }
 

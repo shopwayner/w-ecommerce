@@ -82,10 +82,6 @@ export function isOfficialBlingAuthorizationUrl(value: unknown, publicOrigin?: s
   }
 }
 
-export function canManageBlingConnection(role: string) {
-  return role === "OWNER" || role === "ADMIN";
-}
-
 export function canStartBlingReconnect(connectionId: string | null, activeAction: string | null) {
   return Boolean(connectionId) && !activeAction;
 }

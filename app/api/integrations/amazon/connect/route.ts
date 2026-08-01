@@ -4,16 +4,13 @@ import {
   AMAZON_SP_API_STATE_COOKIE,
   amazonSpApiOAuthService
 } from "@/lib/services/amazon/amazon-sp-api-oauth-service";
-
-function canManageIntegration(role: string) {
-  return role === "OWNER" || role === "ADMIN";
-}
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 
 export async function GET() {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
 
-  if (!canManageIntegration(auth.context.role)) {
+  if (!hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Permissao insuficiente" }, { status: 403 });
   }
 

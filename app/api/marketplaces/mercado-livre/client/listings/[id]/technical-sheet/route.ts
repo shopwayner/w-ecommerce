@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { MarketplaceCategoryProvider, MarketplaceProvider } from "@prisma/client";
 import { requireApiAuth } from "@/lib/auth/api";
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 import { prisma } from "@/lib/prisma";
 import { decryptSecret } from "@/lib/security/encryption";
 
@@ -159,10 +160,6 @@ const protectedTechnicalSheetAttributeIds = new Set([
   "SELLER_PACKAGE_WEIGHT",
   "WEIGHT"
 ]);
-
-function canManageMarketplace(role: string) {
-  return role === "OWNER" || role === "ADMIN";
-}
 
 function mercadoLivreExternalWriteEnabled() {
   return process.env.MERCADO_LIVRE_EXTERNAL_WRITE_ENABLED === "true";
@@ -678,7 +675,7 @@ function technicalSheetResponsePayload(input: {
   categoryRow: { name: string; path: string } | null;
   categoryAttributes: MercadoLivreCategoryAttribute[];
   warnings: string[];
-  role: string;
+  canManage: boolean;
   message?: string;
 }) {
   const listing = buildListingPayload(input.item, input.categoryRow);
@@ -688,7 +685,7 @@ function technicalSheetResponsePayload(input: {
   const optionalAttributes = attributes.filter((attribute) => attribute.status === "optional" || attribute.status === "not_applicable_allowed");
   const externalWrite = mercadoLivreExternalWriteEnabled();
   const writeAvailable = technicalSheetExternalWriteEnabled();
-  const canEdit = canManageMarketplace(input.role) && externalWrite && writeAvailable;
+  const canEdit = input.canManage && externalWrite && writeAvailable;
 
   return {
     readOnly: !canEdit,
@@ -827,7 +824,7 @@ export async function GET(_request: Request, { params }: Params) {
       technicalSheetResponsePayload({
         item,
         ...categoryData,
-        role: auth.context.role
+        canManage: hasAdministrativeAccess(auth.context)
       })
     );
   } catch (error) {
@@ -840,7 +837,7 @@ export async function GET(_request: Request, { params }: Params) {
 export async function PATCH(request: Request, { params }: Params) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
-  if (!canManageMarketplace(auth.context.role)) {
+  if (!hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Permissao insuficiente.", readOnly: true, externalWrite: mercadoLivreExternalWriteEnabled(), writeAvailable: false, canEdit: false }, { status: 403 });
   }
   const externalWrite = mercadoLivreExternalWriteEnabled();
@@ -903,7 +900,7 @@ export async function PATCH(request: Request, { params }: Params) {
       technicalSheetResponsePayload({
         item: updatedItem,
         ...updatedCategoryData,
-        role: auth.context.role,
+        canManage: true,
         message: "Ficha tecnica salva com sucesso."
       })
     );
@@ -914,7 +911,7 @@ export async function PATCH(request: Request, { params }: Params) {
         error: message === "Nao foi possivel carregar a ficha tecnica completa do anuncio." ? "O Mercado Livre nao aceitou um ou mais atributos. Revise os campos destacados." : message,
         externalWrite: mercadoLivreExternalWriteEnabled(),
         writeAvailable: technicalSheetExternalWriteEnabled(),
-        canEdit: canManageMarketplace(auth.context.role) && mercadoLivreExternalWriteEnabled() && technicalSheetExternalWriteEnabled()
+        canEdit: hasAdministrativeAccess(auth.context) && mercadoLivreExternalWriteEnabled() && technicalSheetExternalWriteEnabled()
       },
       { status: statusForErrorMessage(message) }
     );

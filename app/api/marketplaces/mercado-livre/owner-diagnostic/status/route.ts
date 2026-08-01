@@ -1,15 +1,12 @@
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 import { mercadoLivreOwnerDiagnosticService } from "@/lib/services/mercado-livre-owner-diagnostic-service";
-
-function canRunOwnerDiagnostic(role: string) {
-  return role === "OWNER" || role === "ADMIN";
-}
 
 export async function GET() {
   const auth = await requireApiAuth("integrations:read");
   if (!auth.ok) return auth.response;
-  if (!canRunOwnerDiagnostic(auth.context.role)) {
+  if (!hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Permissao insuficiente" }, { status: 403 });
   }
 

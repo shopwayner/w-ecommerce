@@ -225,9 +225,9 @@ test("keeps preview and final actions visually distinct and retains backend auth
   );
   assert.doesNotMatch(modalSource, /Confirmar e adicionar fotos/);
   assert.match(routeSource, /requireApiAuth\("products:write"\)/);
-  assert.match(routeSource, /can\(auth\.context\.role, "integrations:write"\)/);
-  assert.match(routeSource, /auth\.context\.role !== "OWNER"/);
-  assert.match(routeSource, /auth\.context\.role !== "ADMIN"/);
+  assert.match(routeSource, /hasSystemPermission\(auth\.context, "integrations:write"\)/);
+  assert.match(routeSource, /hasAdministrativeAccess\(auth\.context\)/);
+  assert.doesNotMatch(routeSource, /auth\.context\.role !== "OWNER"|auth\.context\.role !== "ADMIN"/);
 });
 
 function enabledButtonStateInput() {

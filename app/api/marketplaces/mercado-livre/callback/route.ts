@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { requireApiAuth } from "@/lib/auth/api";
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 import { prisma } from "@/lib/prisma";
 import {
   MERCADO_LIVRE_OWNER_DIAGNOSTIC_NONCE_COOKIE,
@@ -47,7 +48,7 @@ async function handleOwnerDiagnosticCallback(
   input: { code: string | null; state: string; providerError: string | null }
 ) {
   const auth = await requireApiAuth("integrations:write");
-  if (!auth.ok || (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN")) {
+  if (!auth.ok || !hasAdministrativeAccess(auth.context)) {
     return clearDiagnosticNonce(
       NextResponse.redirect(getPublicRedirectUrl("/integrations?mlOwnerDiagnostic=auth-error", request))
     );

@@ -1,6 +1,7 @@
 import { MarketplaceProvider } from "@prisma/client";
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 import { prisma } from "@/lib/prisma";
 import { decryptSecret } from "@/lib/security/encryption";
 
@@ -42,10 +43,6 @@ class MercadoLivreApiError extends Error {
     this.name = "MercadoLivreApiError";
     this.status = status;
   }
-}
-
-function canManageMarketplace(role: string) {
-  return role === "OWNER" || role === "ADMIN";
 }
 
 function descriptionExternalWriteEnabled() {
@@ -176,13 +173,13 @@ async function fetchItemDescription(itemId: string, accessToken: string) {
   }
 }
 
-function descriptionPayload(item: MercadoLivreItem, description: MercadoLivreDescription | null, input: { role: string; message?: string; changedFields?: string[] }) {
+function descriptionPayload(item: MercadoLivreItem, description: MercadoLivreDescription | null, input: { canManage: boolean; message?: string; changedFields?: string[] }) {
   const sellerSku =
     item.seller_custom_field?.trim() ||
     item.variations?.find((variation) => variation.seller_custom_field?.trim())?.seller_custom_field?.trim() ||
     null;
   const externalWrite = descriptionExternalWriteEnabled();
-  const canManage = canManageMarketplace(input.role);
+  const canManage = input.canManage;
   const canEdit = externalWrite && canManage;
 
   return {
@@ -253,7 +250,7 @@ export async function GET(_request: Request, { params }: Params) {
 
     const { item, accessToken } = await loadOwnedItem(auth.context.organizationId, itemId);
     const description = await fetchItemDescription(itemId, accessToken);
-    return NextResponse.json(descriptionPayload(item, description, { role: auth.context.role, message: "Descrição disponível para consulta." }));
+    return NextResponse.json(descriptionPayload(item, description, { canManage: hasAdministrativeAccess(auth.context), message: "Descrição disponível para consulta." }));
   } catch (error) {
     const message = safeErrorMessage(error);
     const status = error instanceof MercadoLivreApiError ? error.status : statusForError(message);
@@ -264,7 +261,7 @@ export async function GET(_request: Request, { params }: Params) {
 export async function PATCH(request: Request, { params }: Params) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
-  if (!canManageMarketplace(auth.context.role)) {
+  if (!hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Permissão insuficiente.", externalWrite: false, canEdit: false, writeAvailable: false }, { status: 403 });
   }
   if (!descriptionExternalWriteEnabled()) {
@@ -308,7 +305,7 @@ export async function PATCH(request: Request, { params }: Params) {
     const confirmedDescription = await fetchItemDescription(itemId, accessToken);
     return NextResponse.json(
       descriptionPayload(item, confirmedDescription, {
-        role: auth.context.role,
+        canManage: true,
         changedFields: ["description"],
         message: "Descrição salva com sucesso."
       })

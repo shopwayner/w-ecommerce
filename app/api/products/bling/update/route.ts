@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 import { requireApiAuth } from "@/lib/auth/api";
-import { can } from "@/lib/auth/permissions";
+import { hasAdministrativeAccess, hasSystemPermission } from "@/lib/auth/system-superuser";
 import {
   blingProductUpdateRequestSchema,
   getBlingProductPatchBlock,
@@ -53,7 +53,7 @@ function safeRouteError(error: unknown) {
 export async function POST(request: Request) {
   const auth = await requireApiAuth("products:write");
   if (!auth.ok) return auth.response;
-  if (!can(auth.context.role, "integrations:write") || (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN")) {
+  if (!hasSystemPermission(auth.context, "integrations:write") || !hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Somente administradores podem atualizar produtos no Bling." }, { status: 403 });
   }
 

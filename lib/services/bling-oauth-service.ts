@@ -8,6 +8,7 @@ import {
 } from "@/lib/services/bling-oauth-url";
 import {
   assertBlingConnectionCreationAllowed,
+  BlingOAuthAuthorizationInProgressError,
   blingConnectionEntitlementService,
   reserveBlingConnectionAuthorization
 } from "@/lib/services/bling-connection-entitlement-service";
@@ -15,8 +16,16 @@ import { sanitizeLogPayload } from "@/lib/utils";
 
 const tokenUrl = "https://www.bling.com.br/Api/v3/oauth/token";
 const stateTtlMs = 10 * 60 * 1000;
-const reconnectStatePrefix = "__BLING_RECONNECT__:";
+const reauthorizeStatePrefix = "__BLING_REAUTHORIZE__:";
 const pendingConnectionStatePrefix = "__BLING_PENDING__:";
+
+export function blingOAuthStateConnectionNames(connectionId: string) {
+  return [
+    `${pendingConnectionStatePrefix}${connectionId}`,
+    `${reauthorizeStatePrefix}RECONNECT:${connectionId}`,
+    `${reauthorizeStatePrefix}REAUTHORIZE:${connectionId}`
+  ];
+}
 
 type TokenResponse = {
   access_token: string;
@@ -34,6 +43,7 @@ type OAuthStateInput = {
   connectionRole?: ConnectionRole;
   internalNotes?: string;
   reconnectConnectionId?: string;
+  reauthorizeConnectionId?: string;
 };
 
 type BlingCredentials = {
@@ -48,6 +58,12 @@ type PendingConnectionOAuthStateInput = {
   connectionName: string;
   connectionRole: ConnectionRole;
   internalNotes?: string;
+};
+
+type ResumePendingConnectionOAuthStateInput = {
+  organizationId: string;
+  userId: string;
+  connectionId: string;
 };
 
 export class BlingAccountAlreadyConnectedError extends Error {
@@ -126,12 +142,14 @@ function basicAuth(clientId: string, clientSecret: string) {
   return Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
 }
 
-type ConnectionStateReference = { connectionId: string; mode: "create" | "reconnect" };
+type ConnectionStateReference = { connectionId: string; mode: "create" | "reconnect" | "reauthorize" };
 
 function connectionReferenceFromState(connectionName: string): ConnectionStateReference | null {
-  if (connectionName.startsWith(reconnectStatePrefix)) {
-    const connectionId = connectionName.slice(reconnectStatePrefix.length).trim();
-    return connectionId ? { connectionId, mode: "reconnect" } : null;
+  if (connectionName.startsWith(reauthorizeStatePrefix)) {
+    const [rawMode, ...connectionIdParts] = connectionName.slice(reauthorizeStatePrefix.length).split(":");
+    const connectionId = connectionIdParts.join(":").trim();
+    const mode = rawMode === "RECONNECT" ? "reconnect" : rawMode === "REAUTHORIZE" ? "reauthorize" : null;
+    return connectionId && mode ? { connectionId, mode } : null;
   }
   if (connectionName.startsWith(pendingConnectionStatePrefix)) {
     const connectionId = connectionName.slice(pendingConnectionStatePrefix.length).trim();
@@ -252,7 +270,6 @@ export class BlingOAuthService {
         await transaction.oAuthState.findFirst({
           where: {
             organizationId: input.organizationId,
-            userId: input.userId,
             usedAt: null,
             expiresAt: { gt: now },
             connectionName: { startsWith: pendingConnectionStatePrefix }
@@ -305,6 +322,63 @@ export class BlingOAuthService {
     return state;
   }
 
+  async resumePendingConnectionOAuthState(input: ResumePendingConnectionOAuthStateInput) {
+    const state = randomBytes(32).toString("base64url");
+    const now = new Date();
+    await prisma.$transaction(async (transaction) => {
+      await acquireBlingConnectionCreationLock(transaction, input.organizationId);
+      const connection = await transaction.blingConnection.findFirst({
+        where: {
+          id: input.connectionId,
+          organizationId: input.organizationId,
+          status: "PENDING",
+          externalCompanyId: null
+        },
+        select: { id: true, role: true }
+      });
+      if (!connection) throw new Error("Conta Bling pendente nao encontrada.");
+
+      const connectionName = `${pendingConnectionStatePrefix}${connection.id}`;
+      const authorizationInProgress = await transaction.oAuthState.findFirst({
+        where: {
+          organizationId: input.organizationId,
+          connectionName,
+          usedAt: null,
+          expiresAt: { gt: now }
+        },
+        select: { id: true }
+      });
+      if (authorizationInProgress) throw new BlingOAuthAuthorizationInProgressError();
+
+      await transaction.oAuthState.create({
+        data: {
+          organizationId: input.organizationId,
+          userId: input.userId,
+          stateHash: hashState(state),
+          connectionName,
+          connectionRole: connection.role,
+          expiresAt: new Date(now.getTime() + stateTtlMs)
+        }
+      });
+      await transaction.auditLog.create({
+        data: {
+          organizationId: input.organizationId,
+          userId: input.userId,
+          action: "BLING_OAUTH_START",
+          entity: "BlingConnection",
+          entityId: connection.id,
+          metadata: sanitizeLogPayload({
+            connectionId: connection.id,
+            connectionRole: connection.role,
+            mode: "create",
+            resumed: true
+          }) as Prisma.InputJsonObject
+        }
+      });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    return state;
+  }
+
   private async credentialsForConnection(connectionId: string, organizationId: string): Promise<BlingCredentials> {
     const connection = await prisma.blingConnection.findFirst({
       where: { id: connectionId, organizationId },
@@ -331,14 +405,30 @@ export class BlingOAuthService {
   async createOAuthState(input: OAuthStateInput) {
     let connectionName = input.connectionName?.trim() ?? "";
     let connectionRole = input.connectionRole;
+    const targetConnectionId = input.reauthorizeConnectionId ?? input.reconnectConnectionId;
+    const mode = input.reauthorizeConnectionId ? "reauthorize" : input.reconnectConnectionId ? "reconnect" : "create";
 
-    if (input.reconnectConnectionId) {
+    if (input.reauthorizeConnectionId && input.reconnectConnectionId) {
+      throw new Error("Intencao OAuth Bling invalida.");
+    }
+
+    if (targetConnectionId) {
       const target = await prisma.blingConnection.findFirst({
-        where: { id: input.reconnectConnectionId, organizationId: input.organizationId },
-        select: { id: true, role: true }
+        where: {
+          id: targetConnectionId,
+          organizationId: input.organizationId,
+          status: { not: "DISABLED" }
+        },
+        select: { id: true, role: true, status: true }
       });
       if (!target) throw new Error("Conta Bling nao encontrada.");
-      connectionName = `${reconnectStatePrefix}${target.id}`;
+      if (mode === "reauthorize" && target.status !== "ACTIVE") {
+        throw new Error("Somente contas ativas podem ser reautorizadas.");
+      }
+      if (mode === "reconnect" && !["DISCONNECTED", "ERROR", "EXPIRED"].includes(target.status)) {
+        throw new Error("Esta conta nao precisa ser reconectada.");
+      }
+      connectionName = `${reauthorizeStatePrefix}${mode.toUpperCase()}:${target.id}`;
       connectionRole = target.role;
     }
 
@@ -346,7 +436,7 @@ export class BlingOAuthService {
       throw new Error("Dados da conexao Bling incompletos.");
     }
 
-    if (!input.reconnectConnectionId) {
+    if (!targetConnectionId) {
       getGlobalBlingCredentials();
       return this.reservePendingConnectionOAuthState({
         organizationId: input.organizationId,
@@ -358,22 +448,43 @@ export class BlingOAuthService {
     }
 
     const state = randomBytes(32).toString("base64url");
-    await prisma.oAuthState.create({
-      data: {
-        organizationId: input.organizationId,
-        userId: input.userId,
-        stateHash: hashState(state),
-        connectionName,
-        connectionRole,
-        expiresAt: new Date(Date.now() + stateTtlMs)
+    const now = new Date();
+    await prisma.$transaction(async (transaction) => {
+      await acquireBlingConnectionCreationLock(transaction, input.organizationId);
+      const authorizationInProgress = await transaction.oAuthState.findFirst({
+        where: {
+          organizationId: input.organizationId,
+          connectionName,
+          usedAt: null,
+          expiresAt: { gt: now }
+        },
+        select: { id: true }
+      });
+      if (authorizationInProgress) {
+        throw new BlingOAuthAuthorizationInProgressError();
       }
-    });
 
-    await audit(input.organizationId, input.userId, input.reconnectConnectionId ? "BLING_OAUTH_RECONNECT_START" : "BLING_OAUTH_START", {
-      connectionId: input.reconnectConnectionId,
-      connectionRole,
-      mode: input.reconnectConnectionId ? "reconnect" : "create"
-    });
+      await transaction.oAuthState.create({
+        data: {
+          organizationId: input.organizationId,
+          userId: input.userId,
+          stateHash: hashState(state),
+          connectionName,
+          connectionRole,
+          expiresAt: new Date(now.getTime() + stateTtlMs)
+        }
+      });
+      await transaction.auditLog.create({
+        data: {
+          organizationId: input.organizationId,
+          userId: input.userId,
+          action: mode === "reauthorize" ? "BLING_OAUTH_REAUTHORIZE_START" : "BLING_OAUTH_RECONNECT_START",
+          entity: "BlingConnection",
+          entityId: targetConnectionId,
+          metadata: sanitizeLogPayload({ connectionId: targetConnectionId, connectionRole, mode }) as Prisma.InputJsonObject
+        }
+      });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     return state;
   }
 
@@ -504,7 +615,7 @@ export class BlingOAuthService {
           const existingConnections = await transaction.blingConnection.findMany({
             where: {
               organizationId: stateRecord.organizationId,
-              status: { not: "DISCONNECTED" }
+              status: { not: "DISABLED" }
             },
             select: {
               externalCompanyId: true,
@@ -555,7 +666,7 @@ export class BlingOAuthService {
           where: {
             organizationId: stateRecord.organizationId,
             externalCompanyId: companyId,
-            status: { not: "DISCONNECTED" }
+            status: { not: "DISABLED" }
           },
           select: { id: true }
         });
@@ -576,7 +687,11 @@ export class BlingOAuthService {
     return prisma.$transaction(async (transaction) => {
       await acquireBlingConnectionCreationLock(transaction, stateRecord.organizationId);
       const target = await transaction.blingConnection.findFirst({
-        where: { id: connectionId, organizationId: stateRecord.organizationId },
+        where: {
+          id: connectionId,
+          organizationId: stateRecord.organizationId,
+          status: { not: "DISABLED" }
+        },
         select: { id: true, status: true, externalCompanyId: true }
       });
       if (!target || target.status !== "PENDING" || target.externalCompanyId) {
@@ -587,7 +702,7 @@ export class BlingOAuthService {
         where: {
           organizationId: stateRecord.organizationId,
           id: { not: target.id },
-          status: { not: "DISCONNECTED" }
+          status: { not: "DISABLED" }
         },
         select: {
           externalCompanyId: true,
@@ -636,14 +751,20 @@ export class BlingOAuthService {
     stateRecord: NonNullable<Awaited<ReturnType<BlingOAuthService["validateOAuthState"]>>>,
     connectionId: string,
     tokenResponse: TokenResponse,
-    companyId: string
+    companyId: string,
+    mode: "reconnect" | "reauthorize"
   ) {
     return prisma.$transaction(async (transaction) => {
       await acquireBlingConnectionCreationLock(transaction, stateRecord.organizationId);
       const target = await transaction.blingConnection.findFirst({
-        where: { id: connectionId, organizationId: stateRecord.organizationId },
+        where: {
+          id: connectionId,
+          organizationId: stateRecord.organizationId,
+          status: { not: "DISABLED" }
+        },
         select: {
           id: true,
+          status: true,
           externalCompanyId: true,
           tokens: {
             orderBy: { updatedAt: "desc" },
@@ -653,6 +774,12 @@ export class BlingOAuthService {
         }
       });
       if (!target) throw new Error("Conta Bling nao encontrada.");
+      if (mode === "reauthorize" && target.status !== "ACTIVE") {
+        throw new Error("Somente contas ativas podem ser reautorizadas.");
+      }
+      if (mode === "reconnect" && !["DISCONNECTED", "ERROR", "EXPIRED"].includes(target.status)) {
+        throw new Error("Esta conta nao precisa ser reconectada.");
+      }
 
       const expectedCompanyId = storedConnectionCompanyId(target);
       if (expectedCompanyId && expectedCompanyId !== companyId) {
@@ -663,7 +790,7 @@ export class BlingOAuthService {
         where: {
           organizationId: stateRecord.organizationId,
           id: { not: target.id },
-          status: { not: "DISCONNECTED" }
+          status: { not: "DISABLED" }
         },
         select: {
           externalCompanyId: true,
@@ -697,10 +824,10 @@ export class BlingOAuthService {
         data: {
           organizationId: stateRecord.organizationId,
           userId: stateRecord.userId,
-          action: "BLING_OAUTH_RECONNECT_SUCCESS",
+          action: mode === "reauthorize" ? "BLING_OAUTH_REAUTHORIZE_SUCCESS" : "BLING_OAUTH_RECONNECT_SUCCESS",
           entity: "BlingConnection",
           entityId: target.id,
-          metadata: sanitizeLogPayload({ connectionId: target.id, status: "success" }) as Prisma.InputJsonObject
+          metadata: sanitizeLogPayload({ connectionId: target.id, status: "success", mode }) as Prisma.InputJsonObject
         }
       });
       return updated;
@@ -726,9 +853,15 @@ export class BlingOAuthService {
       : getGlobalBlingCredentials();
     const tokenResponse = await this.exchangeCodeForToken(code, credentials);
     const companyId = extractBlingCompanyIdFromJwt(tokenResponse.access_token);
-    if (reference?.mode === "reconnect") {
-      const connection = await this.reconnectConnectionWithToken(stateRecord, reference.connectionId, tokenResponse, companyId);
-      return { connection, mode: "reconnect" as const };
+    if (reference?.mode === "reconnect" || reference?.mode === "reauthorize") {
+      const connection = await this.reconnectConnectionWithToken(
+        stateRecord,
+        reference.connectionId,
+        tokenResponse,
+        companyId,
+        reference.mode
+      );
+      return { connection, mode: reference.mode };
     }
     if (reference?.mode === "create") {
       const connection = await this.activatePendingConnectionWithToken(stateRecord, reference.connectionId, tokenResponse, companyId);
@@ -739,7 +872,9 @@ export class BlingOAuthService {
   }
 
   async revokeLocalConnection(connectionId: string, organizationId: string, userId?: string) {
-    const connection = await prisma.blingConnection.findFirst({ where: { id: connectionId, organizationId } });
+    const connection = await prisma.blingConnection.findFirst({
+      where: { id: connectionId, organizationId, status: { not: "DISABLED" } }
+    });
     if (!connection) {
       throw new Error("Conexao Bling nao encontrada.");
     }

@@ -2385,9 +2385,8 @@ test("requires both write permissions, an administrator and explicit confirmatio
   );
 
   assert.match(source, /requireApiAuth\("products:write"\)/);
-  assert.match(source, /can\(auth\.context\.role, "integrations:write"\)/);
-  assert.match(source, /auth\.context\.role !== "OWNER"/);
-  assert.match(source, /auth\.context\.role !== "ADMIN"/);
+  assert.match(source, /hasSystemPermission\(auth\.context, "integrations:write"\)/);
+  assert.match(source, /hasAdministrativeAccess\(auth\.context\)/);
   assert.match(source, /parsed\.data\.confirmed/);
   assert.match(source, /parsed\.data\.idempotencyKey/);
   assert.match(source, /USER_CONFIRMED_SAME_PRODUCT/);

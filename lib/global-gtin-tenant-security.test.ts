@@ -133,7 +133,7 @@ test("ID stubs validate resource ownership before returning their placeholder re
   assert.match(productRead, /mappings:/);
 
   const connectionRoute = source("app/api/integrations/[id]/route.ts");
-  assert.match(connectionRoute, /where:\s*\{\s*id,\s*organizationId:\s*auth\.context\.organizationId\s*\}/);
+  assert.match(connectionRoute, /where:\s*\{\s*id,\s*organizationId:\s*auth\.context\.organizationId,\s*status: \{ not: "DISABLED" \}\s*\}/);
 });
 
 test("active membership is revalidated server-side for every tenant context", () => {

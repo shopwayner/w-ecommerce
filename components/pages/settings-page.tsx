@@ -37,7 +37,19 @@ type SettingsData = {
     status: string;
     updatedAt: string;
   };
-  currentUser: { id: string; role: Role; name: string | null; email: string };
+  currentUser: {
+    id: string;
+    role: Role;
+    administrativeRole: Role;
+    name: string | null;
+    email: string;
+    capabilities: {
+      systemAdministration: boolean;
+      editSettings: boolean;
+      manageUsers: boolean;
+      manageIntegrations: boolean;
+    };
+  };
   subscription: {
     status: string;
     enterpriseLimit: number | null;
@@ -502,9 +514,9 @@ export function SettingsPage() {
     }
   }
 
-  const currentRole = data?.currentUser.role;
-  const canEditCompany = currentRole === "OWNER" || currentRole === "ADMIN";
-  const canManageConnections = currentRole === "OWNER" || currentRole === "ADMIN";
+  const currentRole = data?.currentUser.administrativeRole;
+  const canEditCompany = Boolean(data?.currentUser.capabilities.editSettings);
+  const canManageConnections = Boolean(data?.currentUser.capabilities.manageIntegrations);
 
   return (
     <AppShell>

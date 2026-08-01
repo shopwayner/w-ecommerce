@@ -395,7 +395,7 @@ export class BlingApiClient {
       select: { id: true, status: true }
     });
     if (!connection) throw new BlingApiError("Conta Bling nao encontrada.", 404, "CONNECTION_NOT_FOUND");
-    if (connection.status === "DISCONNECTED") {
+    if (connection.status === "DISCONNECTED" || connection.status === "DISABLED") {
       throw new BlingApiError("Conta Bling desconectada.", 409, "CONNECTION_DISCONNECTED");
     }
 

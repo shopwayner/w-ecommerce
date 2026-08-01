@@ -120,6 +120,7 @@ export function IntegrationsPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [name, setName] = useState("Bling");
   const [role, setRole] = useState<Connection["role"]>("MATRIX");
+  const [internalNotes, setInternalNotes] = useState("");
   const [message, setMessage] = useState("");
 
   async function load() {
@@ -192,7 +193,7 @@ export function IntegrationsPage() {
     const response = await fetch("/api/integrations/bling/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, role })
+      body: JSON.stringify({ name, role, internalNotes })
     });
     const payload = await response.json();
     if (!response.ok) {
@@ -210,8 +211,13 @@ export function IntegrationsPage() {
   }
 
   async function disconnect(id: string) {
+    if (!window.confirm("Desconectar esta conta? Os produtos locais e o histórico serão preservados.")) return;
     setMessage("");
-    const response = await fetch(`/api/integrations/${id}`, { method: "DELETE" });
+    const response = await fetch(`/api/integrations/${id}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmed: true })
+    });
     setMessage(response.ok ? "Conexao desconectada localmente." : "Nao foi possivel desconectar.");
     await load();
   }
@@ -292,12 +298,14 @@ export function IntegrationsPage() {
                 <Badge key={`${connection.id}-status`} tone={connection.status === "ACTIVE" ? "success" : connection.status === "ERROR" ? "danger" : "muted"}>{statusLabels[connection.status]}</Badge>,
                 connection.lastTestAt ? new Date(connection.lastTestAt).toLocaleString("pt-BR") : "-",
                 <div key={`${connection.id}-actions`} className="flex gap-2">
-                  <button className="grid h-9 w-9 place-items-center rounded-md border border-matrix-border bg-white/[0.03] text-slate-300" onClick={() => testConnection(connection.id)} title="Testar conexao">
+                  <button className="grid h-9 w-9 place-items-center rounded-md border border-matrix-border bg-white/[0.03] text-slate-300 disabled:cursor-not-allowed disabled:opacity-45" disabled={connection.status !== "ACTIVE"} onClick={() => testConnection(connection.id)} title="Testar conexao">
                     <TestTube2 className="h-4 w-4" />
                   </button>
-                  <button className="grid h-9 w-9 place-items-center rounded-md border border-matrix-border bg-white/[0.03] text-red-200" onClick={() => disconnect(connection.id)} title="Desconectar">
-                    <Trash2 className="h-4 w-4" />
-                  </button>
+                  {connection.status === "ACTIVE" ? (
+                    <button className="grid h-9 w-9 place-items-center rounded-md border border-matrix-border bg-white/[0.03] text-red-200" onClick={() => disconnect(connection.id)} title="Desconectar">
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  ) : null}
                 </div>
               ])}
             />
@@ -441,7 +449,7 @@ export function IntegrationsPage() {
               </button>
             </div>
             <label className="grid gap-2 text-sm text-slate-300">
-              Nome da conexao
+              Apelido da conta
               <input className="rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-matrix-fg outline-none" value={name} onChange={(event) => setName(event.target.value)} />
             </label>
             <label className="mt-4 grid gap-2 text-sm text-slate-300">
@@ -452,9 +460,21 @@ export function IntegrationsPage() {
                 <option value="OTHER">Outra</option>
               </select>
             </label>
+            <label className="mt-4 grid gap-2 text-sm text-slate-300">
+              Observações
+              <textarea
+                className="min-h-20 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-matrix-fg outline-none"
+                maxLength={2000}
+                value={internalNotes}
+                onChange={(event) => setInternalNotes(event.target.value)}
+              />
+            </label>
+            <p className="mt-4 text-sm text-slate-400">
+              Você será redirecionado ao Bling para entrar na conta que deseja autorizar.
+            </p>
             <div className="mt-5 flex justify-end gap-2">
               <Button variant="secondary" type="button" onClick={() => setModalOpen(false)}>Cancelar</Button>
-              <Button type="submit"><PlugZap className="h-4 w-4" /> Autorizar</Button>
+              <Button type="submit"><PlugZap className="h-4 w-4" /> Autorizar nova conta</Button>
             </div>
           </form>
         </div>

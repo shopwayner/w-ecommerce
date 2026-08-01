@@ -3,6 +3,7 @@ export type BlingCallbackResult =
   | "connected-importing"
   | "connected-import-failed"
   | "reconnected"
+  | "reauthorized"
   | "already-connected"
   | "wrong-account"
   | "authorization-denied"
@@ -13,6 +14,7 @@ const callbackMessages: Record<BlingCallbackResult, string> = {
   "connected-importing": "Conta Bling conectada. A carga inicial dos produtos foi iniciada.",
   "connected-import-failed": "Conta Bling conectada, mas a carga inicial nao foi preparada. Use Importar do Bling para retomar.",
   reconnected: "Conta Bling reconectada com sucesso.",
+  reauthorized: "Conta Bling reautorizada com sucesso.",
   "already-connected": "Esta conta Bling já está conectada.",
   "wrong-account": "Autorize a mesma conta Bling que esta sendo reconectada.",
   "authorization-denied": "A autorização da conta Bling foi cancelada.",

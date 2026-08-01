@@ -12,6 +12,7 @@ import {
   resolveBlingConnectionEntitlement
 } from "./bling-connection-entitlement-service";
 import { blingStartSchema } from "../validation";
+import { isSystemSuperuserSubject } from "../auth/system-superuser";
 
 const allowlist = "owner-one@example.test,owner-two@example.test";
 
@@ -71,6 +72,36 @@ test("only allowlisted active OWNER subjects receive unlimited Bling connections
   );
   assert.equal(entitlement({ email: "operator@example.com", role: "OPERATOR" }).canCreate, false);
   assert.equal(entitlement({ email: "viewer@example.com", role: "VIEWER" }).canCreate, false);
+});
+
+test("system superusers receive the same unlimited entitlement independent of membership role", () => {
+  for (const email of ["system-one@example.test", "system-two@example.test"]) {
+    for (const role of ["OWNER", "ADMIN", "OPERATOR", "VIEWER"] as const) {
+      const result = entitlement({
+        email,
+        role,
+        used: 9,
+        allowlistValue: "",
+        systemSuperuserAllowlistValue: "system-one@example.test,system-two@example.test"
+      });
+      assert.equal(result.unlimited, true);
+      assert.equal(result.canCreate, true);
+      assert.equal(result.limit, null);
+    }
+  }
+});
+
+test("the Bling-only allowlist never grants system superuser privileges", () => {
+  const email = "owner-one@example.test";
+  assert.equal(entitlement({ email }).unlimited, true);
+  assert.equal(isSystemSuperuserSubject({
+    email,
+    userStatus: "ACTIVE",
+    organizationStatus: "ACTIVE",
+    membershipExists: true,
+    sessionValid: true,
+    allowlistValue: ""
+  }), false);
 });
 
 test("allowlist parsing trims, lowercases and removes duplicates", () => {
@@ -145,12 +176,12 @@ test("organizations without subscriptions use the safe default limit of one", as
   );
 });
 
-test("counted status contract includes credential-preserving states and excludes DISCONNECTED", () => {
+test("counted status contract includes registered states and excludes archived connections", () => {
   assert.deepEqual(
     [...BLING_COUNTED_CONNECTION_STATUSES],
-    ["ACTIVE", "PENDING", "EXPIRED", "ERROR", "DISABLED"]
+    ["ACTIVE", "PENDING", "EXPIRED", "ERROR", "DISCONNECTED"]
   );
-  assert.equal(BLING_COUNTED_CONNECTION_STATUSES.includes("DISCONNECTED" as never), false);
+  assert.equal(BLING_COUNTED_CONNECTION_STATUSES.includes("DISABLED" as never), false);
 });
 
 test("membership and connection queries remain scoped to the authenticated organization", async () => {
@@ -283,10 +314,10 @@ test("routes derive tenant and user from authentication and return the limit con
   assert.match(startRoute, /organizationId: auth\.context\.organizationId/);
   assert.match(startRoute, /userId: auth\.context\.user\.id/);
   assert.match(startRoute, /requireApiAuth\("integrations:write"\)/);
-  assert.match(startRoute, /auth\.context\.role !== "OWNER" && auth\.context\.role !== "ADMIN"/);
+  assert.match(startRoute, /hasAdministrativeAccess\(auth\.context\)/);
   assert.match(startRoute, /BLING_CONNECTION_LIMIT_REACHED/);
   assert.match(startRoute, /status: 409/);
-  assert.match(listRoute, /where: \{ organizationId: auth\.context\.organizationId \}/);
+  assert.match(listRoute, /where:\s*\{\s*organizationId: auth\.context\.organizationId,[\s\S]*?status: \{ not: "DISABLED" \}/);
   assert.doesNotMatch(startRoute, /parsed\.data\.organizationId|parsed\.data\.email|parsed\.data\.unlimited/);
 });
 
@@ -322,9 +353,11 @@ test("configuration is server-only, blank by example and never returned to the U
   );
 
   assert.match(envExample, /^BLING_UNLIMITED_OWNER_EMAILS=$/m);
+  assert.match(envExample, /^SYSTEM_SUPERUSER_EMAILS=$/m);
   assert.doesNotMatch(envExample, /NEXT_PUBLIC_BLING_UNLIMITED_OWNER_EMAILS/);
   assert.doesNotMatch(envExample, /@admin\.com/i);
   assert.match(entitlementSource, /process\.env\.BLING_UNLIMITED_OWNER_EMAILS/);
+  assert.match(entitlementSource, /process\.env\.SYSTEM_SUPERUSER_EMAILS/);
   assert.doesNotMatch(integrationsRoute, /BLING_UNLIMITED_OWNER_EMAILS|allowlist/i);
 });
 

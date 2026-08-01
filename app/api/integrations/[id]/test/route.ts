@@ -3,11 +3,12 @@ import { requireApiAuth } from "@/lib/auth/api";
 import { blingApiClient, BlingApiError, getBlingApiErrorMessage } from "@/lib/services/bling-api-client";
 import { consumeSettingsRateLimit } from "@/lib/security/settings-rate-limit";
 import { createAuditLog } from "@/lib/services/audit-log-service";
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
-  if (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN") {
+  if (!hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Somente administradores podem testar uma conta." }, { status: 403 });
   }
 

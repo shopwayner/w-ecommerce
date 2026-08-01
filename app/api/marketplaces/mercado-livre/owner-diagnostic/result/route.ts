@@ -1,14 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 import {
   MERCADO_LIVRE_OWNER_DIAGNOSTIC_RESULT_COOKIE,
   MercadoLivreOwnerDiagnosticError,
   mercadoLivreOwnerDiagnosticService
 } from "@/lib/services/mercado-livre-owner-diagnostic-service";
-
-function canRunOwnerDiagnostic(role: string) {
-  return role === "OWNER" || role === "ADMIN";
-}
 
 function clearResultCookie(response: NextResponse) {
   response.cookies.set(MERCADO_LIVRE_OWNER_DIAGNOSTIC_RESULT_COOKIE, "", {
@@ -24,7 +21,7 @@ function clearResultCookie(response: NextResponse) {
 export async function GET(request: NextRequest) {
   const auth = await requireApiAuth("integrations:read");
   if (!auth.ok) return auth.response;
-  if (!canRunOwnerDiagnostic(auth.context.role)) {
+  if (!hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Permissao insuficiente" }, { status: 403 });
   }
 

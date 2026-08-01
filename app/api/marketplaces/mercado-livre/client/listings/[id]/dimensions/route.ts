@@ -1,6 +1,7 @@
 import { MarketplaceProvider } from "@prisma/client";
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 import { prisma } from "@/lib/prisma";
 import { decryptSecret } from "@/lib/security/encryption";
 
@@ -66,10 +67,6 @@ type ParsedDimensions = {
   source: string | null;
   rawSummary: string | null;
 };
-
-function canManageMarketplace(role: string) {
-  return role === "OWNER" || role === "ADMIN";
-}
 
 function dimensionsExternalWriteEnabled() {
   return process.env.MERCADO_LIVRE_DIMENSIONS_WRITE_ENABLED === "true" && process.env.MERCADO_LIVRE_EXTERNAL_WRITE_ENABLED === "true";
@@ -544,7 +541,7 @@ export async function GET(_request: Request, { params }: Params) {
     return NextResponse.json(
       dimensionsPayload(item, {
         externalWrite,
-        canEdit: externalWrite && canManageMarketplace(auth.context.role)
+        canEdit: externalWrite && hasAdministrativeAccess(auth.context)
       })
     );
   } catch (error) {
@@ -557,7 +554,7 @@ export async function GET(_request: Request, { params }: Params) {
 export async function PATCH(request: Request, { params }: Params) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
-  if (!canManageMarketplace(auth.context.role)) {
+  if (!hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Permissao insuficiente", externalWrite: false, canEdit: false }, { status: 403 });
   }
   if (!dimensionsExternalWriteEnabled()) {

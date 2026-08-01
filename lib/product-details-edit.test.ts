@@ -361,5 +361,5 @@ test("the detail response supplies edit capability without a duplicate session r
 
   assert.doesNotMatch(detailsSource, /fetch\("\/api\/auth\/session"\)/);
   assert.match(pageSource, /payload\.permissions\?\.canEdit === true/);
-  assert.match(routeSource, /can\(auth\.context\.role, "products:write"\)/);
+  assert.match(routeSource, /hasSystemPermission\(auth\.context, "products:write"\)/);
 });

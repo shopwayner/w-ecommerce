@@ -33,7 +33,8 @@ test("the route is authenticated, organization-scoped server-side and fail-close
     "utf8"
   );
   assert.match(source, /requireApiAuth\("products:write"\)/);
-  assert.match(source, /can\(auth\.context\.role,\s*"integrations:write"\)/);
+  assert.match(source, /hasSystemPermission\(auth\.context,\s*"integrations:write"\)/);
+  assert.match(source, /hasAdministrativeAccess\(auth\.context\)/);
   assert.match(source, /auth\.context\.organizationId/);
   assert.doesNotMatch(source, /body\.organizationId/);
   assert.match(source, /process\.env\.BLING_FULL_PRODUCT_SYNC_ENABLED !== "true"/);

@@ -369,7 +369,7 @@ test("diagnostic implementation has no Prisma or MercadoLivreConnection persiste
   assert.ok(callbackSource.indexOf("isDiagnosticState(state)") < callbackSource.indexOf("completeCallback(code, state)"));
 });
 
-test("administrative routes enforce permissions and role checks", () => {
+test("administrative routes enforce permissions through the central policy", () => {
   const connectSource = readFileSync(
     new URL("../../app/api/marketplaces/mercado-livre/owner-diagnostic/connect/route.ts", import.meta.url),
     "utf8"
@@ -384,11 +384,12 @@ test("administrative routes enforce permissions and role checks", () => {
   );
 
   assert.match(connectSource, /requireApiAuth\("integrations:write"\)/);
-  assert.match(connectSource, /role === "OWNER" \|\| role === "ADMIN"/);
+  assert.match(connectSource, /hasAdministrativeAccess\(auth\.context\)/);
   assert.match(resultSource, /requireApiAuth\("integrations:read"\)/);
-  assert.match(resultSource, /role === "OWNER" \|\| role === "ADMIN"/);
+  assert.match(resultSource, /hasAdministrativeAccess\(auth\.context\)/);
   assert.match(resultSource, /getStatus\(\)\.available/);
   assert.match(resultSource, /clearResultCookie/);
   assert.match(statusSource, /requireApiAuth\("integrations:read"\)/);
+  assert.match(statusSource, /hasAdministrativeAccess\(auth\.context\)/);
   assert.match(statusSource, /if \(!status\.available\)/);
 });

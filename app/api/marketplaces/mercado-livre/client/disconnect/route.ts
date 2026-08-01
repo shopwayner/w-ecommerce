@@ -1,15 +1,12 @@
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
 import { mercadoLivreClientOAuthService } from "@/lib/services/marketplaces/mercado-livre-client-oauth-service";
-
-function canManageMarketplace(role: string) {
-  return role === "OWNER" || role === "ADMIN";
-}
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 
 export async function POST() {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
-  if (!canManageMarketplace(auth.context.role)) {
+  if (!hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Permissao insuficiente" }, { status: 403 });
   }
 

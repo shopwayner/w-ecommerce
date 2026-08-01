@@ -4,6 +4,11 @@ import { prisma } from "@/lib/prisma";
 import { planLimitService } from "@/lib/services/plan-limit-service";
 import { getCanonicalOrganizationDocument, normalizeBrazilianDocument } from "@/lib/settings-admin";
 import { settingsSchema } from "@/lib/validation";
+import {
+  effectiveAdministrativeRole,
+  hasSystemPermission,
+  isSystemSuperuserContext
+} from "@/lib/auth/system-superuser";
 
 export async function GET() {
   const auth = await requireApiAuth("settings:read");
@@ -40,8 +45,15 @@ export async function GET() {
       currentUser: {
         id: auth.context.user.id,
         role: auth.context.role,
+        administrativeRole: effectiveAdministrativeRole(auth.context),
         name: auth.context.user.name,
-        email: auth.context.user.email
+        email: auth.context.user.email,
+        capabilities: {
+          systemAdministration: isSystemSuperuserContext(auth.context),
+          editSettings: hasSystemPermission(auth.context, "settings:write"),
+          manageUsers: hasSystemPermission(auth.context, "users:manage"),
+          manageIntegrations: hasSystemPermission(auth.context, "integrations:write")
+        }
       },
       subscription: organization.subscription
         ? {

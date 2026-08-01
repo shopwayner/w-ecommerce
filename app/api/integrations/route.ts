@@ -3,6 +3,7 @@ import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
 import { planLimitService } from "@/lib/services/plan-limit-service";
 import { getBlingConnectionCredentialSummary } from "@/lib/services/bling-oauth-service";
+import { hasSystemPermission } from "@/lib/auth/system-superuser";
 
 function safeLastError(status: string, value: string | null) {
   if (!value) return null;
@@ -17,7 +18,10 @@ export async function GET() {
 
   const [blingConnections, limit] = await Promise.all([
     prisma.blingConnection.findMany({
-      where: { organizationId: auth.context.organizationId },
+      where: {
+        organizationId: auth.context.organizationId,
+        status: { not: "DISABLED" }
+      },
       orderBy: { createdAt: "asc" },
       select: {
         id: true,
@@ -48,6 +52,9 @@ export async function GET() {
 
   return NextResponse.json({
     limit,
+    permissions: {
+      canRemove: hasSystemPermission(auth.context, "integrations:critical")
+    },
     data: blingConnections.map((connection) => {
       const credentialSummary = getBlingConnectionCredentialSummary();
       const tokenExpiresAt = connection.tokens[0]?.expiresAt ?? null;

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
-import { can } from "@/lib/auth/permissions";
+import { hasAdministrativeAccess, hasSystemPermission } from "@/lib/auth/system-superuser";
 import { blingFullProductSyncRequestSchema } from "@/lib/bling-full-product-sync-schema";
 import { createAuditLog, logDangerousAction } from "@/lib/services/audit-log-service";
 import { blingFullProductSyncService } from "@/lib/services/bling-full-product-sync-service";
@@ -35,8 +35,8 @@ export async function GET() {
   const auth = await requireApiAuth("products:write");
   if (!auth.ok) return auth.response;
   if (
-    !can(auth.context.role, "integrations:write")
-    || (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN")
+    !hasSystemPermission(auth.context, "integrations:write")
+    || !hasAdministrativeAccess(auth.context)
   ) {
     return NextResponse.json(
       { error: "Somente administradores podem atualizar produtos no Bling." },
@@ -58,8 +58,8 @@ export async function POST(
   const auth = await requireApiAuth("products:write");
   if (!auth.ok) return auth.response;
   if (
-    !can(auth.context.role, "integrations:write")
-    || (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN")
+    !hasSystemPermission(auth.context, "integrations:write")
+    || !hasAdministrativeAccess(auth.context)
   ) {
     return NextResponse.json(
       { error: "Somente administradores podem atualizar produtos no Bling." },

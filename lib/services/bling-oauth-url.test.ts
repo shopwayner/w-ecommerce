@@ -4,7 +4,6 @@ import {
   BLING_AUTHORIZATION_URL,
   BLING_CALLBACK_PATH,
   BlingPublicUrlConfigurationError,
-  canManageBlingConnection,
   canStartBlingReconnect,
   getBlingReconnectErrorMessage,
   isOfficialBlingAuthorizationUrl,
@@ -57,10 +56,7 @@ test("maps authentication and configuration failures to friendly messages", () =
   assert.equal(getBlingReconnectErrorMessage(500), "Não foi possível iniciar a conexão agora.");
 });
 
-test("allows only authorized roles and blocks a duplicate reconnect click", () => {
-  assert.equal(canManageBlingConnection("OWNER"), true);
-  assert.equal(canManageBlingConnection("ADMIN"), true);
-  assert.equal(canManageBlingConnection("MEMBER"), false);
+test("blocks a duplicate reconnect click", () => {
   assert.equal(canStartBlingReconnect("connection-id", null), true);
   assert.equal(canStartBlingReconnect("connection-id", "reconnect"), false);
   assert.equal(canStartBlingReconnect(null, null), false);

@@ -6,11 +6,12 @@ import {
 } from "@/lib/services/bling-connection-entitlement-service";
 import { blingOAuthService } from "@/lib/services/bling-oauth-service";
 import { blingStartSchema } from "@/lib/validation";
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 
 export async function POST(request: Request) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
-  if (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN") {
+  if (!hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Somente administradores podem criar uma integração Bling." }, { status: 403 });
   }
 

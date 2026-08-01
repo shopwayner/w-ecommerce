@@ -201,7 +201,8 @@ test("integration response contains no access or refresh token", () => {
 
 test("reconnect route requires strict explicit confirmation", () => {
   const route = source("app/api/integrations/[id]/reconnect/route.ts");
-  assert.match(route, /z\.object\(\{ confirmed: z\.literal\(true\) \}\)\.strict\(\)/);
+  assert.match(route, /confirmed: z\.literal\(true\)/);
+  assert.match(route, /intent: z\.enum\(\["CONNECT", "RECONNECT", "REAUTHORIZE"\]\)/);
   assert.match(route, /BLING_RECONNECT_STARTED/);
 });
 

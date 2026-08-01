@@ -5,6 +5,7 @@ import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
 import { blingOAuthService } from "@/lib/services/bling-oauth-service";
 import { sanitizeLogPayload } from "@/lib/utils";
+import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 
 const updateConnectionSchema = z.object({
   name: z.string().trim().min(2).max(80),
@@ -17,7 +18,7 @@ const disconnectSchema = z.object({ confirmed: z.literal(true) }).strict();
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
-  if (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN") {
+  if (!hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Somente administradores podem alterar uma conta Bling." }, { status: 403 });
   }
 
@@ -29,7 +30,11 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 
   const { id } = await params;
   const current = await prisma.blingConnection.findFirst({
-    where: { id, organizationId: auth.context.organizationId },
+    where: {
+      id,
+      organizationId: auth.context.organizationId,
+      status: { not: "DISABLED" }
+    },
     select: { id: true }
   });
   if (!current) return NextResponse.json({ error: "Conta Bling não encontrada." }, { status: 404 });
@@ -72,7 +77,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
 export async function DELETE(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
-  if (auth.context.role !== "OWNER" && auth.context.role !== "ADMIN") {
+  if (!hasAdministrativeAccess(auth.context)) {
     return NextResponse.json({ error: "Somente administradores podem desconectar uma conta." }, { status: 403 });
   }
 

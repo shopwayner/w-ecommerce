@@ -1,10 +1,11 @@
 import { prisma } from "@/lib/prisma";
 import {
+  BLING_COUNTED_CONNECTION_STATUSES,
   blingConnectionEntitlementService,
   type BlingConnectionEntitlement
 } from "@/lib/services/bling-connection-entitlement-service";
 
-const masterOrganizationSlugs = new Set(["wayner-master", "w-ecommerce-master"]);
+const amazonSandboxMasterOrganizationSlugs = new Set(["wayner-master", "w-ecommerce-master"]);
 
 export type BlingConnectionLimit = BlingConnectionEntitlement;
 
@@ -15,13 +16,18 @@ function currentMonthPeriod() {
   return { periodStart, periodEnd };
 }
 
+// This is a fail-closed guard for the one-off Amazon Sandbox credential importer.
+// It is not used to grant application or plan privileges.
 export async function isMasterOrganization(organizationId: string) {
   const organization = await prisma.organization.findUnique({
     where: { id: organizationId },
     select: { slug: true }
   });
 
-  return Boolean(organization?.slug && masterOrganizationSlugs.has(organization.slug));
+  return Boolean(
+    organization?.slug
+    && amazonSandboxMasterOrganizationSlugs.has(organization.slug)
+  );
 }
 
 export class PlanLimitService {
@@ -80,7 +86,9 @@ export class PlanLimitService {
     const { periodStart, periodEnd } = currentMonthPeriod();
     const [subscription, blingConnections, blingConnectionLimit, usage] = await Promise.all([
       this.getCurrentPlan(organizationId),
-      prisma.blingConnection.count({ where: { organizationId, status: { not: "DISCONNECTED" } } }),
+      prisma.blingConnection.count({
+        where: { organizationId, status: { in: [...BLING_COUNTED_CONNECTION_STATUSES] } }
+      }),
       this.checkBlingConnectionLimit(organizationId, userId),
       prisma.usageCounter.findMany({ where: { organizationId, periodStart, periodEnd } })
     ]);
