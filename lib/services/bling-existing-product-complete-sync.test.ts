@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   applyMappedBlingProductSync,
   buildImportedProductCreateData,
+  collectMappedBlingProductChanges,
   hydrateBlingProductForPersistence,
   normalizeBlingCatalogPage,
   readBlingProductConnectionAttributes,
@@ -387,6 +388,26 @@ test("SKU 6711: segunda sincronizacao e idempotente", async () => {
   assert.equal(fixture.state.inventoryUpdates, 0);
   assert.equal(fixture.state.imageCreateCalls, 1);
   assert.equal(fixture.state.images.length, 2);
+});
+
+test("SKU 6711: previa classifica somente diferencas reais por categoria", async () => {
+  const fixture = createFixtureState();
+  const product = await completeRemote6711();
+  const preview = await collectMappedBlingProductChanges(
+    fixture.transaction as never,
+    { organizationId, connectionId, productId, product }
+  );
+  const categories = new Set(preview.changes.map((change) => change.category));
+  for (const category of [
+    "STOCK", "PRICE", "IMAGES", "DESCRIPTION", "CATEGORY", "GTIN",
+    "WEIGHT", "DIMENSIONS", "STATUS", "ATTRIBUTES"
+  ]) {
+    assert.equal(categories.has(category as never), true, category);
+  }
+  assert.equal(fixture.state.productUpdates, 0);
+  assert.equal(fixture.state.priceCreates, 0);
+  assert.equal(fixture.state.inventoryCreates, 0);
+  assert.equal(fixture.state.imageCreateCalls, 0);
 });
 
 test("SKU 6711: SYNC completa o mesmo Product sem criar Product ou mapping", async () => {

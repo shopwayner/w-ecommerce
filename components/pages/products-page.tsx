@@ -134,6 +134,10 @@ type BlingImportPreview = {
   existing: number;
   new: number;
   wouldUpdate: number;
+  syncAnalyzed: number;
+  syncWithChanges: number;
+  syncWithoutChanges: number;
+  syncFailures: number;
   importable: number;
   updatedByMapping: number;
   linkedBySku: number;
@@ -1463,6 +1467,9 @@ export function ProductsPage() {
         ? "Importacao concluida em todos os lotes encontrados."
         : "Sincronizacao dos produtos vinculados concluida."
     );
+    if (operation === "SYNC") {
+      window.dispatchEvent(new Event("w-notifications-updated"));
+    }
     await loadProducts();
   }
 
@@ -1945,22 +1952,29 @@ export function ProductsPage() {
             {blingImportPreview ? (
               <>
                 <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  <KpiCard label="Encontrados" value={String(blingImportPreview.totalFound)} hint={`${blingImportPreview.pagesFound} paginas`} />
-                  <KpiCard label={blingImportOperation === "IMPORT" ? "Importáveis" : "Sincronizáveis"} value={String(blingImportPreview.importable)} hint="Somente desta conta" tone="success" />
-                  <KpiCard label="Por mapping" value={String(blingImportPreview.updatedByMapping)} hint={blingImportOperation === "IMPORT" ? "Já vinculados" : "Seriam atualizados"} tone="purple" />
-                  {blingImportOperation === "IMPORT" ? (
+                  {blingImportOperation === "SYNC" ? (
                     <>
+                      <KpiCard label="Produtos analisados" value={String(blingImportPreview.syncAnalyzed)} hint="Ja vinculados a esta conta" />
+                      <KpiCard label="Produtos com alterações" value={String(blingImportPreview.syncWithChanges)} hint="Seriam atualizados" tone="success" />
+                      <KpiCard label="Produtos sem alteração" value={String(blingImportPreview.syncWithoutChanges)} hint="Nao serao gravados" tone="purple" />
+                      <KpiCard label="Falhas" value={String(blingImportPreview.syncFailures)} hint="Isoladas por produto" tone="danger" />
+                    </>
+                  ) : (
+                    <>
+                      <KpiCard label="Encontrados" value={String(blingImportPreview.totalFound)} hint={`${blingImportPreview.pagesFound} paginas`} />
+                      <KpiCard label="Importáveis" value={String(blingImportPreview.importable)} hint="Somente desta conta" tone="success" />
+                      <KpiCard label="Já existentes" value={String(blingImportPreview.updatedByMapping)} hint="Nao serao atualizados" tone="purple" />
                       <KpiCard label="Vínculo por SKU" value={String(blingImportPreview.linkedBySku)} hint="Produto local reutilizado" tone="info" />
                       <KpiCard label="Vínculo por GTIN" value={String(blingImportPreview.linkedByGtin)} hint="Produto local reutilizado" tone="info" />
                       <KpiCard label="Novos" value={String(blingImportPreview.wouldCreate)} hint="Seriam criados" tone="success" />
                       <KpiCard label="Precisam de revisão" value={String(blingImportPreview.needsReview)} hint="Conflitos isolados" tone="danger" />
                       <KpiCard label="Inválidos" value={String(blingImportPreview.invalid)} hint="Não cancelam os demais" tone="danger" />
+                      <KpiCard label="Ativos" value={String(blingImportPreview.active)} hint="Na conta consultada" />
+                      <KpiCard label="Inativos" value={String(blingImportPreview.inactive)} hint="Mantidos sem exclusão" tone="warning" />
+                      <KpiCard label="Sem SKU" value={String(blingImportPreview.withoutSku)} hint="Identificados pelo Bling" tone="warning" />
+                      <KpiCard label="Sem GTIN" value={String(blingImportPreview.withoutGtin)} hint="Sem correspondência por GTIN" tone="warning" />
                     </>
-                  ) : null}
-                  <KpiCard label="Ativos" value={String(blingImportPreview.active)} hint="Na conta consultada" />
-                  <KpiCard label="Inativos" value={String(blingImportPreview.inactive)} hint="Mantidos sem exclusão" tone="warning" />
-                  <KpiCard label="Sem SKU" value={String(blingImportPreview.withoutSku)} hint="Identificados pelo Bling" tone="warning" />
-                  <KpiCard label="Sem GTIN" value={String(blingImportPreview.withoutGtin)} hint="Sem correspondência por GTIN" tone="warning" />
+                  )}
                 </div>
                 <dl className="mt-4 grid gap-x-6 gap-y-2 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm sm:grid-cols-2">
                   <div className="flex justify-between gap-4">
@@ -1975,7 +1989,7 @@ export function ProductsPage() {
                   </div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Produtos simples</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.simpleProducts}</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Variações</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.variations}</dd></div>
-                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Seriam atualizados</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.wouldUpdate}</dd></div>
+                  <div className="flex justify-between gap-4"><dt className="text-matrix-muted">{blingImportOperation === "SYNC" ? "Alterações previstas" : "Seriam atualizados"}</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.wouldUpdate}</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Dados inválidos</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.errors}</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">IDs repetidos</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.duplicateExternalIds}</dd></div>
                   <div className="flex justify-between gap-4"><dt className="text-matrix-muted">Conflitos de SKU</dt><dd className="font-semibold text-matrix-fg">{blingImportPreview.skuConflicts}</dd></div>
@@ -1991,10 +2005,10 @@ export function ProductsPage() {
               <section className="mt-5 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm text-matrix-muted">
                 <div className="flex items-center justify-between gap-3"><span>Próxima página</span><strong className="text-matrix-fg">{blingSyncJob.currentPage}</strong></div>
                 <div className="mt-2 flex items-center justify-between gap-3"><span>Registros processados</span><strong className="text-matrix-fg">{blingSyncJob.processed}/{blingSyncJob.previewTotal}</strong></div>
-                <div className="mt-2 flex items-center justify-between gap-3"><span>Criados</span><strong className="text-matrix-fg">{blingSyncJob.created}</strong></div>
+                {blingSyncJob.operation === "IMPORT" ? <div className="mt-2 flex items-center justify-between gap-3"><span>Criados</span><strong className="text-matrix-fg">{blingSyncJob.created}</strong></div> : null}
                 <div className="mt-2 flex items-center justify-between gap-3"><span>Atualizados</span><strong className="text-matrix-fg">{blingSyncJob.updated}</strong></div>
-                <div className="mt-2 flex items-center justify-between gap-3"><span>Vinculados por SKU</span><strong className="text-matrix-fg">{blingSyncJob.linkedBySku}</strong></div>
-                <div className="mt-2 flex items-center justify-between gap-3"><span>Vinculados por GTIN</span><strong className="text-matrix-fg">{blingSyncJob.linkedByGtin}</strong></div>
+                {blingSyncJob.operation === "IMPORT" ? <div className="mt-2 flex items-center justify-between gap-3"><span>Vinculados por SKU</span><strong className="text-matrix-fg">{blingSyncJob.linkedBySku}</strong></div> : null}
+                {blingSyncJob.operation === "IMPORT" ? <div className="mt-2 flex items-center justify-between gap-3"><span>Vinculados por GTIN</span><strong className="text-matrix-fg">{blingSyncJob.linkedByGtin}</strong></div> : null}
                 <div className="mt-2 flex items-center justify-between gap-3"><span>Sem alterações</span><strong className="text-matrix-fg">{blingSyncJob.noChanges}</strong></div>
                 <div className="mt-2 flex items-center justify-between gap-3"><span>Revisão / inválidos / falhas</span><strong className="text-matrix-fg">{blingSyncJob.needsReview + blingSyncJob.invalid + blingSyncJob.failed}</strong></div>
                 <div className="mt-2 flex items-center justify-between gap-3"><span>Status</span><Badge tone={blingSyncJob.status === "COMPLETED" ? "success" : blingSyncJob.status === "FAILED" ? "danger" : "warning"}>{blingSyncJob.status === "COMPLETED" ? (blingSyncJob.totalErrors > 0 ? "Concluído com falhas" : "Concluído") : blingSyncJob.status === "FAILED" ? "Falhou" : blingSyncJob.status === "PENDING" ? "Aguardando" : "Processando"}</Badge></div>

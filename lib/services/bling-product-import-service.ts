@@ -17,6 +17,14 @@ import {
   type BlingImportTotalSource,
   type BlingImportPreviewFailureDiagnostic
 } from "@/lib/bling-product-import-preview";
+import {
+  appendBlingProductSyncFailure,
+  appendBlingProductSyncReport,
+  createBlingSyncReportNotificationMarker,
+  emptyBlingProductSyncReport,
+  type BlingProductSyncChange,
+  type BlingProductSyncReport
+} from "@/lib/bling-product-sync-report";
 import { prisma } from "@/lib/prisma";
 import {
   extractBlingProductBrand,
@@ -223,11 +231,13 @@ type BlingProductImportJobCursor = {
     invalid: number;
     reportedTotal: number | null;
     sourceRows: number;
+    listFingerprint?: string;
   };
   progress: BlingProductImportProgress;
   page: number;
   itemIndex: number;
   invalidRowsRecorded: boolean;
+  syncReport?: BlingProductSyncReport;
 };
 
 function emptyImportProgress(): BlingProductImportProgress {
@@ -316,6 +326,10 @@ export type BlingProductDryRun = {
   existing: number;
   new: number;
   wouldUpdate: number;
+  syncAnalyzed: number;
+  syncWithChanges: number;
+  syncWithoutChanges: number;
+  syncFailures: number;
   importable: number;
   updatedByMapping: number;
   linkedBySku: number;
@@ -1790,6 +1804,314 @@ function sameNullableNumber(left: Prisma.Decimal | number | null, right: number 
   return Number(left) === right;
 }
 
+function syncReportValue(value: unknown): string | number | boolean | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  if (typeof value === "string") return value.slice(0, 180);
+  return JSON.stringify(value).slice(0, 180);
+}
+
+function addSyncChange(
+  changes: BlingProductSyncChange[],
+  category: BlingProductSyncChange["category"],
+  field: string,
+  previousValue: unknown,
+  newValue: unknown,
+  delta?: number
+) {
+  changes.push({
+    category,
+    field,
+    previousValue: syncReportValue(previousValue),
+    newValue: syncReportValue(newValue),
+    ...(delta === undefined ? {} : { delta })
+  });
+}
+
+function comparableAttributes(value: ReturnType<typeof blingAttributeIdentity>) {
+  const attributes: Partial<ReturnType<typeof blingAttributeIdentity>> = { ...value };
+  delete attributes.storeLinks;
+  delete attributes.storeLinksComplete;
+  delete attributes.status;
+  delete attributes.externalStatus;
+  return attributes;
+}
+
+export async function collectMappedBlingProductChanges(
+  transaction: Prisma.TransactionClient,
+  input: {
+    organizationId: string;
+    connectionId: string;
+    productId: string;
+    product: NormalizedBlingProduct;
+  }
+) {
+  const [current, latestPrice, inventory, currentImages] = await Promise.all([
+    transaction.product.findFirst({
+      where: { id: input.productId, organizationId: input.organizationId },
+      select: {
+        id: true,
+        sku: true,
+        ean: true,
+        packagingGtin: true,
+        name: true,
+        description: true,
+        category: true,
+        brand: true,
+        ncm: true,
+        weight: true,
+        grossWeight: true,
+        height: true,
+        width: true,
+        depth: true,
+        dimensionUnit: true,
+        condition: true,
+        format: true,
+        productType: true,
+        commercialStatus: true,
+        productionType: true,
+        expirationDate: true,
+        freeShipping: true,
+        volumes: true,
+        itemsPerBox: true,
+        attributes: true
+      }
+    }),
+    transaction.productPrice.findFirst({
+      where: { organizationId: input.organizationId, productId: input.productId },
+      orderBy: { createdAt: "desc" },
+      select: { salePrice: true, costPrice: true }
+    }),
+    transaction.inventoryBalance.findUnique({
+      where: {
+        productId_connectionId_warehouse: {
+          productId: input.productId,
+          connectionId: input.connectionId,
+          warehouse: "Bling"
+        }
+      },
+      select: { physicalQuantity: true }
+    }),
+    transaction.productImage.findMany({
+      where: { organizationId: input.organizationId, productId: input.productId },
+      orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+      select: { url: true }
+    })
+  ]);
+  if (!current) throw new Error("O produto vinculado nao pertence a organizacao atual.");
+
+  const changes: BlingProductSyncChange[] = [];
+  const remoteDescription = input.product.description?.trim() || null;
+  const remoteCategory = input.product.category?.trim() || null;
+  const nextBrand = resolveProductBrandFromBling(current.brand, input.product.brand);
+  const nextEan = resolveImportedGtin(input.product.gtin, current.ean);
+  const nextPackagingGtin = resolveImportedGtin(
+    input.product.packagingGtin,
+    current.packagingGtin
+  );
+  if (input.product.name !== current.name) {
+    addSyncChange(changes, "OTHER", "name", current.name, input.product.name);
+  }
+  if (remoteDescription !== null && remoteDescription !== current.description) {
+    addSyncChange(changes, "DESCRIPTION", "description", "anterior", "atualizado");
+  }
+  if (remoteCategory !== null && remoteCategory !== current.category) {
+    addSyncChange(changes, "CATEGORY", "category", current.category, remoteCategory);
+  }
+  if (nextBrand !== current.brand) {
+    addSyncChange(changes, "BRAND", "brand", current.brand, nextBrand);
+  }
+  if (nextEan !== current.ean) addSyncChange(changes, "GTIN", "gtin", current.ean, nextEan);
+  if (nextPackagingGtin !== current.packagingGtin) {
+    addSyncChange(
+      changes,
+      "GTIN",
+      "packagingGtin",
+      current.packagingGtin,
+      nextPackagingGtin
+    );
+  }
+
+  for (const [field, before, after] of [
+    ["weight", current.weight, input.product.weight],
+    ["grossWeight", current.grossWeight, input.product.grossWeight]
+  ] as const) {
+    if (after !== null && !sameNullableNumber(before, after)) {
+      addSyncChange(changes, "WEIGHT", field, before === null ? null : Number(before), after);
+    }
+  }
+  for (const [field, before, after] of [
+    ["height", current.height, input.product.height],
+    ["width", current.width, input.product.width],
+    ["depth", current.depth, input.product.depth]
+  ] as const) {
+    if (after !== null && !sameNullableNumber(before, after)) {
+      addSyncChange(changes, "DIMENSIONS", field, before === null ? null : Number(before), after);
+    }
+  }
+  if (
+    input.product.dimensionUnit !== null
+    && input.product.dimensionUnit !== current.dimensionUnit
+  ) {
+    addSyncChange(
+      changes,
+      "DIMENSIONS",
+      "dimensionUnit",
+      current.dimensionUnit,
+      input.product.dimensionUnit
+    );
+  }
+  if (
+    input.product.commercialStatus !== null
+    && input.product.commercialStatus !== current.commercialStatus
+  ) {
+    addSyncChange(
+      changes,
+      "STATUS",
+      "commercialStatus",
+      current.commercialStatus,
+      input.product.commercialStatus
+    );
+  }
+  const remoteNcm = input.product.ncm?.trim() || null;
+  if (remoteNcm !== null && remoteNcm !== current.ncm) {
+    addSyncChange(changes, "ATTRIBUTES", "ncm", current.ncm, remoteNcm);
+  }
+  for (const [field, before, after] of [
+    ["condition", current.condition, input.product.condition],
+    ["format", current.format, input.product.format],
+    ["productType", current.productType, input.product.productType],
+    ["productionType", current.productionType, input.product.productionType],
+    ["freeShipping", current.freeShipping, input.product.freeShipping],
+    ["volumes", current.volumes, input.product.volumes]
+  ] as const) {
+    if (after !== null && after !== before) {
+      addSyncChange(changes, "ATTRIBUTES", field, before, after);
+    }
+  }
+  if (
+    input.product.itemsPerBox !== null
+    && !sameNullableNumber(current.itemsPerBox, input.product.itemsPerBox)
+  ) {
+    addSyncChange(
+      changes,
+      "ATTRIBUTES",
+      "itemsPerBox",
+      current.itemsPerBox === null ? null : Number(current.itemsPerBox),
+      input.product.itemsPerBox
+    );
+  }
+  if (
+    input.product.expirationDate !== null
+    && (current.expirationDate?.toISOString().slice(0, 10) ?? null)
+      !== input.product.expirationDate.toISOString().slice(0, 10)
+  ) {
+    addSyncChange(
+      changes,
+      "ATTRIBUTES",
+      "expirationDate",
+      current.expirationDate,
+      input.product.expirationDate
+    );
+  }
+
+  const currentAttributeIdentity = blingAttributeIdentity(
+    current.attributes,
+    input.connectionId
+  );
+  const nextAttributes = mergeBlingProductAttributes(
+    current.attributes,
+    input.product,
+    input.connectionId
+  );
+  const nextAttributeIdentity = blingAttributeIdentity(nextAttributes, input.connectionId);
+  if (currentAttributeIdentity.status !== nextAttributeIdentity.status) {
+    addSyncChange(
+      changes,
+      "STATUS",
+      "blingStatus",
+      currentAttributeIdentity.status,
+      nextAttributeIdentity.status
+    );
+  }
+  if (
+    JSON.stringify(comparableAttributes(currentAttributeIdentity))
+    !== JSON.stringify(comparableAttributes(nextAttributeIdentity))
+    && !changes.some((change) => change.category === "ATTRIBUTES")
+  ) {
+    addSyncChange(changes, "ATTRIBUTES", "attributes", "anterior", "atualizado");
+  }
+  if (
+    JSON.stringify(currentAttributeIdentity.storeLinks)
+    !== JSON.stringify(nextAttributeIdentity.storeLinks)
+  ) {
+    addSyncChange(
+      changes,
+      "STORES",
+      "stores",
+      currentAttributeIdentity.storeLinks.length,
+      nextAttributeIdentity.storeLinks.length
+    );
+  }
+  const currentMarketplaces = readBlingProductMarketplaceStores(
+    current.attributes,
+    input.connectionId
+  );
+  const nextMarketplaces = readBlingProductMarketplaceStores(nextAttributes, input.connectionId);
+  if (JSON.stringify(currentMarketplaces) !== JSON.stringify(nextMarketplaces)) {
+    addSyncChange(
+      changes,
+      "MARKETPLACES",
+      "marketplaces",
+      currentMarketplaces.mercadoLivre,
+      nextMarketplaces.mercadoLivre
+    );
+  }
+
+  const currentSalePrice = latestPrice ? Number(latestPrice.salePrice) : null;
+  const currentCostPrice = latestPrice ? Number(latestPrice.costPrice) : null;
+  if (input.product.price !== null && input.product.price !== currentSalePrice) {
+    addSyncChange(changes, "PRICE", "salePrice", currentSalePrice, input.product.price);
+  }
+  if (input.product.costPrice !== null && input.product.costPrice !== currentCostPrice) {
+    addSyncChange(changes, "PRICE", "costPrice", currentCostPrice, input.product.costPrice);
+  }
+  if (
+    input.product.stock !== null
+    && input.product.stock !== (inventory?.physicalQuantity ?? null)
+  ) {
+    addSyncChange(
+      changes,
+      "STOCK",
+      "stock",
+      inventory?.physicalQuantity ?? null,
+      input.product.stock
+    );
+  }
+  const existingImages = new Set(
+    normalizeBlingProductImages(currentImages.map((image) => image.url))
+  );
+  const missingImages = normalizeBlingProductImages(input.product.images).filter(
+    (url) => !existingImages.has(url)
+  );
+  if (missingImages.length) {
+    addSyncChange(
+      changes,
+      "IMAGES",
+      "images",
+      currentImages.length,
+      currentImages.length + missingImages.length,
+      missingImages.length
+    );
+  }
+  return {
+    productId: current.id,
+    sku: current.sku || input.product.sku || "Sem SKU",
+    changes
+  };
+}
+
 function blingAttributeIdentity(
   value: Prisma.JsonValue | Prisma.InputJsonValue | null,
   connectionId: string
@@ -1855,6 +2177,8 @@ async function persistItemProgress(input: {
   amount?: number;
   advanceItems?: number;
   invalidRowsRecorded?: boolean;
+  syncReportItem?: { productId: string; sku: string; changes: BlingProductSyncChange[] };
+  syncFailure?: { productId: string | null; sku: string; message: string };
 }) {
   const amount = input.amount ?? 1;
   const progress = nextProgress(input.cursor.progress, input.status, amount);
@@ -1863,7 +2187,14 @@ async function persistItemProgress(input: {
     progress,
     itemIndex: input.cursor.itemIndex + (input.advanceItems ?? amount),
     invalidRowsRecorded:
-      input.invalidRowsRecorded ?? input.cursor.invalidRowsRecorded
+      input.invalidRowsRecorded ?? input.cursor.invalidRowsRecorded,
+    ...((input.syncReportItem || input.syncFailure)
+      ? {
+          syncReport: input.syncFailure
+            ? appendBlingProductSyncFailure(input.cursor.syncReport, input.syncFailure)
+            : appendBlingProductSyncReport(input.cursor.syncReport, input.syncReportItem!)
+        }
+      : {})
   };
   await input.transaction.erpSyncJob.update({
     where: { id: input.jobId },
@@ -2251,14 +2582,16 @@ async function applyProduct(input: {
       return { status: "NO_CHANGES" as const, cursor };
     }
     if (resolved.match.kind === "NEEDS_REVIEW") {
-      await upsertImportDraft(
-        transaction,
-        product,
-        input.organizationId,
-        input.erpConnectionId,
-        input.connectionId,
-        "NEEDS_REVIEW"
-      );
+      if (input.operation === "IMPORT") {
+        await upsertImportDraft(
+          transaction,
+          product,
+          input.organizationId,
+          input.erpConnectionId,
+          input.connectionId,
+          "NEEDS_REVIEW"
+        );
+      }
       const cursor = await persistItemProgress({
         transaction,
         jobId: input.jobId,
@@ -2318,6 +2651,14 @@ async function applyProduct(input: {
     }
 
     if (!resolved.match.productId) throw new Error("Identidade local do produto nao foi resolvida.");
+    const syncAnalysis = input.operation === "SYNC"
+      ? await collectMappedBlingProductChanges(transaction, {
+          organizationId: input.organizationId,
+          connectionId: input.connectionId,
+          productId: resolved.match.productId,
+          product
+        })
+      : null;
     const changed = input.operation === "SYNC"
       ? await applyMappedBlingProductSync(transaction, {
           organizationId: input.organizationId,
@@ -2348,46 +2689,81 @@ async function applyProduct(input: {
         data: { lastExternalSyncAt: new Date() }
       });
     }
-    await upsertImportDraft(
-      transaction,
-      product,
-      input.organizationId,
-      input.erpConnectionId,
-      input.connectionId,
-      status
-    );
+    if (input.operation === "IMPORT") {
+      await upsertImportDraft(
+        transaction,
+        product,
+        input.organizationId,
+        input.erpConnectionId,
+        input.connectionId,
+        status
+      );
+    }
+    const syncChanges = changed && syncAnalysis?.changes.length === 0
+      ? [{
+          category: "OTHER" as const,
+          field: "product",
+          previousValue: "anterior",
+          newValue: "atualizado"
+        }]
+      : syncAnalysis?.changes ?? [];
     const cursor = await persistItemProgress({
       transaction,
       jobId: input.jobId,
       cursor: input.cursor,
-      status
+      status,
+      ...(input.operation === "SYNC" && changed && syncAnalysis
+        ? {
+            syncReportItem: {
+              productId: syncAnalysis.productId,
+              sku: syncAnalysis.sku,
+              changes: syncChanges
+            }
+          }
+        : {})
     });
     return { status, cursor };
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
 
 async function recordFailedProduct(input: {
+  operation: BlingProductJobOperation;
   organizationId: string;
   connectionId: string;
   erpConnectionId: string;
   jobId: string;
   product: NormalizedBlingProduct;
+  preliminaryMatch: BlingProductImportMatch | undefined;
+  error: unknown;
   cursor: BlingProductImportJobCursor;
 }) {
   return prisma.$transaction(async (transaction) => {
-    await upsertImportDraft(
-      transaction,
-      input.product,
-      input.organizationId,
-      input.erpConnectionId,
-      input.connectionId,
-      "FAILED"
-    );
+    if (input.operation === "IMPORT") {
+      await upsertImportDraft(
+        transaction,
+        input.product,
+        input.organizationId,
+        input.erpConnectionId,
+        input.connectionId,
+        "FAILED"
+      );
+    }
     return persistItemProgress({
       transaction,
       jobId: input.jobId,
       cursor: input.cursor,
-      status: "FAILED"
+      status: "FAILED",
+      ...(input.operation === "SYNC"
+        ? {
+            syncFailure: {
+              productId: input.preliminaryMatch?.productId ?? null,
+              sku: input.product.sku || "Sem SKU",
+              message: input.error instanceof BlingApiError
+                ? "Nao foi possivel consultar este produto no Bling."
+                : "Nao foi possivel sincronizar este produto."
+            }
+          }
+        : {})
     });
   }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
@@ -2425,13 +2801,16 @@ async function applyPage(input: {
       });
       return result.cursor;
     },
-    recordFailure: (product, currentCursor) =>
+    recordFailure: (product, currentCursor, error) =>
       recordFailedProduct({
+        operation: input.operation,
         organizationId: input.organizationId,
         connectionId: input.connectionId,
         erpConnectionId: input.erpConnectionId,
         jobId: input.jobId,
         product,
+        preliminaryMatch: input.matches.get(product.externalProductId),
+        error,
         cursor: currentCursor
       })
   });
@@ -2882,6 +3261,371 @@ export function consumeBlingImportPreviewConfirmation(
   return confirmation;
 }
 
+async function loadMappedBlingProductsForSync(
+  organizationId: string,
+  connectionId: string
+) {
+  const rows = await prisma.productExternalMapping.findMany({
+    where: { organizationId, connectionId },
+    orderBy: [{ externalProductId: "asc" }, { id: "asc" }],
+    select: {
+      externalProductId: true,
+      productId: true,
+      product: {
+        select: {
+          name: true,
+          sku: true,
+          ean: true,
+          packagingGtin: true,
+          description: true,
+          category: true,
+          brand: true,
+          ncm: true,
+          weight: true,
+          grossWeight: true,
+          height: true,
+          width: true,
+          depth: true,
+          dimensionUnit: true,
+          condition: true,
+          format: true,
+          productType: true,
+          commercialStatus: true,
+          productionType: true,
+          expirationDate: true,
+          freeShipping: true,
+          volumes: true,
+          itemsPerBox: true,
+          attributes: true
+        }
+      }
+    }
+  });
+  return rows.map((row) => {
+    const scoped = readBlingProductConnectionAttributes(
+      row.product.attributes,
+      connectionId
+    );
+    return {
+      externalProductId: row.externalProductId,
+      productId: row.productId,
+      product: {
+        externalProductId: row.externalProductId,
+        parentExternalProductId: null,
+        name: row.product.name,
+        sku: row.product.sku,
+        gtin: row.product.ean,
+        packagingGtin: row.product.packagingGtin,
+        description: row.product.description,
+        shortDescription: text(scoped.shortDescription) || null,
+        price: null,
+        costPrice: null,
+        stock: null,
+        unit: text(scoped.unit) || null,
+        imageUrl: null,
+        images: [],
+        brand: row.product.brand,
+        category: row.product.category,
+        categoryId: text(scoped.categoryId) || null,
+        ncm: row.product.ncm,
+        weight: row.product.weight === null ? null : Number(row.product.weight),
+        grossWeight: row.product.grossWeight === null ? null : Number(row.product.grossWeight),
+        height: row.product.height === null ? null : Number(row.product.height),
+        width: row.product.width === null ? null : Number(row.product.width),
+        depth: row.product.depth === null ? null : Number(row.product.depth),
+        dimensionUnit: row.product.dimensionUnit,
+        condition: row.product.condition,
+        status: text(scoped.externalStatus) || "UNKNOWN",
+        format: row.product.format,
+        productType: row.product.productType,
+        commercialStatus: row.product.commercialStatus,
+        productionType: row.product.productionType,
+        expirationDate: row.product.expirationDate,
+        freeShipping: row.product.freeShipping,
+        volumes: row.product.volumes,
+        itemsPerBox: row.product.itemsPerBox === null ? null : Number(row.product.itemsPerBox),
+        origin: text(scoped.origin) || null,
+        storeLinks: list(scoped.storeLinks) as NormalizedBlingStoreLink[],
+        storeLinksComplete: scoped.storeLinksComplete === true,
+        isVariation: row.product.format === ProductFormat.VARIATION
+      } satisfies NormalizedBlingProduct
+    };
+  });
+}
+
+function mappedSyncPageCounts(total: number) {
+  if (total === 0) return [0];
+  const counts = Array.from(
+    { length: Math.ceil(total / pageSize) },
+    (_, index) => Math.min(pageSize, total - (index * pageSize))
+  );
+  if (counts.at(-1) === pageSize) counts.push(0);
+  return counts;
+}
+
+export async function ensureBlingSyncCompletionNotification(
+  transaction: Prisma.TransactionClient,
+  input: { organizationId: string; jobId: string }
+) {
+  const lockKey = `bling-sync-notification:${input.organizationId}:${input.jobId}`;
+  await transaction.$queryRaw<Array<{ lockState: string }>>`
+    SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS "lockState"
+  `;
+  const marker = createBlingSyncReportNotificationMarker(input.jobId);
+  const existingNotification = await transaction.notification.findFirst({
+    where: { organizationId: input.organizationId, message: marker },
+    select: { id: true }
+  });
+  if (existingNotification) return existingNotification;
+  return transaction.notification.create({
+    data: {
+      organizationId: input.organizationId,
+      title: "Sincronizacao Bling concluida",
+      message: marker,
+      status: "UNREAD"
+    }
+  });
+}
+
+export async function analyzeMappedBlingProductsForSyncPreview(
+  input: {
+    organizationId: string;
+    connectionId: string;
+    products: NormalizedBlingProduct[];
+    matches: Map<string, BlingProductImportMatch>;
+  },
+  dependencies: {
+    hydrate?: (input: {
+      organizationId: string;
+      connectionId: string;
+      product: NormalizedBlingProduct;
+    }) => Promise<NormalizedBlingProduct>;
+    collectChanges?: (
+      transaction: Prisma.TransactionClient,
+      input: {
+        organizationId: string;
+        connectionId: string;
+        productId: string;
+        product: NormalizedBlingProduct;
+      }
+    ) => Promise<{ sku: string; changes: BlingProductSyncChange[] }>;
+  } = {}
+) {
+  const mapped = input.products.flatMap((product) => {
+    const match = input.matches.get(product.externalProductId);
+    return match?.kind === "MAPPING" && match.productId
+      ? [{ product, productId: match.productId }]
+      : [];
+  });
+  const summary = {
+    analyzed: mapped.length,
+    withChanges: 0,
+    withoutChanges: 0,
+    failures: 0
+  };
+  let nextIndex = 0;
+  const workerCount = Math.min(3, Math.max(1, mapped.length));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < mapped.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      const item = mapped[currentIndex];
+      try {
+        const product = await (dependencies.hydrate ?? hydrateBlingProductForPersistence)({
+          organizationId: input.organizationId,
+          connectionId: input.connectionId,
+          product: item.product
+        });
+        const result = await (dependencies.collectChanges ?? collectMappedBlingProductChanges)(
+          prisma as unknown as Prisma.TransactionClient,
+          {
+            organizationId: input.organizationId,
+            connectionId: input.connectionId,
+            productId: item.productId,
+            product
+          }
+        );
+        if (result.changes.length) summary.withChanges += 1;
+        else summary.withoutChanges += 1;
+      } catch {
+        summary.failures += 1;
+      }
+    }
+  }));
+  return summary;
+}
+
+async function createMappedBlingSyncDryRun(input: {
+  userId: string;
+  organizationId: string;
+  connectionId: string;
+  correlationId: string;
+  connection: { id: string; name: string };
+  startedAt: number;
+}): Promise<BlingProductDryRun> {
+  const mapped = await loadMappedBlingProductsForSync(
+    input.organizationId,
+    input.connectionId
+  );
+  const products = mapped.map((row) => row.product);
+  const matches = new Map<string, BlingProductImportMatch>(
+    mapped.map((row) => [
+      row.externalProductId,
+      { kind: "MAPPING", productId: row.productId, conflictField: null }
+    ])
+  );
+  const syncAnalysis = await analyzeMappedBlingProductsForSyncPreview({
+    organizationId: input.organizationId,
+    connectionId: input.connectionId,
+    products,
+    matches
+  });
+  const pageCounts = mappedSyncPageCounts(mapped.length);
+  const integrity = evaluateBlingImportPreviewIntegrity({
+    totalReportedByBling: null,
+    reportedTotalSource: "NONE",
+    sourceRowsFetched: mapped.length,
+    completedPages: pageCounts.map((_, index) => index + 1),
+    pageCounts,
+    pageStatuses: pageCounts.map(() => 200),
+    terminated: true,
+    totalChangedDuringFetch: false,
+    invalidRows: 0,
+    duplicateExternalIds: 0,
+    uniqueProductsLoaded: mapped.length,
+    pageSize
+  });
+  if (!integrity.previewComplete) {
+    throw new BlingImportPreviewError(
+      "A lista de produtos vinculados nao passou pelas verificacoes de integridade.",
+      previewFailureDiagnostic({
+        correlationId: input.correlationId,
+        stage: "LOCAL_COMPARISON",
+        startedAt: input.startedAt,
+        errorCode: integrity.reasons[0] ?? "PREVIEW_INCOMPLETE",
+        pageCounts,
+        pagesCompleted: pageCounts.length,
+        lastDataPage: integrity.lastDataPage,
+        sentinelPage: integrity.sentinelPage,
+        derivedTotal: integrity.derivedTotal,
+        totalSource: integrity.totalSource,
+        uniqueProductsLoaded: mapped.length,
+        paginationComplete: integrity.paginationComplete,
+        previewComplete: false,
+        jobCreated: false
+      })
+    );
+  }
+  const listFingerprint = createHash("sha256")
+    .update(JSON.stringify(mapped.map((row) => row.externalProductId)))
+    .digest("hex");
+  const matchSummary: BlingProductImportMatchSummary = {
+    ...emptyMatchSummary(),
+    updatedByMapping: mapped.length
+  };
+  const proof: BlingImportPreviewProof = {
+    pageSize,
+    firstPage: integrity.firstPage,
+    lastDataPage: integrity.lastDataPage,
+    sentinelPage: integrity.sentinelPage,
+    pageCounts,
+    uniqueIdsCount: mapped.length,
+    reportedTotal: null,
+    derivedTotal: integrity.derivedTotal,
+    totalSource: integrity.totalSource,
+    duplicateCount: 0,
+    invalidCount: 0,
+    listFingerprint
+  };
+  const previewFingerprint = createBlingImportPreviewFingerprint({
+    operation: "SYNC",
+    correlationId: input.correlationId,
+    connectionId: input.connectionId,
+    ...proof,
+    existing: mapped.length,
+    newProducts: 0,
+    importable: mapped.length,
+    skuConflicts: 0,
+    matchSummary
+  });
+  const confirmation = createBlingImportPreviewConfirmation({
+    userId: input.userId,
+    organizationId: input.organizationId,
+    connectionId: input.connectionId,
+    operation: "SYNC",
+    correlationId: input.correlationId,
+    previewFingerprint,
+    proof,
+    existing: mapped.length,
+    newProducts: 0,
+    importable: mapped.length,
+    skuConflicts: 0,
+    matchSummary
+  });
+  return {
+    operation: "SYNC",
+    connectionReady: true,
+    connectionId: input.connection.id,
+    connectionName: input.connection.name,
+    correlationId: input.correlationId,
+    reportedTotal: null,
+    derivedTotal: integrity.derivedTotal,
+    totalSource: integrity.totalSource,
+    totalReportedByBling: null,
+    totalFound: mapped.length,
+    pagesFound: pageCounts.filter((count) => count > 0).length,
+    pagesCompleted: pageCounts.length,
+    pagesExpected: integrity.pagesExpected,
+    pageSize,
+    firstPage: integrity.firstPage,
+    lastDataPage: integrity.lastDataPage,
+    sentinelPage: integrity.sentinelPage,
+    pageCounts,
+    uniqueProductsLoaded: mapped.length,
+    uniqueIdsCount: mapped.length,
+    simpleProducts: products.filter((product) => !product.isVariation).length,
+    variations: products.filter((product) => product.isVariation).length,
+    active: products.filter((product) => product.commercialStatus === ProductCommercialStatus.ACTIVE).length,
+    inactive: products.filter((product) => product.commercialStatus !== ProductCommercialStatus.ACTIVE).length,
+    withoutSku: products.filter((product) => !product.sku).length,
+    withoutGtin: products.filter((product) => {
+      const gtin = normalizeGtin(product.gtin);
+      return !gtin || !isValidGtin(gtin);
+    }).length,
+    existing: mapped.length,
+    new: 0,
+    wouldUpdate: syncAnalysis.withChanges,
+    syncAnalyzed: syncAnalysis.analyzed,
+    syncWithChanges: syncAnalysis.withChanges,
+    syncWithoutChanges: syncAnalysis.withoutChanges,
+    syncFailures: syncAnalysis.failures,
+    importable: mapped.length,
+    updatedByMapping: mapped.length,
+    linkedBySku: 0,
+    linkedByGtin: 0,
+    wouldCreate: 0,
+    needsReview: 0,
+    invalid: 0,
+    errors: syncAnalysis.failures,
+    ignored: 0,
+    duplicateExternalIds: 0,
+    skuConflicts: 0,
+    gtinConflicts: 0,
+    completed: true,
+    paginationComplete: true,
+    previewComplete: true,
+    listFingerprint,
+    previewFingerprint,
+    previewExpiresAt: confirmation.previewExpiresAt,
+    confirmationToken: confirmation.confirmationToken,
+    warnings: syncAnalysis.failures
+      ? [`${syncAnalysis.failures} produto(s) nao puderam ser comparados na previa.`]
+      : [],
+    durationMs: Math.max(0, Date.now() - input.startedAt),
+    writesPerformed: false
+  };
+}
+
 export class BlingProductImportService {
   async scheduleInitialImport(input: {
     organizationId: string;
@@ -3042,6 +3786,13 @@ export class BlingProductImportService {
         })
       );
     }
+    if (input.operation === "SYNC") {
+      return createMappedBlingSyncDryRun({
+        ...input,
+        connection,
+        startedAt
+      });
+    }
 
     const fetched = await fetchAllProducts({
       organizationId: input.organizationId,
@@ -3133,6 +3884,7 @@ export class BlingProductImportService {
         })
       );
     }
+    const syncAnalysis = { analyzed: 0, withChanges: 0, withoutChanges: 0, failures: 0 };
     const existing = matching.summary.updatedByMapping;
     const newProducts = input.operation === "IMPORT" ? matching.summary.created : 0;
     const importable = input.operation === "IMPORT"
@@ -3212,7 +3964,11 @@ export class BlingProductImportService {
       }).length,
       existing,
       new: newProducts,
-      wouldUpdate: input.operation === "SYNC" ? matching.summary.updatedByMapping : 0,
+      wouldUpdate: 0,
+      syncAnalyzed: syncAnalysis.analyzed,
+      syncWithChanges: syncAnalysis.withChanges,
+      syncWithoutChanges: syncAnalysis.withoutChanges,
+      syncFailures: syncAnalysis.failures,
       importable,
       updatedByMapping: matching.summary.updatedByMapping,
       linkedBySku: input.operation === "IMPORT" ? matching.summary.linkedBySku : 0,
@@ -3305,12 +4061,16 @@ export class BlingProductImportService {
                 summary: confirmation.matchSummary,
                 invalid: confirmation.invalidCount,
                 reportedTotal: confirmation.reportedTotal,
-                sourceRows: 0
+                sourceRows: 0,
+                listFingerprint: confirmation.listFingerprint
               },
               progress: emptyImportProgress(),
               page: 1,
               itemIndex: 0,
-              invalidRowsRecorded: false
+              invalidRowsRecorded: false,
+              ...(operation === "SYNC"
+                ? { syncReport: emptyBlingProductSyncReport() }
+                : {})
             } satisfies BlingProductImportJobCursor)
           },
           select: {
@@ -3436,13 +4196,57 @@ export class BlingProductImportService {
       if (expectedPageCount === undefined && !initialCursor.automatic) {
         throw new Error("A pagina solicitada nao pertence a previa confirmada.");
       }
-      const payload = await fetchCatalogPage({
-        organizationId: input.organizationId,
-        connectionId: input.connectionId,
-        page,
-        readOnly: false
-      });
-      const normalized = normalizePage(payload);
+      let normalized: ReturnType<typeof normalizePage>;
+      let matching: Awaited<ReturnType<typeof classifyBlingProductsForConnection>>;
+      if (initialCursor.operation === "SYNC") {
+        const mapped = await loadMappedBlingProductsForSync(
+          input.organizationId,
+          input.connectionId
+        );
+        const listFingerprint = createHash("sha256")
+          .update(JSON.stringify(mapped.map((row) => row.externalProductId)))
+          .digest("hex");
+        if (
+          !initialCursor.preview.listFingerprint
+          || listFingerprint !== initialCursor.preview.listFingerprint
+        ) {
+          throw new Error("A lista de produtos vinculados mudou depois da previa.");
+        }
+        const pageRows = mapped.slice((page - 1) * pageSize, page * pageSize);
+        normalized = {
+          products: pageRows.map((row) => row.product),
+          sourceRowCount: pageRows.length,
+          invalidRows: 0,
+          totalReported: null,
+          totalSource: "NONE",
+          totalInvalid: false,
+          httpStatus: 200
+        };
+        const matches = new Map<string, BlingProductImportMatch>(
+          pageRows.map((row) => [
+            row.externalProductId,
+            { kind: "MAPPING", productId: row.productId, conflictField: null }
+          ])
+        );
+        matching = {
+          mappings: new Map(pageRows.map((row) => [row.externalProductId, row.productId])),
+          matches,
+          summary: { ...emptyMatchSummary(), updatedByMapping: pageRows.length }
+        };
+      } else {
+        const payload = await fetchCatalogPage({
+          organizationId: input.organizationId,
+          connectionId: input.connectionId,
+          page,
+          readOnly: false
+        });
+        normalized = normalizePage(payload);
+        matching = await classifyBlingProductsForConnection({
+          organizationId: input.organizationId,
+          connectionId: input.connectionId,
+          products: normalized.products
+        });
+      }
       if (
         expectedPageCount !== undefined
         && normalized.sourceRowCount !== expectedPageCount
@@ -3457,11 +4261,6 @@ export class BlingProductImportService {
       ) {
         throw new Error("O total do catalogo mudou durante a importacao inicial.");
       }
-      const matching = await classifyBlingProductsForConnection({
-        organizationId: input.organizationId,
-        connectionId: input.connectionId,
-        products: normalized.products
-      });
       const pageAlreadyStarted =
         initialCursor.itemIndex > 0 || initialCursor.invalidRowsRecorded;
       const pageCounts = initialCursor.automatic && !pageAlreadyStarted
@@ -3478,7 +4277,9 @@ export class BlingProductImportService {
         ...initialCursor,
         preview: {
           ...initialCursor.preview,
-          total: reportedTotal ?? sourceRows,
+          total: initialCursor.automatic
+            ? reportedTotal ?? sourceRows
+            : initialCursor.preview.total,
           pageCounts,
           summary: initialCursor.automatic && !pageAlreadyStarted
             ? addMatchSummaries(initialCursor.preview.summary, matching.summary)
@@ -3492,12 +4293,6 @@ export class BlingProductImportService {
           sourceRows
         }
       };
-      const productsForOperation = initialCursor.operation === "SYNC"
-        ? normalized.products.filter(
-            (product) =>
-              matching.matches.get(product.externalProductId)?.kind === "MAPPING"
-          )
-        : normalized.products;
       const cursor = await applyPage({
         operation: initialCursor.operation,
         organizationId: input.organizationId,
@@ -3505,7 +4300,7 @@ export class BlingProductImportService {
         erpConnectionId: job.erpConnectionId,
         jobId: job.id,
         page,
-        products: productsForOperation,
+        products: normalized.products,
         matches: matching.matches,
         invalidRows: initialCursor.operation === "IMPORT"
           ? normalized.invalidRows
@@ -3539,6 +4334,12 @@ export class BlingProductImportService {
             where: { id: input.connectionId, organizationId: input.organizationId },
             data: { lastProductSyncAt: new Date() }
           });
+          if (initialCursor.operation === "SYNC") {
+            await ensureBlingSyncCompletionNotification(transaction, {
+              organizationId: input.organizationId,
+              jobId: job.id
+            });
+          }
         }
       });
       return this.getJobStatus(input);
@@ -3604,7 +4405,8 @@ export class BlingProductImportService {
       noChanges: cursor?.progress.noChanges ?? 0,
       needsReview: cursor?.progress.needsReview ?? 0,
       invalid: cursor?.progress.invalid ?? 0,
-      failed: cursor?.progress.failed ?? job.totalErrors
+      failed: cursor?.progress.failed ?? job.totalErrors,
+      syncReport: cursor?.syncReport ?? null
     };
   }
 }

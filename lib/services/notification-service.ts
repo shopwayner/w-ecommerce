@@ -1,4 +1,11 @@
 import { prisma } from "@/lib/prisma";
+import {
+  paginateBlingProductSyncReport,
+  previewBlingProductSyncReport,
+  readBlingProductSyncReportFromCursor,
+  readBlingSyncReportNotificationJobId,
+  type BlingProductSyncReportFilter
+} from "@/lib/bling-product-sync-report";
 
 export type SafeNotification = {
   id: string;
@@ -8,6 +15,11 @@ export type SafeNotification = {
   createdAt: string;
   read: boolean;
   source: "system";
+  action?: {
+    label: "Ver alteracoes";
+    jobId: string;
+    preview: ReturnType<typeof previewBlingProductSyncReport>;
+  };
 };
 
 const sensitiveAssignmentPattern =
@@ -29,6 +41,28 @@ function inferType(title: string, message: string): SafeNotification["type"] {
   return "INFO";
 }
 
+function readProgress(cursor: string | null) {
+  try {
+    const parsed = JSON.parse(cursor ?? "") as {
+      progress?: { processed?: unknown; noChanges?: unknown; failed?: unknown };
+    };
+    return {
+      analyzed: typeof parsed.progress?.processed === "number" ? parsed.progress.processed : 0,
+      unchanged: typeof parsed.progress?.noChanges === "number" ? parsed.progress.noChanges : 0,
+      failures: typeof parsed.progress?.failed === "number" ? parsed.progress.failed : 0
+    };
+  } catch {
+    return { analyzed: 0, unchanged: 0, failures: 0 };
+  }
+}
+
+function formatDuration(startedAt: Date | null, finishedAt: Date | null) {
+  if (!startedAt || !finishedAt) return null;
+  const seconds = Math.max(0, Math.round((finishedAt.getTime() - startedAt.getTime()) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}min ${seconds % 60}s`;
+}
+
 export async function listNotifications(organizationId: string) {
   const [notifications, unreadCount] = await Promise.all([
     prisma.notification.findMany({
@@ -40,11 +74,46 @@ export async function listNotifications(organizationId: string) {
       where: { organizationId, status: "UNREAD" }
     })
   ]);
+  const reportJobIds = notifications.flatMap((notification) => {
+    const jobId = readBlingSyncReportNotificationJobId(notification.message);
+    return jobId ? [jobId] : [];
+  });
+  const reportJobs = reportJobIds.length
+    ? await prisma.erpSyncJob.findMany({
+        where: {
+          organizationId,
+          id: { in: reportJobIds },
+          type: "BLING_PRODUCTS_SYNC"
+        },
+        select: {
+          id: true,
+          lastCursor: true,
+          startedAt: true,
+          finishedAt: true,
+          blingConnection: { select: { name: true } }
+        }
+      })
+    : [];
+  const jobs = new Map(reportJobs.map((job) => [job.id, job]));
 
   return {
     notifications: notifications.map((notification): SafeNotification => {
       const title = sanitizeText(notification.title);
-      const message = sanitizeText(notification.message);
+      const reportJobId = readBlingSyncReportNotificationJobId(notification.message);
+      const job = reportJobId ? jobs.get(reportJobId) : null;
+      const report = job ? readBlingProductSyncReportFromCursor(job.lastCursor) : null;
+      const progress = job ? readProgress(job.lastCursor) : null;
+      const duration = job ? formatDuration(job.startedAt, job.finishedAt) : null;
+      const preview = report ? previewBlingProductSyncReport(report) : null;
+      const message = preview && progress
+        ? preview.changedProducts === 0 && preview.failureCount === 0
+          ? "Sincronizacao concluida. Nenhuma alteracao encontrada."
+          : [
+              job?.blingConnection?.name ? `Conta ${job.blingConnection.name}.` : null,
+              `${progress.analyzed} analisados; ${preview.changedProducts} alterados; ${progress.unchanged} sem alteracao; ${preview.failureCount} falhas.`,
+              duration ? `Duracao ${duration}.` : null
+            ].filter(Boolean).join(" ")
+        : sanitizeText(notification.message);
       return {
         id: notification.id,
         type: inferType(title, message),
@@ -52,10 +121,43 @@ export async function listNotifications(organizationId: string) {
         message,
         createdAt: notification.createdAt.toISOString(),
         read: notification.status !== "UNREAD",
-        source: "system"
+        source: "system",
+        ...(reportJobId && preview && preview.changedProducts > 0
+          ? {
+              action: {
+                label: "Ver alteracoes" as const,
+                jobId: reportJobId,
+                preview
+              }
+            }
+          : {})
       };
     }),
     unreadCount
+  };
+}
+
+export async function getBlingSyncReportPage(input: {
+  organizationId: string;
+  jobId: string;
+  page: number;
+  pageSize: number;
+  filter: BlingProductSyncReportFilter;
+}) {
+  const job = await prisma.erpSyncJob.findFirst({
+    where: {
+      id: input.jobId,
+      organizationId: input.organizationId,
+      type: "BLING_PRODUCTS_SYNC"
+    },
+    select: { id: true, lastCursor: true }
+  });
+  if (!job) return null;
+  const report = readBlingProductSyncReportFromCursor(job.lastCursor);
+  if (!report) return null;
+  return {
+    jobId: job.id,
+    ...paginateBlingProductSyncReport(report, input)
   };
 }
 

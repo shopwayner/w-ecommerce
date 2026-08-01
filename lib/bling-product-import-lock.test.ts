@@ -176,7 +176,7 @@ test.afterEach(() => {
   }
 });
 
-test("os dois advisory locks usam o cast seguro ja validado no projeto", () => {
+test("todos os advisory locks usam o cast seguro ja validado no projeto", () => {
   const importService = readFileSync(
     path.join(process.cwd(), "lib/services/bling-product-import-service.ts"),
     "utf8"
@@ -188,11 +188,11 @@ test("os dois advisory locks usam o cast seguro ja validado no projeto", () => {
   const safeSql =
     'SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS "lockState"';
 
-  assert.equal(importService.split(safeSql).length - 1, 2);
+  assert.equal(importService.split(safeSql).length - 1, 3);
   assert.equal(updateService.split(safeSql).length - 1, 1);
   assert.equal(
     (importService.match(/pg_advisory_xact_lock/g) ?? []).length,
-    2
+    3
   );
   assert.doesNotMatch(
     importService,

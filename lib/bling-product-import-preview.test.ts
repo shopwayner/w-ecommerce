@@ -691,7 +691,8 @@ test("advisory locks sao convertidos para tipo suportado pelo Prisma", () => {
     "utf8"
   );
   const locks = service.match(/pg_advisory_xact_lock[\s\S]{0,100}?::text AS "lockState"/g) ?? [];
-  assert.equal(locks.length, 2);
+  assert.equal(locks.length, 3);
+  assert.match(service, /bling-sync-notification:\$\{input\.organizationId\}:\$\{input\.jobId\}/);
   assert.doesNotMatch(service, /pg_advisory_xact_lock\(hashtext\([^)]*\)\)`/);
 });
 
