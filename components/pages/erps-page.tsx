@@ -84,6 +84,14 @@ type BlingConnectionLimit = {
   allowed: boolean;
 };
 
+type RemovedBlingConnection = {
+  id: string;
+  name: string;
+  provider: "BLING";
+  removedAt: string;
+  organizationName: string;
+};
+
 type ERP = {
   key: ERPKey;
   name: string;
@@ -211,6 +219,7 @@ function createForm(connection: ERPConnection | null, erp: ERP | null): FormStat
 export function ERPsPage() {
   const [connections, setConnections] = useState<ERPConnection[]>([]);
   const [blingAccounts, setBlingAccounts] = useState<BlingIntegratedConnection[]>([]);
+  const [removedBlingAccounts, setRemovedBlingAccounts] = useState<RemovedBlingConnection[]>([]);
   const [blingConnectionLimit, setBlingConnectionLimit] = useState<BlingConnectionLimit>({
     used: 0,
     current: 0,
@@ -233,6 +242,8 @@ export function ERPsPage() {
   const [testing, setTesting] = useState(false);
   const [blingAction, setBlingAction] = useState<"test" | "connect" | "reconnect" | "reauthorize" | "disconnect" | "remove" | null>(null);
   const [canRemoveBlingConnection, setCanRemoveBlingConnection] = useState(false);
+  const [canRestoreBlingConnection, setCanRestoreBlingConnection] = useState(false);
+  const [restoringConnectionId, setRestoringConnectionId] = useState<string | null>(null);
   const [removeConfirmationOpen, setRemoveConfirmationOpen] = useState(false);
   const [removeConfirmationName, setRemoveConfirmationName] = useState("");
 
@@ -249,16 +260,23 @@ export function ERPsPage() {
 
   async function loadBlingAccounts() {
     const response = await fetch("/api/integrations");
-    if (!response.ok) return [];
+    if (!response.ok) {
+      setRemovedBlingAccounts([]);
+      setCanRestoreBlingConnection(false);
+      return [];
+    }
     const payload = (await response.json()) as {
       data?: BlingIntegratedConnection[];
+      removed?: RemovedBlingConnection[];
       limit?: BlingConnectionLimit;
-      permissions?: { canRemove?: boolean };
+      permissions?: { canRemove?: boolean; canRestore?: boolean };
     };
     const accounts = payload.data ?? [];
     setBlingAccounts(accounts);
+    setRemovedBlingAccounts(payload.removed ?? []);
     if (payload.limit) setBlingConnectionLimit(payload.limit);
     setCanRemoveBlingConnection(payload.permissions?.canRemove === true);
+    setCanRestoreBlingConnection(payload.permissions?.canRestore === true);
     setSelectedBlingAccount((current) => current ? accounts.find((account) => account.id === current.id) ?? current : current);
     return accounts;
   }
@@ -490,6 +508,44 @@ export function ERPsPage() {
       closeModal();
     } finally {
       setBlingAction(null);
+    }
+  }
+
+  async function restoreBlingConnection(connection: RemovedBlingConnection) {
+    if (!canRestoreBlingConnection || restoringConnectionId) return;
+    const confirmed = window.confirm(
+      "Esta ação restaurará a configuração da integração. Será necessário autorizar novamente a conta no Bling. Produtos e vínculos existentes serão preservados."
+    );
+    if (!confirmed) return;
+
+    setRestoringConnectionId(connection.id);
+    setCallbackNotice(null);
+    try {
+      const response = await fetch(`/api/integrations/${connection.id}/restore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmed: true })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setCallbackNotice({
+          success: false,
+          message: payload.error ?? "Não foi possível restaurar esta integração."
+        });
+        return;
+      }
+      await loadBlingAccounts();
+      setCallbackNotice({
+        success: true,
+        message: "Integração restaurada. Reconecte a conta para autorizar novamente o Bling."
+      });
+    } catch {
+      setCallbackNotice({
+        success: false,
+        message: "Não foi possível restaurar esta integração."
+      });
+    } finally {
+      setRestoringConnectionId(null);
     }
   }
 
@@ -731,6 +787,55 @@ export function ERPsPage() {
           ))}
         </div>
       </section>
+
+      {canRestoreBlingConnection ? (
+        <section className="mt-10" aria-labelledby="removed-integrations-title">
+          <div className="mb-4">
+            <h2 id="removed-integrations-title" className="text-xl font-bold text-matrix-fg">Integrações removidas</h2>
+            <p className="mt-2 text-sm text-matrix-muted">Restauração administrativa de configurações arquivadas, sem iniciar OAuth ou sincronizações.</p>
+          </div>
+
+          {removedBlingAccounts.length === 0 ? (
+            <p className="rounded-lg border border-matrix-border bg-matrix-panel/72 px-4 py-3 text-sm text-matrix-muted">
+              Nenhuma integração removida nesta organização.
+            </p>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {removedBlingAccounts.map((connection) => (
+                <Card key={connection.id} className="flex min-w-0 flex-col border-matrix-border bg-matrix-panel/82 p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold uppercase text-matrix-goldDark">{connection.provider}</p>
+                      <h3 className="mt-1 break-words text-lg font-bold text-matrix-fg">{connection.name}</h3>
+                    </div>
+                    <Badge tone="muted">Removida</Badge>
+                  </div>
+                  <dl className="mt-5 grid gap-3 text-sm">
+                    <div>
+                      <dt className="text-matrix-muted">Organização</dt>
+                      <dd className="mt-1 break-words text-matrix-fg">{connection.organizationName}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-matrix-muted">Data da remoção</dt>
+                      <dd className="mt-1 text-matrix-fg">{formatDate(connection.removedAt)}</dd>
+                    </div>
+                  </dl>
+                  <Button
+                    className="mt-5 w-full justify-center"
+                    disabled={Boolean(restoringConnectionId)}
+                    onClick={() => restoreBlingConnection(connection)}
+                    type="button"
+                    variant="secondary"
+                  >
+                    <RefreshCw className={`h-4 w-4 ${restoringConnectionId === connection.id ? "animate-spin" : ""}`} />
+                    {restoringConnectionId === connection.id ? "Restaurando..." : "Restaurar integração"}
+                  </Button>
+                </Card>
+              ))}
+            </div>
+          )}
+        </section>
+      ) : null}
 
       {selected?.key === "bling" && modalMode ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 px-4 py-6 backdrop-blur-sm" onClick={closeModal}>

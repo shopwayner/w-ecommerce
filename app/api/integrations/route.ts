@@ -3,7 +3,7 @@ import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
 import { planLimitService } from "@/lib/services/plan-limit-service";
 import { getBlingConnectionCredentialSummary } from "@/lib/services/bling-oauth-service";
-import { hasSystemPermission } from "@/lib/auth/system-superuser";
+import { hasSystemPermission, isSystemSuperuserContext } from "@/lib/auth/system-superuser";
 
 function safeLastError(status: string, value: string | null) {
   if (!value) return null;
@@ -16,7 +16,8 @@ export async function GET() {
   const auth = await requireApiAuth("integrations:read");
   if (!auth.ok) return auth.response;
 
-  const [blingConnections, limit] = await Promise.all([
+  const canRestore = isSystemSuperuserContext(auth.context);
+  const [blingConnections, limit, removedConnections] = await Promise.all([
     prisma.blingConnection.findMany({
       where: {
         organizationId: auth.context.organizationId,
@@ -47,14 +48,36 @@ export async function GET() {
         }
       }
     }),
-    planLimitService.checkBlingConnectionLimit(auth.context.organizationId, auth.context.user.id)
+    planLimitService.checkBlingConnectionLimit(auth.context.organizationId, auth.context.user.id),
+    canRestore
+      ? prisma.blingConnection.findMany({
+          where: {
+            organizationId: auth.context.organizationId,
+            status: "DISABLED"
+          },
+          orderBy: { updatedAt: "desc" },
+          select: {
+            id: true,
+            name: true,
+            updatedAt: true
+          }
+        })
+      : Promise.resolve([])
   ]);
 
   return NextResponse.json({
     limit,
     permissions: {
-      canRemove: hasSystemPermission(auth.context, "integrations:critical")
+      canRemove: hasSystemPermission(auth.context, "integrations:critical"),
+      canRestore
     },
+    removed: removedConnections.map((connection) => ({
+      id: connection.id,
+      name: connection.name,
+      provider: "BLING" as const,
+      removedAt: connection.updatedAt,
+      organizationName: auth.context.organization.name
+    })),
     data: blingConnections.map((connection) => {
       const credentialSummary = getBlingConnectionCredentialSummary();
       const tokenExpiresAt = connection.tokens[0]?.expiresAt ?? null;
