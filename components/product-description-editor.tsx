@@ -165,7 +165,7 @@ export const ProductDescriptionEditor = memo(function ProductDescriptionEditor({
       <div
         aria-label="Descricao do produto"
         aria-multiline="true"
-        className="matrix-scroll min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap break-words px-3 py-3 text-sm leading-6 outline-none empty:before:pointer-events-none empty:before:text-matrix-muted empty:before:content-[attr(data-placeholder)] focus:ring-2 focus:ring-inset focus:ring-matrix-gold/20 [&_li]:ml-5 [&_ol]:list-decimal [&_p+p]:mt-3 [&_ul]:list-disc"
+        className="matrix-scroll min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap break-words px-3 py-3 text-sm leading-6 outline-none empty:before:pointer-events-none empty:before:text-matrix-muted empty:before:content-[attr(data-placeholder)] focus:ring-2 focus:ring-inset focus:ring-matrix-gold/20 [&_li]:ml-5 [&_ol+p]:mt-3 [&_ol]:list-decimal [&_p+ol]:mt-1 [&_p+p]:mt-3 [&_p+ul]:mt-1 [&_ul+p]:mt-3 [&_ul]:list-disc"
         contentEditable={!disabled}
         data-placeholder="Digite a descricao do produto"
         id="product-description-editor"

@@ -24,6 +24,16 @@ export type OpenAIProductDescriptionResult = {
   evidenceLevel: ProductDescriptionEvidenceLevel;
 };
 
+export type OpenAIProductDescriptionContent = {
+  introducao: string;
+  fichaTecnica: string[];
+  conteudoEmbalagem: string[];
+  vantagens: string[];
+  dimensoes: string[];
+  tutorialInstalacao: string[];
+  maisSobreProduto: string;
+};
+
 export type ProductDescriptionSource = {
   name: string;
   sku: string | null;
@@ -136,15 +146,23 @@ const immutableInstruction =
 const productDescriptionPrompt = [
   "Você redige descrições técnicas e comerciais para e-commerce em português do Brasil.",
   "Use primeiro os dados estruturados locais, depois a descrição local, fabricante, documentação oficial e fontes comerciais inequívocas.",
-  "Dados locais estruturados prevalecem em caso de conflito; omita o dado conflitante e registre um aviso curto.",
+  "Dados locais estruturados prevalecem em caso de conflito; omita o dado conflitante.",
   "Nunca invente material, compatibilidade, aplicação, modelo, cor, tamanho, medida, peso, voltagem, potência, certificação, garantia, conteúdo da embalagem, proteção IP, acessórios ou benefícios técnicos.",
   "Não inclua preço, custo, margem, estoque, frete, promoção, dados de cliente, organização, credenciais ou informações internas.",
-  "Gere HTML simples usando apenas p, br, strong, em, u, ul, ol e li, sem atributos.",
-  "Use títulos de seção como strong dentro de p. Gere listas consecutivas como um único ul ou ol com itens li compactos.",
-  "Não use h1, h2, h3, table, div, span, style, class, emoji, link, imagem, citação, URL ou Markdown.",
-  "Crie somente seções sustentadas por evidências e nunca crie seção vazia.",
-  "Não repita a mesma informação em várias seções nem use promessas absolutas ou superlativos sem prova.",
-  "Não inclua links, referências bibliográficas ou frases como 'segundo o fabricante' no HTML comercial."
+  "Retorne exclusivamente o objeto JSON estruturado solicitado; não gere HTML, Markdown, títulos de seção, nomes de seção, listas formatadas ou texto fora do JSON.",
+  "Preencha somente estas propriedades: introducao, fichaTecnica, conteudoEmbalagem, vantagens, dimensoes, tutorialInstalacao e maisSobreProduto.",
+  "Use texto simples em português do Brasil. O backend define o nome do produto, títulos, ordem, parágrafos e listas.",
+  "Introducao deve explicar brevemente o que é o produto, sua aplicação principal e finalidade prática, sem repetir a ficha técnica.",
+  "FichaTecnica e vantagens devem conter somente itens diretamente sustentados pelas evidências.",
+  "ConteudoEmbalagem, dimensoes, tutorialInstalacao e maisSobreProduto são condicionais; retorne string vazia ou array vazio quando não houver evidência suficiente.",
+  "Não inclua rótulos como Introdução, Ficha Técnica, Conteúdo da Embalagem, Vantagens, Dimensões, Tutorial de Instalação ou Mais sobre o Produto nos valores.",
+  "Não use Especificações, Características, Dados Técnicos, Informações ou qualquer outro título alternativo.",
+  "Não repita altura, largura, profundidade, comprimento ou peso em fichaTecnica quando esses dados estiverem em dimensoes.",
+  "Conteúdo da Embalagem só pode informar quantidade comprovada. Tutorial de Instalação só pode usar instruções seguras presentes em descrição, manual, fabricante ou documentação técnica confiável.",
+  "Não use chamadas comerciais como 'compre agora', 'garanta já o seu' ou 'não perca esta oportunidade'.",
+  "Não use tags HTML, emoji, link, imagem, citação, URL ou Markdown.",
+  "Não repita a mesma informação em vários campos nem use promessas absolutas ou superlativos sem prova.",
+  "Não inclua links, referências bibliográficas ou frases como 'segundo o fabricante' no conteúdo comercial."
 ].join("\n");
 
 const dangerousControlPattern = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
@@ -153,16 +171,10 @@ const urlPattern = /\b(?:https?:\/\/|www\.)\S+/i;
 const markdownLinkPattern = /\[[^\]]+\]\([^)]+\)/;
 const citationPattern = /(?:【\d+[^\]]*】|\[(?:fonte|source|\d+)\s*[:#-]?[^\]]*\])/i;
 const forbiddenMetadataTerms = /\b(?:citation|source)\b/i;
-const allowedSectionHeadings = new Set([
-  "descrição",
-  "ficha técnica",
-  "compatibilidade",
-  "vantagens",
-  "conteúdo da embalagem",
-  "dimensões",
-  "tutorial de instalação",
-  "cuidados e manutenção"
-]);
+const exaggeratedCallToActionPattern =
+  /\b(?:compre agora|garanta já o seu|não perca (?:esta|essa) oportunidade|transforme sua vida|qualidade incomparável|melhor produto)\b/i;
+const dangerousInstallationPattern =
+  /\b(?:com a energia ligada|sem desligar (?:a )?energia|ignore (?:o )?manual|dispense (?:um )?profissional qualificado|faça (?:a )?ligação interna)/i;
 
 function collapseWhitespace(value: string) {
   return value.trim().replace(/[ \t]+/g, " ").replace(/\r\n?/g, "\n");
@@ -204,25 +216,6 @@ function sanitizeOfficialDomains(domains: readonly string[] | undefined) {
   )].slice(0, 10);
 }
 
-function hasEmptySection(description: string) {
-  const lines = description.split("\n").map((line) => line.trim());
-  for (let index = 0; index < lines.length; index += 1) {
-    const normalized = lines[index]
-      .replace(/[:#*-]+$/g, "")
-      .trim()
-      .toLocaleLowerCase("pt-BR");
-    if (!allowedSectionHeadings.has(normalized)) continue;
-    const nextContent = lines.slice(index + 1).find((line) => line.length > 0);
-    if (!nextContent) return true;
-    const nextNormalized = nextContent
-      .replace(/[:#*-]+$/g, "")
-      .trim()
-      .toLocaleLowerCase("pt-BR");
-    if (allowedSectionHeadings.has(nextNormalized)) return true;
-  }
-  return false;
-}
-
 export function readOpenAIProductDescriptionConfig(
   env: OpenAIProductDescriptionEnv = process.env as OpenAIProductDescriptionEnv
 ): OpenAIProductDescriptionConfig {
@@ -255,13 +248,16 @@ export function readOpenAIProductDescriptionConfig(
 }
 
 export function buildOpenAIProductDescriptionTextFormat(maxCharacters: number) {
+  const text = z.string().max(maxCharacters);
+  const items = z.array(z.string().min(1).max(500)).max(40);
   const schema = z.object({
-    html: z.string()
-      .min(OPENAI_PRODUCT_DESCRIPTION_MIN_LENGTH)
-      .max(maxCharacters),
-    usedWebSearch: z.boolean(),
-    warnings: z.array(z.string().min(1).max(240)).max(5),
-    evidenceLevel: z.enum(["LOCAL_ONLY", "LOCAL_AND_WEB"])
+    introducao: text,
+    fichaTecnica: items,
+    conteudoEmbalagem: items,
+    vantagens: items,
+    dimensoes: items,
+    tutorialInstalacao: items,
+    maisSobreProduto: text
   }).strict();
   return zodTextFormat(schema, OPENAI_PRODUCT_DESCRIPTION_SCHEMA_NAME);
 }
@@ -392,7 +388,7 @@ export function buildOpenAIProductDescriptionRequest(
           useWebSearch
             ? "A ferramenta web_search está disponível. Pesquise somente quando a identificação for inequívoca e priorize fabricante, manual e catálogo oficial."
             : "Não use pesquisa externa. Trabalhe exclusivamente com os dados locais fornecidos.",
-          "Retorne usedWebSearch e evidenceLevel coerentes com as evidências realmente utilizadas. Warnings são internos e nunca devem ser inseridos no HTML."
+          "Retorne exatamente as sete propriedades do schema. Não acrescente metadados, avisos, títulos ou qualquer outra chave."
         ].join("\n\n")
       },
       {
@@ -408,68 +404,218 @@ export function buildOpenAIProductDescriptionRequest(
   };
 }
 
-export function validateOpenAIProductDescription(
+const productDescriptionContentKeys = [
+  "introducao",
+  "fichaTecnica",
+  "conteudoEmbalagem",
+  "vantagens",
+  "dimensoes",
+  "tutorialInstalacao",
+  "maisSobreProduto"
+] as const;
+const sortedProductDescriptionContentKeys = [...productDescriptionContentKeys].sort();
+
+const generatedHeadingPrefixPattern = /^(?:introducao|ficha tecnica|conteudo da embalagem|vantagens|dimensoes|tutorial de instalacao|mais sobre o produto|especificacoes|caracteristicas|dados tecnicos|informacoes)\s*:/i;
+const generatedHtmlPattern = /<\/?[a-z][^>]*>|&(?:lt|gt);/i;
+const generatedMarkdownPattern = /(?:\*\*|__|`{1,3})|^(?:[-*•]\s+|#{1,6}\s+)/m;
+const dimensionItemPattern = /^(?:altura|largura|profundidade|comprimento|peso(?: liquido| bruto)?)\s*:/i;
+
+function invalidStructuredDescription(): never {
+  throw new OpenAIProductDescriptionError(
+    "OPENAI_DESCRIPTION_INVALID_RESPONSE",
+    "A IA não retornou uma descrição válida."
+  );
+}
+
+function normalizeGeneratedDescriptionText(value: string, maxLength: number) {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (!normalized) return "";
+  const comparison = normalizedComparisonKey(normalized);
+  if (
+    normalized.length > maxLength ||
+    dangerousControlPattern.test(normalized) ||
+    emojiPattern.test(normalized) ||
+    urlPattern.test(normalized) ||
+    markdownLinkPattern.test(normalized) ||
+    citationPattern.test(normalized) ||
+    forbiddenMetadataTerms.test(normalized) ||
+    generatedHtmlPattern.test(normalized) ||
+    generatedMarkdownPattern.test(normalized) ||
+    generatedHeadingPrefixPattern.test(comparison) ||
+    exaggeratedCallToActionPattern.test(normalized) ||
+    dangerousInstallationPattern.test(normalized)
+  ) {
+    invalidStructuredDescription();
+  }
+  return normalized;
+}
+
+function normalizeGeneratedDescriptionItems(value: unknown) {
+  if (!Array.isArray(value) || value.length > 40 || value.some((item) => typeof item !== "string")) {
+    invalidStructuredDescription();
+  }
+  const seen = new Set<string>();
+  return value.flatMap((item) => {
+    const normalized = normalizeGeneratedDescriptionText(item as string, 500);
+    if (!normalized) invalidStructuredDescription();
+    const key = normalizedComparisonKey(normalized);
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [normalized];
+  });
+}
+
+function isRepeatedGeneratedDescriptionText(value: string, seen: Set<string>) {
+  const key = normalizedComparisonKey(value);
+  const repeated = [...seen].some((previous) => (
+    previous === key ||
+    (Math.min(previous.length, key.length) >= 24 && (
+      previous.includes(key) || key.includes(previous)
+    ))
+  ));
+  if (!repeated) seen.add(key);
+  return repeated;
+}
+
+function removeRepeatedGeneratedDescriptionItems(
+  items: readonly string[],
+  seen: Set<string>
+) {
+  return items.filter((item) => !isRepeatedGeneratedDescriptionText(item, seen));
+}
+
+export function validateOpenAIProductDescriptionContent(
   value: unknown,
   options: { maxCharacters?: number } = {}
-): OpenAIProductDescriptionResult {
+): OpenAIProductDescriptionContent {
   const maxCharacters =
     options.maxCharacters ?? OPENAI_PRODUCT_DESCRIPTION_DEFAULT_MAX_CHARACTERS;
+  if (!isPlainRecord(value)) invalidStructuredDescription();
+  const keys = Object.keys(value).sort();
   if (
-    !isPlainRecord(value) ||
-    Object.keys(value).length !== 4 ||
-    typeof value.html !== "string" ||
-    typeof value.usedWebSearch !== "boolean" ||
-    !Array.isArray(value.warnings) ||
-    !value.warnings.every((warning) => typeof warning === "string") ||
-    !["LOCAL_ONLY", "LOCAL_AND_WEB"].includes(String(value.evidenceLevel))
+    keys.length !== productDescriptionContentKeys.length ||
+    keys.some((key, index) => key !== sortedProductDescriptionContentKeys[index]) ||
+    typeof value.introducao !== "string" ||
+    typeof value.maisSobreProduto !== "string"
   ) {
-    throw new OpenAIProductDescriptionError(
-      "OPENAI_DESCRIPTION_INVALID_RESPONSE",
-      "A IA não retornou uma descrição válida."
-    );
+    invalidStructuredDescription();
   }
 
-  const html = sanitizeProductDescription(value.html);
-  const visibleText = sanitizeHtml(
-    html.replace(/<\/(?:p|li|ul|ol)>/gi, "$&\n"),
-    {
-    allowedTags: [],
-    allowedAttributes: {},
-    disallowedTagsMode: "discard"
-    }
-  ).replace(/&nbsp;|&#160;/gi, " ").trim();
-  const hasEmptyBlock = /<(?:p|li)>\s*(?:<br\s*\/?>\s*)*<\/(?:p|li)>/i.test(html);
-  const hasParagraphMarkers = /<p>\s*[•*-](?:\s|&nbsp;)+/i.test(html);
-  if (
-    !productDescriptionHasVisibleContent(html) ||
-    !/<(?:p|ul|ol)>/i.test(html) ||
-    visibleText.length < OPENAI_PRODUCT_DESCRIPTION_MIN_LENGTH ||
-    html.length > maxCharacters ||
-    dangerousControlPattern.test(html) ||
-    emojiPattern.test(visibleText) ||
-    urlPattern.test(visibleText) ||
-    markdownLinkPattern.test(visibleText) ||
-    citationPattern.test(visibleText) ||
-    forbiddenMetadataTerms.test(visibleText) ||
-    hasEmptyBlock ||
-    hasParagraphMarkers ||
-    hasEmptySection(visibleText)
-  ) {
-    throw new OpenAIProductDescriptionError(
-      "OPENAI_DESCRIPTION_INVALID_RESPONSE",
-      "A IA não retornou uma descrição válida."
-    );
-  }
-
-  return {
-    html,
-    usedWebSearch: value.usedWebSearch,
-    warnings: value.warnings
-      .map((warning) => collapseWhitespace(warning).slice(0, 240))
-      .filter(Boolean)
-      .slice(0, 5),
-    evidenceLevel: value.evidenceLevel as ProductDescriptionEvidenceLevel
+  const content: OpenAIProductDescriptionContent = {
+    introducao: normalizeGeneratedDescriptionText(value.introducao, 2_000),
+    fichaTecnica: normalizeGeneratedDescriptionItems(value.fichaTecnica),
+    conteudoEmbalagem: normalizeGeneratedDescriptionItems(value.conteudoEmbalagem),
+    vantagens: normalizeGeneratedDescriptionItems(value.vantagens),
+    dimensoes: normalizeGeneratedDescriptionItems(value.dimensoes),
+    tutorialInstalacao: normalizeGeneratedDescriptionItems(value.tutorialInstalacao),
+    maisSobreProduto: normalizeGeneratedDescriptionText(value.maisSobreProduto, 3_000)
   };
+
+  if (content.dimensoes.length) {
+    content.fichaTecnica = content.fichaTecnica.filter((item) => (
+      !dimensionItemPattern.test(normalizedComparisonKey(item))
+    ));
+  }
+
+  const seenContent = new Set<string>();
+  if (content.introducao) {
+    isRepeatedGeneratedDescriptionText(content.introducao, seenContent);
+  }
+  content.fichaTecnica = removeRepeatedGeneratedDescriptionItems(
+    content.fichaTecnica,
+    seenContent
+  );
+  content.conteudoEmbalagem = removeRepeatedGeneratedDescriptionItems(
+    content.conteudoEmbalagem,
+    seenContent
+  );
+  content.vantagens = removeRepeatedGeneratedDescriptionItems(
+    content.vantagens,
+    seenContent
+  );
+  content.dimensoes = removeRepeatedGeneratedDescriptionItems(
+    content.dimensoes,
+    seenContent
+  );
+  content.tutorialInstalacao = removeRepeatedGeneratedDescriptionItems(
+    content.tutorialInstalacao,
+    seenContent
+  );
+  if (
+    content.maisSobreProduto &&
+    isRepeatedGeneratedDescriptionText(content.maisSobreProduto, seenContent)
+  ) {
+    content.maisSobreProduto = "";
+  }
+
+  const visibleContent = [
+    content.introducao,
+    ...content.fichaTecnica,
+    ...content.conteudoEmbalagem,
+    ...content.vantagens,
+    ...content.dimensoes,
+    ...content.tutorialInstalacao,
+    content.maisSobreProduto
+  ].filter(Boolean).join(" ");
+  if (
+    visibleContent.length < OPENAI_PRODUCT_DESCRIPTION_MIN_LENGTH ||
+    visibleContent.length > maxCharacters
+  ) {
+    invalidStructuredDescription();
+  }
+  return content;
+}
+
+function escapeGeneratedDescriptionHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function generatedDescriptionList(title: string, items: readonly string[]) {
+  if (!items.length) return "";
+  return [
+    `<p><strong>${title}</strong></p>`,
+    `<ul>${items.map((item) => `<li>${escapeGeneratedDescriptionHtml(item)}</li>`).join("")}</ul>`
+  ].join("");
+}
+
+export function buildOpenAIProductDescriptionHtml(
+  productName: string,
+  value: unknown,
+  options: { maxCharacters?: number } = {}
+) {
+  const maxCharacters =
+    options.maxCharacters ?? OPENAI_PRODUCT_DESCRIPTION_DEFAULT_MAX_CHARACTERS;
+  const normalizedProductName = productName.trim().replace(/\s+/g, " ");
+  if (!normalizedProductName) {
+    throw new OpenAIProductDescriptionError(
+      "OPENAI_DESCRIPTION_INVALID_INPUT",
+      "O produto não possui um nome válido."
+    );
+  }
+  const content = validateOpenAIProductDescriptionContent(value, { maxCharacters });
+  const html = sanitizeProductDescription([
+    `<p><strong>${escapeGeneratedDescriptionHtml(normalizedProductName)}</strong></p>`,
+    content.introducao
+      ? `<p>${escapeGeneratedDescriptionHtml(content.introducao)}</p>`
+      : "",
+    generatedDescriptionList("Ficha Técnica:", content.fichaTecnica),
+    generatedDescriptionList("Conteúdo da Embalagem:", content.conteudoEmbalagem),
+    generatedDescriptionList("Vantagens:", content.vantagens),
+    generatedDescriptionList("Dimensões:", content.dimensoes),
+    generatedDescriptionList("Tutorial de Instalação:", content.tutorialInstalacao),
+    content.maisSobreProduto
+      ? `<p><strong>Mais sobre o Produto:</strong></p><p>${escapeGeneratedDescriptionHtml(content.maisSobreProduto)}</p>`
+      : ""
+  ].join(""));
+  if (!productDescriptionHasVisibleContent(html) || html.length > maxCharacters) {
+    invalidStructuredDescription();
+  }
+  return html;
 }
 
 function numericFactTokens(value: string) {
@@ -759,19 +905,21 @@ export async function generateOpenAIProductDescription(
       );
     }
 
-    const description = validateOpenAIProductDescription(
+    const html = buildOpenAIProductDescriptionHtml(
+      input.product.name,
       response.outputParsed,
       { maxCharacters: config.maxCharacters }
     );
     const diagnostics = sourceDiagnostics(response.output, input.officialDomains);
     validateConservativeLocalFallback(
-      description.html,
+      html,
       input.product,
       diagnostics.sourceCount
     );
     const result: OpenAIProductDescriptionResult = {
-      ...description,
+      html,
       usedWebSearch: diagnostics.searchCount > 0,
+      warnings: [],
       evidenceLevel: diagnostics.sourceCount > 0
         ? "LOCAL_AND_WEB"
         : "LOCAL_ONLY"

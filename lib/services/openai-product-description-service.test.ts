@@ -3,6 +3,7 @@ import test from "node:test";
 import { NextResponse } from "next/server";
 import { createProductDescriptionAiPost } from "@/lib/services/openai-product-description-route";
 import {
+  buildOpenAIProductDescriptionHtml,
   buildOpenAIProductDescriptionRequest,
   buildOpenAIProductDescriptionTextFormat,
   createOfficialOpenAIProductDescriptionResponse,
@@ -13,8 +14,9 @@ import {
   OPENAI_PRODUCT_DESCRIPTION_SCHEMA_NAME,
   readOpenAIProductDescriptionConfig,
   shouldUseProductDescriptionWebSearch,
-  validateOpenAIProductDescription,
+  validateOpenAIProductDescriptionContent,
   type OpenAIProductDescriptionCreate,
+  type OpenAIProductDescriptionContent,
   type OpenAIProductDescriptionLogEvent,
   type OpenAIProductDescriptionResult,
   type ProductDescriptionSource
@@ -85,11 +87,30 @@ const partialProduct: ProductDescriptionSource = {
   attributes: null
 };
 
-const validHtml = [
-  "<p>Abraçadeira Andaluz para organização de instalações elétricas.</p>",
-  "<p><strong>Ficha Técnica</strong></p>",
-  "<ul><li>Marca: Andaluz</li><li>Material: PVC</li><li>Cor: Preto</li></ul>"
-].join("");
+const validContent: OpenAIProductDescriptionContent = {
+  introducao: "Abraçadeira destinada à organização de instalações elétricas com eletroduto.",
+  fichaTecnica: ["Marca: Andaluz", "Material: PVC", "Cor: Preto"],
+  conteudoEmbalagem: [],
+  vantagens: ["Aplicação em eletroduto 3/4"],
+  dimensoes: [],
+  tutorialInstalacao: [],
+  maisSobreProduto: ""
+};
+
+const partialContent: OpenAIProductDescriptionContent = {
+  introducao: "Suporte destinado à organização de instalações conforme os dados cadastrados.",
+  fichaTecnica: ["Tipo: Suporte"],
+  conteudoEmbalagem: [],
+  vantagens: ["Finalidade: Organização da instalação"],
+  dimensoes: [],
+  tutorialInstalacao: [],
+  maisSobreProduto: ""
+};
+
+const validHtml = buildOpenAIProductDescriptionHtml(
+  completeProduct.name,
+  validContent
+);
 
 const validResult: OpenAIProductDescriptionResult = {
   html: validHtml,
@@ -98,12 +119,12 @@ const validResult: OpenAIProductDescriptionResult = {
   evidenceLevel: "LOCAL_AND_WEB"
 };
 
-function parsedResult(overrides: Partial<OpenAIProductDescriptionResult> = {}) {
-  return { ...validResult, ...overrides };
+function parsedContent(overrides: Partial<OpenAIProductDescriptionContent> = {}) {
+  return { ...validContent, ...overrides };
 }
 
 function providerResponse(
-  parsed: OpenAIProductDescriptionResult = validResult,
+  parsed: OpenAIProductDescriptionContent = validContent,
   overrides: Partial<Awaited<ReturnType<OpenAIProductDescriptionCreate>>> = {}
 ): OpenAIProductDescriptionCreate {
   return async () => ({
@@ -204,20 +225,33 @@ test("structured output is a strict object with the complete response contract",
     type?: string;
     required?: string[];
     additionalProperties?: boolean;
-    properties?: Record<string, { type?: string; maxLength?: number }>;
+    properties?: Record<string, {
+      type?: string;
+      maxLength?: number;
+      items?: { type?: string; minLength?: number; maxLength?: number };
+    }>;
   };
   assert.equal(format.type, "json_schema");
   assert.equal(format.name, OPENAI_PRODUCT_DESCRIPTION_SCHEMA_NAME);
   assert.equal(format.strict, true);
   assert.equal(schema.type, "object");
   assert.deepEqual(schema.required?.sort(), [
-    "evidenceLevel",
-    "html",
-    "usedWebSearch",
-    "warnings"
+    "conteudoEmbalagem",
+    "dimensoes",
+    "fichaTecnica",
+    "introducao",
+    "maisSobreProduto",
+    "tutorialInstalacao",
+    "vantagens"
   ]);
   assert.equal(schema.additionalProperties, false);
-  assert.equal(schema.properties?.html?.maxLength, 12_000);
+  assert.equal(schema.properties?.introducao?.type, "string");
+  assert.equal(schema.properties?.fichaTecnica?.type, "array");
+  assert.equal(schema.properties?.fichaTecnica?.items?.type, "string");
+  assert.equal(schema.properties?.fichaTecnica?.items?.minLength, 1);
+  assert.equal(schema.properties?.fichaTecnica?.items?.maxLength, 500);
+  assert.equal(schema.properties?.html, undefined);
+  assert.equal(schema.properties?.usedWebSearch, undefined);
 });
 
 test("complete product context keeps false and zero while excluding private facts", () => {
@@ -293,65 +327,109 @@ test("prompt establishes local precedence and official source priority", () => {
   assert.match(prompt, /Dados locais estruturados prevalecem/);
   assert.match(prompt, /fabricante, manual e catálogo oficial/);
   assert.match(prompt, /Nunca invente material, compatibilidade/);
-  assert.match(prompt, /listas consecutivas como um único ul ou ol/);
+  assert.match(prompt, /JSON estruturado/);
+  assert.match(prompt, /introducao, fichaTecnica, conteudoEmbalagem/);
+  assert.match(prompt, /não gere HTML, Markdown, títulos de seção/i);
+  assert.match(prompt, /exatamente as sete propriedades do schema/);
 });
 
-test("valid restricted HTML is accepted", () => {
-  assert.deepEqual(validateOpenAIProductDescription(validResult), validResult);
+test("valid structured content is normalized and rendered only by the backend", () => {
+  assert.deepEqual(validateOpenAIProductDescriptionContent(validContent), validContent);
+  assert.equal(buildOpenAIProductDescriptionHtml(completeProduct.name, validContent), validHtml);
+  assert.match(validHtml, /^<p><strong>Abraçadeira Andaluz/);
+  assert.match(validHtml, /<p><strong>Ficha Técnica:<\/strong><\/p><ul>/);
 });
 
-test("dangerous HTML is removed while allowed emphasis is preserved", () => {
-  const result = validateOpenAIProductDescription(parsedResult({
-    html: "<script>alert(1)</script><p><strong>Descrição segura e completa para o produto informado.</strong></p><ul><li onclick='x'>Marca: Andaluz</li></ul>"
-  }));
-  assert.doesNotMatch(result.html, /script|onclick|alert/);
-  assert.match(result.html, /<strong>/);
-  assert.match(result.html, /<ul><li>Marca: Andaluz<\/li><\/ul>/);
+test("provider HTML is rejected instead of being trusted or sanitized", async () => {
+  await expectDescriptionError(
+    () => validateOpenAIProductDescriptionContent(parsedContent({
+      introducao: "<p>Conteúdo criado pela IA</p>"
+    })),
+    "OPENAI_DESCRIPTION_INVALID_RESPONSE"
+  );
 });
 
-test("URLs, emoji and citations in commercial HTML are rejected", async () => {
+test("URLs, emoji and citations in structured text are rejected", async () => {
   for (const text of [
-    "<p>Descrição segura disponível em https://example.com para consulta técnica.</p>",
-    "<p>Descrição segura com excelente apresentação 😀 para o produto.</p>",
-    "<p>Descrição segura do produto conforme [fonte: 1] consultada.</p>"
+    "Descrição segura disponível em https://example.com para consulta técnica.",
+    "Descrição segura com excelente apresentação 😀 para o produto.",
+    "Descrição segura do produto conforme [fonte: 1] consultada."
   ]) {
     await expectDescriptionError(
-      () => validateOpenAIProductDescription(parsedResult({ html: text })),
+      () => validateOpenAIProductDescriptionContent(parsedContent({ introducao: text })),
       "OPENAI_DESCRIPTION_INVALID_RESPONSE"
     );
   }
 });
 
-test("paragraph markers are normalized and real compact lists are preserved", () => {
-  const normalized = validateOpenAIProductDescription(parsedResult({
-    html: "<p>Descrição técnica completa e segura do produto.</p><p>• Marca: Andaluz</p><p>• Material: PVC</p>"
+test("duplicate list values are removed before deterministic rendering", () => {
+  const content = validateOpenAIProductDescriptionContent(parsedContent({
+    fichaTecnica: [" Marca: Andaluz ", "marca: andaluz", "Material:   PVC"]
   }));
-  assert.match(normalized.html, /<ul><li>Marca: Andaluz<\/li><li>Material: PVC<\/li><\/ul>/);
-  const result = validateOpenAIProductDescription(validResult);
-  assert.match(result.html, /<ul><li>Marca: Andaluz<\/li><li>Material: PVC<\/li>/);
-  assert.doesNotMatch(result.html, /<li>[\s\S]*<p>/);
+  assert.deepEqual(content.fichaTecnica, ["Marca: Andaluz", "Material: PVC"]);
+  const html = buildOpenAIProductDescriptionHtml(completeProduct.name, content);
+  assert.match(html, /<ul><li>Marca: Andaluz<\/li><li>Material: PVC<\/li><\/ul>/);
+  assert.doesNotMatch(html, /<li>\s*<p>/);
 });
 
 test("invalid structured response is rejected", async () => {
   for (const value of [
     null,
-    { html: validHtml },
-    { ...validResult, extra: true },
-    { ...validResult, warnings: "none" },
-    { ...validResult, evidenceLevel: "UNKNOWN" }
+    { introducao: validContent.introducao },
+    { ...validContent, extra: true },
+    { ...validContent, fichaTecnica: "Marca: Andaluz" },
+    { ...validContent, vantagens: ["Válida", 123] },
+    { ...validContent, vantagens: [""] },
+    { ...validContent, vantagens: ["   "] },
+    { ...validContent, vantagens: [["Lista aninhada"]] },
+    { ...validContent, vantagens: [{ item: "Objeto" }] },
+    { ...validContent, vantagens: [null] },
+    { ...validContent, caracteristicas: [], fichaTecnica: undefined }
   ]) {
     await expectDescriptionError(
-      () => validateOpenAIProductDescription(value),
+      () => validateOpenAIProductDescriptionContent(value),
       "OPENAI_DESCRIPTION_INVALID_RESPONSE"
     );
   }
 });
 
-test("empty or section-only response is rejected", async () => {
+test("completely empty structured content is rejected", async () => {
   await expectDescriptionError(
-    () => validateOpenAIProductDescription(parsedResult({ html: "<p><strong>Ficha Técnica</strong></p>" })),
+    () => validateOpenAIProductDescriptionContent({
+      introducao: "",
+      fichaTecnica: [],
+      conteudoEmbalagem: [],
+      vantagens: [],
+      dimensoes: [],
+      tutorialInstalacao: [],
+      maisSobreProduto: ""
+    }),
     "OPENAI_DESCRIPTION_INVALID_RESPONSE"
   );
+});
+
+test("free text provider response is rejected without fallback interpretation", async () => {
+  let calls = 0;
+  await expectDescriptionError(
+    () => generateOpenAIProductDescription(
+      { product: completeProduct },
+      {
+        env: enabledEnv,
+        createResponse: async () => {
+          calls += 1;
+          return {
+            httpStatus: 200,
+            status: "completed",
+            outputParsed: "Descrição livre fora do contrato JSON.",
+            refusalPresent: false,
+            output: []
+          };
+        }
+      }
+    ),
+    "OPENAI_DESCRIPTION_INVALID_RESPONSE"
+  );
+  assert.equal(calls, 1);
 });
 
 test("local-only fallback rejects unsupported numeric facts", async () => {
@@ -361,10 +439,10 @@ test("local-only fallback rejects unsupported numeric facts", async () => {
       {
         env: enabledEnv,
         createResponse: providerResponse(
-          parsedResult({
-            html: "<p>Suporte para instalação com capacidade técnica declarada de 999 kg.</p>",
-            usedWebSearch: false,
-            evidenceLevel: "LOCAL_ONLY"
+          parsedContent({
+            introducao: "Suporte para instalação com capacidade técnica declarada de 999 kg.",
+            fichaTecnica: ["Tipo: Suporte"],
+            vantagens: ["Finalidade: Organização da instalação"]
           }),
           { output: [] }
         )
@@ -380,11 +458,7 @@ test("partial product remains conservative without invented sections", async () 
     {
       env: enabledEnv,
       createResponse: providerResponse(
-        parsedResult({
-          html: "<p>Suporte destinado à organização de instalações conforme os dados cadastrados.</p>",
-          usedWebSearch: false,
-          evidenceLevel: "LOCAL_ONLY"
-        }),
+        partialContent,
         { output: [] }
       )
     }
@@ -412,7 +486,7 @@ test("official SDK adapter uses responses.parse with zero retry", async () => {
       return {
         withResponse: async () => ({
           data: {
-            output_parsed: validResult,
+            output_parsed: validContent,
             output: [],
             status: "completed"
           },
@@ -428,7 +502,7 @@ test("official SDK adapter uses responses.parse with zero retry", async () => {
   const response = await create(request, { signal: new AbortController().signal });
   assert.equal(receivedBody, request);
   assert.equal(response.httpStatus, 200);
-  assert.deepEqual(response.outputParsed, validResult);
+  assert.deepEqual(response.outputParsed, validContent);
 });
 
 test("one explicit generation performs one provider request and no retry", async () => {
@@ -458,7 +532,7 @@ test("actual provider sources determine web-search metadata", async () => {
     {
       env: enabledEnv,
       createResponse: providerResponse(
-        parsedResult({ usedWebSearch: true, evidenceLevel: "LOCAL_AND_WEB" }),
+        partialContent,
         { output: [] }
       )
     }
@@ -679,11 +753,19 @@ test("request lock is always released after a generation failure", async () => {
   assert.equal(released, 1);
 });
 
-test("warnings stay outside the commercial HTML response field", () => {
-  const result = validateOpenAIProductDescription(parsedResult({
-    warnings: ["Fonte web conflitante; dado omitido."]
-  }));
-  assert.deepEqual(result.warnings, ["Fonte web conflitante; dado omitido."]);
+test("provider metadata is rejected and backend warnings stay empty", async () => {
+  await expectDescriptionError(
+    () => validateOpenAIProductDescriptionContent({
+      ...validContent,
+      warnings: ["Fonte web conflitante; dado omitido."]
+    }),
+    "OPENAI_DESCRIPTION_INVALID_RESPONSE"
+  );
+  const result = await generateOpenAIProductDescription(
+    { product: completeProduct },
+    { env: enabledEnv, createResponse: providerResponse() }
+  );
+  assert.deepEqual(result.warnings, []);
   assert.doesNotMatch(result.html, /Fonte web conflitante/);
 });
 

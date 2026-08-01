@@ -40,6 +40,14 @@ test("published rich editor remains the only Description editor", () => {
   assert.match(editorSource, /command: "underline"/);
   assert.match(editorSource, /sanitizeProductDescription\(editor\.innerHTML\)/);
   assert.match(editorSource, /expanded \? "h-\[70vh\] min-h-80" : "min-h-56"/);
+  assert.match(editorSource, /\[&_ul\+p\]:mt-3/);
+  assert.match(editorSource, /\[&_ol\+p\]:mt-3/);
+  assert.match(editorSource, /\[&_p\+ul\]:mt-1/);
+  assert.match(editorSource, /\[&_p\+ol\]:mt-1/);
+  assert.match(viewSource, /\[&_ul\+p\]:mt-3/);
+  assert.match(viewSource, /\[&_ol\+p\]:mt-3/);
+  assert.match(viewSource, /\[&_p\+ul\]:mt-1/);
+  assert.match(viewSource, /\[&_p\+ol\]:mt-1/);
 });
 
 test("one explicit click requests one HTML description and applies it locally", () => {
@@ -55,6 +63,10 @@ test("one explicit click requests one HTML description and applies it locally", 
   assert.match(generation, /updateDirtyField\("description", nextDescription\)/);
   assert.match(generation, /setDescriptionEditorResetKey/);
   assert.doesNotMatch(generation, /body: JSON\.stringify|method: "PATCH"|\/bling\//);
+  assert.doesNotMatch(
+    generation,
+    /Ficha Técnica:|Conteúdo da Embalagem:|Vantagens:|Dimensões:|Tutorial de Instalação:|Mais sobre o Produto:/
+  );
 });
 
 test("unsaved non-empty Description requires confirmation before replacement", () => {

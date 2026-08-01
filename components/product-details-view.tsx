@@ -1371,7 +1371,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
               </>
             ) : (
               <div
-                className={`matrix-scroll mt-3 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-6 [&_li]:ml-5 [&_ol]:list-decimal [&_p+p]:mt-3 [&_ul]:list-disc ${
+                className={`matrix-scroll mt-3 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-6 [&_li]:ml-5 [&_ol+p]:mt-3 [&_ol]:list-decimal [&_p+ol]:mt-1 [&_p+p]:mt-3 [&_p+ul]:mt-1 [&_ul+p]:mt-3 [&_ul]:list-disc ${
                   isDescriptionExpanded ? "h-[70vh] min-h-80" : "max-h-72 min-h-56"
                 }`}
                 dangerouslySetInnerHTML={{ __html: description || "Nao informado" }}
