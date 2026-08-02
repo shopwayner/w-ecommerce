@@ -44,16 +44,41 @@ function inferType(title: string, message: string): SafeNotification["type"] {
 function readProgress(cursor: string | null) {
   try {
     const parsed = JSON.parse(cursor ?? "") as {
-      progress?: { processed?: unknown; noChanges?: unknown; failed?: unknown };
+      progress?: {
+        processed?: unknown;
+        noChanges?: unknown;
+        failed?: unknown;
+        invalid?: unknown;
+        needsReview?: unknown;
+      };
     };
     return {
       analyzed: typeof parsed.progress?.processed === "number" ? parsed.progress.processed : 0,
       unchanged: typeof parsed.progress?.noChanges === "number" ? parsed.progress.noChanges : 0,
-      failures: typeof parsed.progress?.failed === "number" ? parsed.progress.failed : 0
+      failures: typeof parsed.progress?.failed === "number" ? parsed.progress.failed : 0,
+      invalid: typeof parsed.progress?.invalid === "number" ? parsed.progress.invalid : 0,
+      needsReview: typeof parsed.progress?.needsReview === "number" ? parsed.progress.needsReview : 0
     };
   } catch {
-    return { analyzed: 0, unchanged: 0, failures: 0 };
+    return { analyzed: 0, unchanged: 0, failures: 0, invalid: 0, needsReview: 0 };
   }
+}
+
+function syncNotificationType(input: {
+  status: string;
+  totalErrors: number;
+  progress: ReturnType<typeof readProgress>;
+  reportFailureCount: number;
+}): SafeNotification["type"] {
+  if (input.status === "FAILED") return "ERROR";
+  if (input.status !== "COMPLETED") return "INFO";
+  return input.totalErrors > 0
+    || input.progress.failures > 0
+    || input.progress.invalid > 0
+    || input.progress.needsReview > 0
+    || input.reportFailureCount > 0
+    ? "WARNING"
+    : "SUCCESS";
 }
 
 function formatDuration(startedAt: Date | null, finishedAt: Date | null) {
@@ -87,6 +112,8 @@ export async function listNotifications(organizationId: string) {
         },
         select: {
           id: true,
+          status: true,
+          totalErrors: true,
           lastCursor: true,
           startedAt: true,
           finishedAt: true,
@@ -116,7 +143,14 @@ export async function listNotifications(organizationId: string) {
         : sanitizeText(notification.message);
       return {
         id: notification.id,
-        type: inferType(title, message),
+        type: job && progress && preview
+          ? syncNotificationType({
+              status: job.status,
+              totalErrors: job.totalErrors,
+              progress,
+              reportFailureCount: preview.failureCount
+            })
+          : inferType(title, message),
         title,
         message,
         createdAt: notification.createdAt.toISOString(),

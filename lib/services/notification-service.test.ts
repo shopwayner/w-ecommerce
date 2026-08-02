@@ -8,13 +8,21 @@ import {
   listNotifications
 } from "./notification-service";
 
-function cursor(input?: { changed?: number; unchanged?: number; failures?: number }) {
+function cursor(input?: {
+  changed?: number;
+  unchanged?: number;
+  failures?: number;
+  invalid?: number;
+  needsReview?: number;
+}) {
   const changed = input?.changed ?? 1;
   return JSON.stringify({
     progress: {
       processed: changed + (input?.unchanged ?? 0) + (input?.failures ?? 0),
       noChanges: input?.unchanged ?? 0,
-      failed: input?.failures ?? 0
+      failed: input?.failures ?? 0,
+      invalid: input?.invalid ?? 0,
+      needsReview: input?.needsReview ?? 0
     },
     syncReport: {
       version: 1,
@@ -73,6 +81,8 @@ test("notificacao SYNC e limitada, resumida e referencia o job correto", async (
         assert.equal(where.type, "BLING_PRODUCTS_SYNC");
         return [{
           id: "job-1",
+          status: "COMPLETED",
+          totalErrors: 0,
           lastCursor: cursor({ changed: 8, unchanged: 3 }),
           startedAt: new Date("2026-08-01T11:59:00.000Z"),
           finishedAt: new Date("2026-08-01T12:00:00.000Z"),
@@ -84,6 +94,7 @@ test("notificacao SYNC e limitada, resumida e referencia o job correto", async (
     const result = await listNotifications("organization-1");
     const item = result.notifications[0];
     assert.equal(result.unreadCount, 1);
+    assert.equal(item.type, "SUCCESS");
     assert.match(item.message, /11 analisados; 8 alterados; 3 sem alteracao; 0 falhas/);
     assert.equal(item.action?.jobId, "job-1");
     assert.equal(item.action?.preview.groups[0].items.length, 3);
@@ -97,6 +108,8 @@ test("SYNC sem mudancas gera uma notificacao curta e sem Ver alteracoes", async 
     erpSyncJob: {
       findMany: async () => [{
         id: "job-1",
+        status: "COMPLETED",
+        totalErrors: 0,
         lastCursor: cursor({ changed: 0, unchanged: 4 }),
         startedAt: null,
         finishedAt: null,
@@ -110,7 +123,74 @@ test("SYNC sem mudancas gera uma notificacao curta e sem Ver alteracoes", async 
       "Sincronizacao concluida. Nenhuma alteracao encontrada."
     );
     assert.equal(result.notifications[0].action, undefined);
+    assert.equal(result.notifications[0].type, "SUCCESS");
   });
+});
+
+test("SYNC concluido com falhas reais gera WARNING, nao ERROR textual", async () => {
+  await withPrismaMocks({
+    notification: { findMany: async () => [notification()], count: async () => 1 },
+    erpSyncJob: {
+      findMany: async () => [{
+        id: "job-1",
+        status: "COMPLETED",
+        totalErrors: 0,
+        lastCursor: cursor({ changed: 2, failures: 1 }),
+        startedAt: null,
+        finishedAt: null,
+        blingConnection: { name: "Conta segura" }
+      }]
+    }
+  }, async () => {
+    const result = await listNotifications("organization-1");
+    assert.equal(result.notifications[0].type, "WARNING");
+    assert.match(result.notifications[0].message, /1 falhas/);
+  });
+});
+
+test("SYNC com job FAILED gera ERROR mesmo sem palavra de erro no texto", async () => {
+  await withPrismaMocks({
+    notification: { findMany: async () => [notification()], count: async () => 1 },
+    erpSyncJob: {
+      findMany: async () => [{
+        id: "job-1",
+        status: "FAILED",
+        totalErrors: 0,
+        lastCursor: cursor({ changed: 0, unchanged: 1 }),
+        startedAt: null,
+        finishedAt: null,
+        blingConnection: { name: "Conta segura" }
+      }]
+    }
+  }, async () => {
+    const result = await listNotifications("organization-1");
+    assert.equal(result.notifications[0].type, "ERROR");
+  });
+});
+
+test("SYNC concluido com totalErrors ou invalidos gera WARNING", async () => {
+  for (const job of [
+    { totalErrors: 1, lastCursor: cursor({ changed: 1 }) },
+    { totalErrors: 0, lastCursor: cursor({ changed: 1, invalid: 1 }) },
+    { totalErrors: 0, lastCursor: cursor({ changed: 1, needsReview: 1 }) }
+  ]) {
+    await withPrismaMocks({
+      notification: { findMany: async () => [notification()], count: async () => 1 },
+      erpSyncJob: {
+        findMany: async () => [{
+          id: "job-1",
+          status: "COMPLETED",
+          ...job,
+          startedAt: null,
+          finishedAt: null,
+          blingConnection: { name: "Conta segura" }
+        }]
+      }
+    }, async () => {
+      const result = await listNotifications("organization-1");
+      assert.equal(result.notifications[0].type, "WARNING");
+    });
+  }
 });
 
 test("relatorio pagina e filtra somente dentro da organizacao", async () => {

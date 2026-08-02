@@ -7,7 +7,10 @@ import {
   appendBlingProductSyncReport,
   blingProductSyncCategories,
   createBlingSyncReportNotificationMarker,
+  compactMeaningfulSyncChanges,
   emptyBlingProductSyncReport,
+  flattenBlingProductSyncReport,
+  hasMeaningfulSyncChange,
   paginateBlingProductSyncReport,
   parseBlingProductSyncReport,
   previewBlingProductSyncReport,
@@ -61,6 +64,8 @@ function reportItem(productId: string, sku: string, previousValue: number, newVa
   return {
     productId,
     sku,
+    localSku: sku,
+    externalCode: null,
     changes: [{
       category: "STOCK" as const,
       field: "stock",
@@ -135,6 +140,110 @@ test("retomada do cursor substitui por productId e nao duplica alteracoes", () =
   const resumed = appendBlingProductSyncReport(first, reportItem("product-1", "1053", 3, 2));
   assert.equal(resumed.products.length, 1);
   assert.equal(resumed.products[0].changes[0].newValue, 2);
+  assert.equal(resumed.products[0].changes[0].previousValue, 0);
+});
+
+test("comparacao semantica diferencia somente valores realmente distintos", () => {
+  assert.equal(hasMeaningfulSyncChange(9, 9, "stock", "STOCK"), false);
+  assert.equal(hasMeaningfulSyncChange("9", 9, "stock", "STOCK"), false);
+  assert.equal(hasMeaningfulSyncChange(9.0, 9, "stock", "STOCK"), false);
+  assert.equal(hasMeaningfulSyncChange("9,00", "9.00", "salePrice", "PRICE"), false);
+  assert.equal(hasMeaningfulSyncChange(22, 0, "stock", "STOCK"), true);
+  assert.equal(hasMeaningfulSyncChange(0, 2, "stock", "STOCK"), true);
+  assert.equal(hasMeaningfulSyncChange(null, 0, "stock", "STOCK"), true);
+  assert.equal(hasMeaningfulSyncChange(false, "false", "marketplaces", "MARKETPLACES"), false);
+  assert.equal(hasMeaningfulSyncChange(false, null, "marketplaces", "MARKETPLACES"), true);
+  assert.equal(hasMeaningfulSyncChange(0, false, "marketplaces", "MARKETPLACES"), true);
+  assert.equal(hasMeaningfulSyncChange("Nome", "nome", "name", "OTHER"), true);
+});
+
+test("lojas e imagens sao conjuntos normalizados conservadores", () => {
+  assert.equal(hasMeaningfulSyncChange([9], [9], "stores", "STORES"), false);
+  assert.equal(hasMeaningfulSyncChange([9, 9], ["9"], "stores", "STORES"), false);
+  assert.equal(hasMeaningfulSyncChange([9, 10], [10, 9], "stores", "STORES"), false);
+  assert.equal(hasMeaningfulSyncChange([9], [9, 10], "stores", "STORES"), true);
+  assert.equal(hasMeaningfulSyncChange(
+    [{ storeId: 9, linkId: "10", status: "ACTIVE" }],
+    [{ linkId: 10, storeId: "9", status: "ACTIVE" }],
+    "stores",
+    "STORES"
+  ), false);
+  assert.equal(hasMeaningfulSyncChange(
+    ["https://EXAMPLE.com/a.jpg", "https://example.com/b.jpg"],
+    ["https://example.com/b.jpg", "https://example.com/a.jpg"],
+    "images",
+    "IMAGES"
+  ), false);
+});
+
+test("descricao normaliza somente trim e quebras de linha", () => {
+  assert.equal(hasMeaningfulSyncChange("Linha 1\r\nLinha 2", "Linha 1\nLinha 2", "description", "DESCRIPTION"), false);
+  assert.equal(hasMeaningfulSyncChange("Linha 1", "Linha 2", "description", "DESCRIPTION"), true);
+});
+
+test("cadeia retomada mantem valor inicial, valor final e remove retorno ao original", () => {
+  const merged = compactMeaningfulSyncChanges([
+    { category: "STOCK", field: "stock", previousValue: 22, newValue: 5 },
+    { category: "STOCK", field: "stock", previousValue: 5, newValue: 0 }
+  ]);
+  assert.deepEqual(merged, [{ category: "STOCK", field: "stock", previousValue: 22, newValue: 0 }]);
+  assert.deepEqual(compactMeaningfulSyncChanges([
+    ...merged,
+    { category: "STOCK", field: "stock", previousValue: 0, newValue: 22 }
+  ]), []);
+});
+
+test("identidade separa SKU local do codigo Bling e nao cria valor hibrido", () => {
+  const report = appendBlingProductSyncReport(emptyBlingProductSyncReport(), {
+    productId: "product-1025",
+    sku: "1025",
+    localSku: "1025",
+    externalCode: "1025-5",
+    changes: [{ category: "STOCK", field: "stock", previousValue: 22, newValue: 0 }]
+  });
+  assert.equal(report.products[0].sku, "1025");
+  assert.equal(report.products[0].localSku, "1025");
+  assert.equal(report.products[0].externalCode, "1025-5");
+  assert.equal(JSON.stringify(report).includes("10255"), false);
+  const page = paginateBlingProductSyncReport(report, { page: 1, pageSize: 20, filter: "ALL" });
+  assert.equal(page.entries[0].localSku, "1025");
+  assert.equal(page.entries[0].externalCode, "1025-5");
+});
+
+test("identidade sem SKU local usa codigo Bling como fallback seguro", () => {
+  const report = appendBlingProductSyncReport(emptyBlingProductSyncReport(), {
+    productId: "product-no-local-sku",
+    sku: "EXT-ONLY",
+    localSku: null,
+    externalCode: "EXT-ONLY",
+    changes: [{ category: "STOCK", field: "stock", previousValue: 1, newValue: 2 }]
+  });
+  assert.equal(report.products[0].sku, "EXT-ONLY");
+  assert.equal(report.products[0].localSku, null);
+  assert.equal(report.products[0].externalCode, "EXT-ONLY");
+});
+
+test("multiplos codigos do mesmo Product deduplicam o relatorio e sinalizam conflito", () => {
+  const first = appendBlingProductSyncReport(emptyBlingProductSyncReport(), {
+    productId: "product-1",
+    sku: "LOCAL",
+    localSku: "LOCAL",
+    externalCode: "EXT-A",
+    changes: [{ category: "STOCK", field: "stock", previousValue: 22, newValue: 5 }]
+  });
+  const second = appendBlingProductSyncReport(first, {
+    productId: "product-1",
+    sku: "LOCAL",
+    localSku: "LOCAL",
+    externalCode: "EXT-B",
+    changes: [{ category: "STOCK", field: "stock", previousValue: 5, newValue: 0 }]
+  });
+  assert.equal(second.products.length, 1);
+  assert.equal(second.products[0].identityConflict, true);
+  assert.equal(second.products[0].externalCode, null);
+  assert.deepEqual(second.products[0].changes, [
+    { category: "STOCK", field: "stock", previousValue: 22, newValue: 0 }
+  ]);
 });
 
 test("SKUs iguais com productIds diferentes nao sao confundidos", () => {
@@ -225,6 +334,18 @@ test("parser aceita estrutura segura e rejeita campos antigos ou incompletos", (
     reportItem("product-3300", "3300", 1, 4)
   );
   assert.deepEqual(parseBlingProductSyncReport(report), report);
+  const legacy = parseBlingProductSyncReport({
+    version: 1,
+    products: [{
+      productId: "legacy-product",
+      sku: "identidade-legada",
+      changes: [{ category: "STOCK", field: "stock", previousValue: 1, newValue: 2 }]
+    }],
+    failures: []
+  });
+  assert.equal(legacy?.products[0].sku, "identidade-legada");
+  assert.equal(legacy?.products[0].localSku, null);
+  assert.equal(legacy?.products[0].externalCode, null);
   assert.equal(parseBlingProductSyncReport({ version: 1, products: report.products }), null);
   assert.equal(parseBlingProductSyncReport({
     version: 1,
@@ -332,6 +453,55 @@ test("previa SYNC conta alterados, inalterados e falhas sem considerar nao mapea
   assert.deepEqual(result, { analyzed: 3, withChanges: 1, withoutChanges: 1, failures: 1 });
 });
 
+test("previa bloqueia mappings ambiguos antes de hidratar o produto", async () => {
+  const products = [product("external-a"), product("external-b")];
+  const matches = new Map<string, BlingProductImportMatch>([
+    ["external-a", { kind: "MAPPING", productId: "same-product", conflictField: null }],
+    ["external-b", { kind: "MAPPING", productId: "same-product", conflictField: null }]
+  ]);
+  let hydrateCalls = 0;
+  const result = await analyzeMappedBlingProductsForSyncPreview(
+    { organizationId: "org", connectionId: "connection", products, matches },
+    { hydrate: async (input) => { hydrateCalls += 1; return input.product; } }
+  );
+  assert.deepEqual(result, { analyzed: 2, withChanges: 0, withoutChanges: 0, failures: 2 });
+  assert.equal(hydrateCalls, 0);
+});
+
+test("fixture 383 mappings e 333 Products remove neutras e consolida por Product", () => {
+  let report = emptyBlingProductSyncReport();
+  for (let index = 0; index < 333; index += 1) {
+    report = appendBlingProductSyncReport(report, {
+      productId: `product-${index}`,
+      sku: `LOCAL-${index}`,
+      localSku: `LOCAL-${index}`,
+      externalCode: `EXT-${index}`,
+      changes: [{
+        category: index < 300 ? "STOCK" : "STORES",
+        field: index < 300 ? "stock" : "stores",
+        previousValue: index < 300 ? 22 : 9,
+        newValue: index < 300 ? 0 : 9
+      }]
+    });
+  }
+  for (let index = 0; index < 50; index += 1) {
+    report = appendBlingProductSyncReport(report, {
+      productId: "product-0",
+      sku: "LOCAL-0",
+      localSku: "LOCAL-0",
+      externalCode: `EXT-DUP-${index}`,
+      changes: [{ category: "STORES", field: "stores", previousValue: "9", newValue: "9, 10" }]
+    });
+  }
+  assert.equal(report.products.length, 300);
+  assert.equal(
+    flattenBlingProductSyncReport(report).some((change) => change.previousValue === change.newValue),
+    false
+  );
+  assert.equal(report.products.filter((item) => item.productId === "product-0").length, 1);
+  assert.equal(report.products.find((item) => item.productId === "product-0")?.identityConflict, true);
+});
+
 test("conclusao do SYNC usa lock transacional e cria uma notificacao por job", async () => {
   const notifications: Array<{ id: string; organizationId: string; message: string }> = [];
   let lockCalls = 0;
@@ -362,6 +532,15 @@ test("IMPORT e SYNC permanecem separados por identidade, escrita e cursor persis
   assert.match(service, /if \(input\.operation === "IMPORT"\) \{[\s\S]+upsertImportDraft/);
   assert.match(service, /lastCursor: JSON\.stringify\(nextCursor\)/);
   assert.match(service, /SELECT pg_advisory_xact_lock[\s\S]+::text AS "lockState"/);
+  const syncImplementation = service.slice(
+    service.indexOf("export async function applyMappedBlingProductSync"),
+    service.indexOf("export function buildImportedProductCreateData")
+  );
+  assert.doesNotMatch(syncImplementation, /update\.sku/);
+  assert.match(
+    syncImplementation,
+    /where: \{ id: input\.productId, organizationId: input\.organizationId \}/
+  );
 });
 
 test("interface envia modos explicitos e o relatorio usa rota paginada do job", () => {
@@ -374,4 +553,6 @@ test("interface envia modos explicitos e o relatorio usa rota paginada do job", 
   assert.match(topbar, /\/api\/notifications\/bling-sync\/\$\{encodeURIComponent\(selectedSyncJobId\)\}\/report/);
   assert.match(topbar, /category: syncReportCategory/);
   assert.match(topbar, /Mostrando \{group\.items\.length\} de \{group\.total\}/);
+  assert.match(topbar, /SKU local:/);
+  assert.match(topbar, /Codigo Bling:/);
 });

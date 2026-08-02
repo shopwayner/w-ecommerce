@@ -54,12 +54,29 @@ type NotificationView = {
 type SyncReportEntry = {
   productId: string;
   sku: string;
+  localSku: string | null;
+  externalCode: string | null;
+  identityConflict: boolean;
   category: BlingProductSyncChangeCategory;
   field: string;
   previousValue: BlingProductSyncChangeValue;
   newValue: BlingProductSyncChangeValue;
   delta?: number;
 };
+
+function syncIdentityLabel(item: Pick<SyncReportEntry, "sku" | "localSku" | "externalCode">) {
+  if (item.localSku) return `SKU local: ${item.localSku}`;
+  if (item.externalCode) return `Codigo Bling: ${item.externalCode}`;
+  return `SKU: ${item.sku}`;
+}
+
+function syncExternalIdentityLabel(item: Pick<SyncReportEntry, "localSku" | "externalCode" | "identityConflict">) {
+  if (item.identityConflict) return "Codigos Bling conflitantes";
+  if (item.localSku && item.externalCode && item.localSku !== item.externalCode) {
+    return `Codigo Bling: ${item.externalCode}`;
+  }
+  return null;
+}
 
 type SyncReportPreview = {
   changedProducts: number;
@@ -527,7 +544,8 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed, denseDesktopShell = fa
                                   </p>
                                   {group.items.slice(0, 3).map((item, index) => (
                                     <p className="mt-0.5 text-[11px] text-matrix-muted" key={`${item.productId}-${item.field}-${index}`}>
-                                      SKU {item.sku}: {formatSyncChange(item)}
+                                      {syncIdentityLabel(item)}
+                                      {syncExternalIdentityLabel(item) ? ` (${syncExternalIdentityLabel(item)})` : ""}: {formatSyncChange(item)}
                                     </p>
                                   ))}
                                   {group.total > group.items.length ? (
@@ -628,8 +646,15 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed, denseDesktopShell = fa
                     </p>
                     <div className="divide-y divide-matrix-border rounded-md border border-matrix-border bg-matrix-panel2/60">
                       {syncReportData.entries.map((item, index) => (
-                        <div className="grid min-w-0 gap-1 px-3 py-2 text-xs sm:grid-cols-[9rem_11rem_minmax(0,1fr)]" key={`${item.productId}-${item.field}-${index}`}>
-                          <strong className="break-words text-matrix-fg">SKU {item.sku}</strong>
+                          <div className="grid min-w-0 gap-1 px-3 py-2 text-xs sm:grid-cols-[11rem_11rem_minmax(0,1fr)]" key={`${item.productId}-${item.field}-${index}`}>
+                            <div className="min-w-0">
+                              <strong className="block break-words text-matrix-fg">{syncIdentityLabel(item)}</strong>
+                              {syncExternalIdentityLabel(item) ? (
+                                <span className="block break-words text-[10px] text-matrix-muted">
+                                  {syncExternalIdentityLabel(item)}
+                                </span>
+                              ) : null}
+                            </div>
                           <span className="break-words text-matrix-gold">{blingProductSyncCategoryLabels[item.category]}</span>
                           <span className="min-w-0 break-words text-matrix-muted">{formatSyncChange(item)}</span>
                         </div>
