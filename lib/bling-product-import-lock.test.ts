@@ -10,7 +10,6 @@ import {
   blingProductImportService,
   createBlingImportPreviewConfirmation,
   createBlingImportPreviewFingerprint,
-  resetBlingImportPreviewCorrelationsForTests,
   type BlingImportPreviewProof
 } from "./services/bling-product-import-service";
 
@@ -26,6 +25,7 @@ type MockTransaction = {
   erpSyncJob: {
     findFirst: MockMethod;
     create: MockMethod;
+    updateMany?: MockMethod;
   };
   eRPConnection: {
     findUnique: MockMethod;
@@ -49,6 +49,7 @@ const proof: BlingImportPreviewProof = {
 };
 
 const restorePrismaMocks: Array<() => void> = [];
+const persistedPreviews = new Map<string, { id: string; lastCursor: string; consumed: boolean }>();
 
 function replacePrismaProperty(
   property: "blingConnection" | "$transaction",
@@ -101,14 +102,35 @@ function createLiveConfirmation(input: {
     skuConflicts: common.skuConflicts,
     matchSummary: common.matchSummary
   });
+  const previewJobId = `preview-${common.connectionId}`;
+  const confirmation = createBlingImportPreviewConfirmation({
+    previewJobId,
+    ...common,
+    previewFingerprint,
+    proof
+  });
+  persistedPreviews.set(common.connectionId, {
+    id: previewJobId,
+    consumed: false,
+    lastCursor: JSON.stringify({
+      version: 1,
+      kind: "BLING_PRODUCT_PREVIEW",
+      operation: "IMPORT",
+      userId: common.userId,
+      correlationId: common.correlationId,
+      progress: {},
+      preview: {
+        previewFingerprint,
+        confirmationToken: confirmation.confirmationToken,
+        previewExpiresAt: confirmation.previewExpiresAt
+      }
+    })
+  });
   return {
     common,
     previewFingerprint,
-    ...createBlingImportPreviewConfirmation({
-      ...common,
-      previewFingerprint,
-      proof
-    })
+    previewJobId,
+    ...confirmation
   };
 }
 
@@ -116,6 +138,28 @@ function mockPrepareDependencies(
   transaction: MockTransaction,
   options: { serializeTransactions?: boolean } = {}
 ) {
+  const originalFindFirst = transaction.erpSyncJob.findFirst;
+  transaction.erpSyncJob.findFirst = async (args: unknown) => {
+    const where = (args as { where?: { type?: string; blingConnectionId?: string } }).where;
+    if (typeof where?.type === "string" && where.type.includes("PREVIEW")) {
+      const preview = persistedPreviews.get(where.blingConnectionId ?? "");
+      return preview && !preview.consumed
+        ? { id: preview.id, lastCursor: preview.lastCursor }
+        : null;
+    }
+    return originalFindFirst(args);
+  };
+  const originalUpdateMany = transaction.erpSyncJob.updateMany;
+  transaction.erpSyncJob.updateMany = async (args: unknown) => {
+    const where = (args as { where?: { id?: string; type?: string } }).where;
+    if (typeof where?.type === "string" && where.type.includes("PREVIEW")) {
+      const preview = [...persistedPreviews.values()].find((item) => item.id === where.id);
+      if (!preview || preview.consumed) return { count: 0 };
+      preview.consumed = true;
+      return { count: 1 };
+    }
+    return originalUpdateMany ? originalUpdateMany(args) : { count: 0 };
+  };
   replacePrismaProperty("blingConnection", {
     findFirst: async (args: unknown) => ({
       id: (
@@ -167,7 +211,7 @@ function mockPrepareDependencies(
 }
 
 test.beforeEach(() => {
-  resetBlingImportPreviewCorrelationsForTests();
+  persistedPreviews.clear();
 });
 
 test.afterEach(() => {
@@ -230,7 +274,8 @@ test("PREPARE_SYNC continua depois do lock e cria exatamente um job no escopo co
   const job = await blingProductImportService.prepareSync({
     ...confirmation.common,
     previewFingerprint: confirmation.previewFingerprint,
-    confirmationToken: confirmation.confirmationToken
+    confirmationToken: confirmation.confirmationToken,
+    previewJobId: confirmation.previewJobId
   });
 
   assert.equal(job.id, "job-lock-test");
@@ -293,7 +338,8 @@ test("PREPARE_SYNC continua depois do lock e cria exatamente um job no escopo co
     blingProductImportService.prepareSync({
       ...confirmation.common,
       previewFingerprint: confirmation.previewFingerprint,
-      confirmationToken: confirmation.confirmationToken
+      confirmationToken: confirmation.confirmationToken,
+      previewJobId: confirmation.previewJobId
     }),
     BlingImportPreviewError
   );
@@ -350,12 +396,14 @@ test("duas contas concorrentes criam jobs distintos usando a mesma ancora organi
     blingProductImportService.prepareSync({
       ...confirmationA.common,
       previewFingerprint: confirmationA.previewFingerprint,
-      confirmationToken: confirmationA.confirmationToken
+      confirmationToken: confirmationA.confirmationToken,
+      previewJobId: confirmationA.previewJobId
     }),
     blingProductImportService.prepareSync({
       ...confirmationB.common,
       previewFingerprint: confirmationB.previewFingerprint,
-      confirmationToken: confirmationB.confirmationToken
+      confirmationToken: confirmationB.confirmationToken,
+      previewJobId: confirmationB.previewJobId
     })
   ]);
 
@@ -420,7 +468,8 @@ test("job concorrente retorna codigo especifico e nao cria outro job", async () 
     blingProductImportService.prepareSync({
       ...confirmation.common,
       previewFingerprint: confirmation.previewFingerprint,
-      confirmationToken: confirmation.confirmationToken
+      confirmationToken: confirmation.confirmationToken,
+      previewJobId: confirmation.previewJobId
     }),
     (error: unknown) => {
       assert.ok(error instanceof BlingImportPreviewError);
@@ -458,7 +507,8 @@ test("falha real do lock e propagada e cria zero job", async () => {
     blingProductImportService.prepareSync({
       ...confirmation.common,
       previewFingerprint: confirmation.previewFingerprint,
-      confirmationToken: confirmation.confirmationToken
+      confirmationToken: confirmation.confirmationToken,
+      previewJobId: confirmation.previewJobId
     }),
     (error: unknown) => {
       assert.ok(error instanceof BlingImportPreviewError);

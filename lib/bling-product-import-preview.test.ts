@@ -12,14 +12,11 @@ import {
   publicBlingImportPreviewErrorMessage
 } from "./bling-product-import-preview";
 import {
-  consumeBlingImportPreviewConfirmation,
   createBlingImportPreviewConfirmation,
   createBlingImportPreviewFingerprint,
   blingProductImportService,
   normalizeBlingCatalogPage,
   processBlingImportItemsIndependently,
-  registerBlingImportPreviewCorrelation,
-  resetBlingImportPreviewCorrelationsForTests,
   resolveBlingProductImportMatch,
   verifyBlingImportPreviewConfirmation,
   type BlingImportPreviewProof
@@ -29,7 +26,6 @@ process.env.APP_ENCRYPTION_KEY = "test-bling-import-preview-key";
 
 const pageSize = 100;
 const correlationOne = "00000000-0000-4000-8000-000000000001";
-const correlationTwo = "00000000-0000-4000-8000-000000000002";
 
 function integrityFor(input: {
   pageCounts: number[];
@@ -80,7 +76,9 @@ function proof(overrides: Partial<BlingImportPreviewProof> = {}): BlingImportPre
 }
 
 function createConfirmation(correlationId = correlationOne, proofValue = proof()) {
+  const previewJobId = "preview-job-1";
   const common = {
+    previewJobId,
     userId: "user-1",
     organizationId: "org-1",
     connectionId: "connection-1",
@@ -130,10 +128,6 @@ function assertPreviewErrorCode(
     return true;
   });
 }
-
-test.beforeEach(() => {
-  resetBlingImportPreviewCorrelationsForTests();
-});
 
 test("total informado e contagem igual produzem previa completa", () => {
   const integrity = integrityFor({
@@ -323,10 +317,10 @@ test("coleta de previa real desabilita retry automatico de pagina", () => {
   assert.match(service, /const attempts = input\.allowRetry === false \? 1 : maxRetryAttempts/);
 });
 
-test("falha em PREPARE_SYNC consome o token e cria zero job", () => {
+test("validacao criptografica e estateless e nao cria job", () => {
   const confirmation = createConfirmation();
   let jobsCreated = 0;
-  consumeBlingImportPreviewConfirmation(
+  verifyBlingImportPreviewConfirmation(
     confirmation.confirmationToken,
     {
       ...confirmation.common,
@@ -335,7 +329,7 @@ test("falha em PREPARE_SYNC consome o token e cria zero job", () => {
     new Date("2026-07-29T16:05:00.000Z")
   );
   assert.equal(jobsCreated, 0);
-  assert.throws(
+  assert.doesNotThrow(
     () => verifyBlingImportPreviewConfirmation(
       confirmation.confirmationToken,
       {
@@ -343,8 +337,7 @@ test("falha em PREPARE_SYNC consome o token e cria zero job", () => {
         previewFingerprint: confirmation.previewFingerprint
       },
       new Date("2026-07-29T16:05:01.000Z")
-    ),
-    BlingImportPreviewError
+    )
   );
   jobsCreated += 0;
 });
@@ -380,25 +373,30 @@ test("confirmacao de outra organizacao e bloqueada", () => {
   );
 });
 
-test("nova consulta invalida o token anterior", () => {
-  const confirmation = createConfirmation(correlationOne);
-  registerBlingImportPreviewCorrelation({
-    userId: confirmation.common.userId,
-    organizationId: confirmation.common.organizationId,
-    connectionId: confirmation.common.connectionId,
-    correlationId: correlationTwo
-  });
+test("confirmacao fica vinculada ao previewJobId persistido", () => {
+  const confirmation = createConfirmation();
   assertPreviewErrorCode(
     () => verifyBlingImportPreviewConfirmation(
       confirmation.confirmationToken,
       {
         ...confirmation.common,
+        previewJobId: "preview-job-diferente",
         previewFingerprint: confirmation.previewFingerprint
       },
       new Date("2026-07-29T16:05:00.000Z")
     ),
-    "PREVIEW_STALE"
+    "PREVIEW_JOB_MISMATCH"
   );
+});
+
+test("correlacao deixa de depender de memoria local do processo", () => {
+  const service = readFileSync(
+    path.join(process.cwd(), "lib/services/bling-product-import-service.ts"),
+    "utf8"
+  );
+  assert.doesNotMatch(service, /latestPreviewCorrelations\s*=\s*new Map/);
+  assert.match(service, /persistedPreview/);
+  assert.match(service, /status:\s*"CONSUMED"/);
 });
 
 test("token expirado e bloqueado no frontend e backend", () => {
@@ -433,9 +431,10 @@ test("token expirado e bloqueado no frontend e backend", () => {
 
 test("token adulterado e operacao divergente recebem codigos especificos", () => {
   const confirmation = createConfirmation();
+  const tamperedToken = `${confirmation.confirmationToken[0] === "A" ? "B" : "A"}${confirmation.confirmationToken.slice(1)}`;
   assertPreviewErrorCode(
     () => verifyBlingImportPreviewConfirmation(
-      `${confirmation.confirmationToken}x`,
+      tamperedToken,
       {
         ...confirmation.common,
         previewFingerprint: confirmation.previewFingerprint
@@ -445,7 +444,6 @@ test("token adulterado e operacao divergente recebem codigos especificos", () =>
     "PREVIEW_INVALID"
   );
 
-  resetBlingImportPreviewCorrelationsForTests();
   const syncConfirmation = createConfirmation();
   assertPreviewErrorCode(
     () => verifyBlingImportPreviewConfirmation(
@@ -475,16 +473,18 @@ test("nova consulta limpa a previa anterior na interface", () => {
   assert.ok(clearRejectedCorrelation > requestStart);
 });
 
-test("backend consome a confirmacao antes de tentar criar job", () => {
+test("backend consome a previa persistida atomicamente com a criacao do job", () => {
   const service = readFileSync(
     path.join(process.cwd(), "lib/services/bling-product-import-service.ts"),
     "utf8"
   );
   const prepareStart = service.indexOf("async prepareSync(input:");
-  const consumeAt = service.indexOf("consumeBlingImportPreviewConfirmation", prepareStart);
+  const persistedAt = service.indexOf("const persistedPreview", prepareStart);
   const createAt = service.indexOf("transaction.erpSyncJob.create", prepareStart);
+  const consumeAt = service.indexOf('data: { status: "CONSUMED" }', prepareStart);
   assert.ok(prepareStart >= 0);
-  assert.ok(consumeAt > prepareStart && consumeAt < createAt);
+  assert.ok(persistedAt > prepareStart && persistedAt < createAt);
+  assert.ok(consumeAt > createAt);
 });
 
 test("mapping da conexao atual possui prioridade sobre SKU e GTIN", () => {
@@ -804,6 +804,7 @@ test("fixture J-Commerce processa 383 IDs em quatro paginas e classifica 100 map
 
   try {
     const preview = await blingProductImportService.dryRun({
+      previewJobId: "preview-job-j-commerce",
       userId: "willian-user",
       organizationId: "willian-workspace",
       connectionId: "j-commerce-connection",

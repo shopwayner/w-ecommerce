@@ -369,7 +369,8 @@ test("interface envia modos explicitos e o relatorio usa rota paginada do job", 
   const topbar = source("components/topbar.tsx");
   assert.match(productsPage, /openBlingImportPreview\(\)/);
   assert.match(productsPage, /openBlingSyncPreview\(\)/);
-  assert.match(productsPage, /operation,[\s\S]+mode: "dry-run"/);
+  assert.match(productsPage, /operation,[\s\S]+mode: "preview"/);
+  assert.match(productsPage, /previewJobId/);
   assert.match(topbar, /\/api\/notifications\/bling-sync\/\$\{encodeURIComponent\(selectedSyncJobId\)\}\/report/);
   assert.match(topbar, /category: syncReportCategory/);
   assert.match(topbar, /Mostrando \{group\.items\.length\} de \{group\.total\}/);

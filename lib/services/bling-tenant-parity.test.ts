@@ -468,7 +468,7 @@ test("worker pode usar somente o refresh OAuth oficial ao retomar job persistido
   );
   assert.match(
     source,
-    /runPreparedSync[\s\S]+validateConnection\([\s\S]+allowOfficialRefresh: true/
+    /runPreparedSync[\s\S]+validateBlingProductImportConnection\([\s\S]+allowOfficialRefresh: true/
   );
   assert.match(source, /blingApiClient\.request<unknown>\(\{[\s\S]+method: "GET"/);
   assert.doesNotMatch(source, /refreshTokenEncrypted[\s\S]+productExternalMapping/);

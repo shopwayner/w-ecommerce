@@ -8,11 +8,15 @@ import {
   type BlingImportPreviewFailureDiagnostic
 } from "@/lib/bling-product-import-preview";
 import { blingProductImportService } from "@/lib/services/bling-product-import-service";
+import {
+  BlingProductPreviewJobError,
+  blingProductPreviewJobService
+} from "@/lib/services/bling-product-preview-job-service";
 
 export const maxDuration = 300;
 
-const dryRunSchema = z.object({
-  mode: z.literal("dry-run"),
+const previewSchema = z.object({
+  mode: z.literal("preview"),
   operation: z.enum(["IMPORT", "SYNC"]),
   connectionId: z.string().trim().min(1),
   correlationId: z.string().uuid()
@@ -25,10 +29,11 @@ const prepareSchema = z.object({
   confirmed: z.literal(true),
   correlationId: z.string().uuid(),
   previewFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-  confirmationToken: z.string().trim().min(1).max(32_768)
+  confirmationToken: z.string().trim().min(1).max(32_768),
+  previewJobId: z.string().trim().min(1)
 }).strict();
 
-const postSchema = z.discriminatedUnion("mode", [dryRunSchema, prepareSchema]);
+const postSchema = z.discriminatedUnion("mode", [previewSchema, prepareSchema]);
 
 function publicPrepareErrorMessage(
   diagnostic: BlingImportPreviewFailureDiagnostic
@@ -51,6 +56,8 @@ function publicPrepareErrorMessage(
       "A previa nao e mais valida. Consulte os produtos novamente.",
     PREVIEW_INVALID:
       "A previa nao e mais valida. Consulte os produtos novamente.",
+    PREVIEW_JOB_MISMATCH:
+      "A previa nao e mais valida. Consulte os produtos novamente.",
     JOB_ALREADY_RUNNING:
       "Ja existe uma importacao ou sincronizacao em andamento para esta conta Bling."
   };
@@ -60,7 +67,7 @@ function publicPrepareErrorMessage(
 
 function safeError(
   error: unknown,
-  mode?: "dry-run" | "prepare"
+  mode?: "preview" | "prepare"
 ): { message: string; status: number; diagnostic?: BlingImportPreviewFailureDiagnostic } {
   if (error instanceof BlingImportPreviewError) {
     const status = error.diagnostic.stage === "AUTHENTICATION"
@@ -75,6 +82,12 @@ function safeError(
       message: publicPrepareErrorMessage(error.diagnostic),
       status,
       diagnostic: error.diagnostic
+    };
+  }
+  if (error instanceof BlingProductPreviewJobError) {
+    return {
+      message: error.message,
+      status: error.code === "PREVIEW_NOT_FOUND" ? 404 : 409
     };
   }
   const message = error instanceof Error ? error.message : "Nao foi possivel consultar os produtos do Bling.";
@@ -93,7 +106,7 @@ function safeError(
 
 function logFailure(input: {
   correlationId: string;
-  mode: "dry-run" | "prepare" | "run";
+  mode: "preview" | "prepare" | "run";
   safe: ReturnType<typeof safeError>;
   durationMs: number;
 }) {
@@ -132,9 +145,10 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const connectionId = url.searchParams.get("connectionId")?.trim();
   const jobId = url.searchParams.get("jobId")?.trim();
+  const previewJobId = url.searchParams.get("previewJobId")?.trim();
   const operation = url.searchParams.get("operation")?.trim();
   const active = url.searchParams.get("active") === "true";
-  if (!connectionId || (!jobId && !active)) {
+  if (!connectionId || (!jobId && !previewJobId && !active)) {
     return NextResponse.json({ error: "Sincronizacao nao informada." }, { status: 400 });
   }
   if (operation !== "IMPORT" && operation !== "SYNC") {
@@ -142,6 +156,24 @@ export async function GET(request: Request) {
   }
 
   try {
+    if (previewJobId) {
+      const previewJob = await blingProductPreviewJobService.getStatus({
+        userId: auth.context.user.id,
+        organizationId: auth.context.organizationId,
+        connectionId,
+        previewJobId,
+        operation
+      });
+      return NextResponse.json(
+        {
+          previewJobId: previewJob.id,
+          correlationId: previewJob.correlationId,
+          status: previewJob.status,
+          previewJob
+        },
+        { headers: { "Cache-Control": "no-store" } }
+      );
+    }
     const job = active
       ? await blingProductImportService.getActiveJobStatus({
           organizationId: auth.context.organizationId,
@@ -192,8 +224,8 @@ export async function POST(request: Request) {
   }
 
   try {
-    if (parsed.data.mode === "dry-run") {
-      const preview = await blingProductImportService.dryRun({
+    if (parsed.data.mode === "preview") {
+      const previewJob = await blingProductPreviewJobService.schedule({
         userId: auth.context.user.id,
         organizationId: auth.context.organizationId,
         connectionId: parsed.data.connectionId,
@@ -201,32 +233,20 @@ export async function POST(request: Request) {
         correlationId: parsed.data.correlationId
       });
       console.info("[bling.product-import]", {
-        correlationId: preview.correlationId,
-        stage: "PREVIEW_COMPLETED",
-        page: preview.pagesCompleted,
-        expectedPages: preview.pagesExpected,
-        httpStatus: 200,
-        errorCode: null,
-        requestIdMasked: null,
-        durationMs: preview.durationMs,
-        pageSize: preview.pageSize,
-        pageCounts: preview.pageCounts,
-        pagesCompleted: preview.pagesCompleted,
-        lastDataPage: preview.lastDataPage,
-        sentinelPage: preview.sentinelPage,
-        reportedTotal: preview.reportedTotal,
-        derivedTotal: preview.derivedTotal,
-        totalSource: preview.totalSource,
-        uniqueIdsCount: preview.uniqueIdsCount,
-        duplicateCount: preview.duplicateExternalIds,
-        invalidCount: preview.errors,
-        paginationComplete: preview.paginationComplete,
-        previewComplete: preview.previewComplete,
+        correlationId: previewJob.correlationId,
+        stage: "PREVIEW_SCHEDULED",
+        httpStatus: 202,
+        previewJobId: previewJob.id,
         jobCreated: false
       });
       return NextResponse.json(
-        { preview },
-        { headers: { "Cache-Control": "no-store" } }
+        {
+          previewJobId: previewJob.id,
+          correlationId: previewJob.correlationId,
+          status: previewJob.status,
+          previewJob
+        },
+        { status: 202, headers: { "Cache-Control": "no-store" } }
       );
     }
 
@@ -245,7 +265,8 @@ export async function POST(request: Request) {
         operation: parsed.data.operation,
         correlationId: parsed.data.correlationId,
         previewFingerprint: parsed.data.previewFingerprint,
-        confirmationToken: parsed.data.confirmationToken
+        confirmationToken: parsed.data.confirmationToken,
+        previewJobId: parsed.data.previewJobId
       });
       console.info("[bling.product-import]", {
         correlationId: parsed.data.correlationId,

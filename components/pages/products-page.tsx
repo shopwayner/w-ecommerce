@@ -186,6 +186,27 @@ type BlingSyncJob = {
   failed: number;
 };
 
+type BlingPreviewJob = {
+  id: string;
+  status: "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED" | "EXPIRED" | "CANCELLED" | "CONSUMED";
+  operation: "IMPORT" | "SYNC";
+  correlationId: string;
+  currentPage: number;
+  progress: {
+    stage: string;
+    pagesCompleted: number;
+    itemsProcessed: number;
+    totalItems: number | null;
+    uniqueProducts: number;
+    withChanges: number;
+    withoutChanges: number;
+    failures: number;
+  };
+  preview: BlingImportPreview | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+};
+
 const blingJobPollIntervalMs = 2_000;
 const blingJobMaxPollAttempts = 900;
 
@@ -413,6 +434,7 @@ export function ProductsPage() {
   const [blingImportBusy, setBlingImportBusy] = useState(false);
   const [blingImportMessage, setBlingImportMessage] = useState("");
   const [blingImportPreview, setBlingImportPreview] = useState<BlingImportPreview | null>(null);
+  const [blingPreviewJob, setBlingPreviewJob] = useState<BlingPreviewJob | null>(null);
   const [blingImportCorrelationId, setBlingImportCorrelationId] = useState<string | null>(null);
   const [blingSyncJob, setBlingSyncJob] = useState<BlingSyncJob | null>(null);
   const [blingUpdateOpen, setBlingUpdateOpen] = useState(false);
@@ -429,6 +451,7 @@ export function ProductsPage() {
   const blingUpdateRequestInFlight = useRef(false);
   const blingImportRequestInFlight = useRef(false);
   const blingImportCorrelationRef = useRef<string | null>(null);
+  const blingPreviewPollAbortRef = useRef<AbortController | null>(null);
   const blingUpdateCompletionSequence = useRef(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
@@ -585,6 +608,10 @@ export function ProductsPage() {
     const productIds = new Set(products.map((product) => product.id));
     setSelectedProductIds((current) => new Set([...current].filter((id) => productIds.has(id))));
   }, [products]);
+
+  useEffect(() => {
+    return () => blingPreviewPollAbortRef.current?.abort();
+  }, []);
 
   useEffect(() => {
     if (!blingImportPreview) return;
@@ -1313,15 +1340,84 @@ export function ProductsPage() {
     router.push(buildProductDetailsHref(productId, returnTo));
   }
 
+  async function loadBlingPreviewJob(
+    connectionId: string,
+    previewJobId: string,
+    operation: "IMPORT" | "SYNC",
+    signal: AbortSignal
+  ) {
+    const response = await fetch(
+      `/api/products/import-from-bling?connectionId=${encodeURIComponent(connectionId)}&previewJobId=${encodeURIComponent(previewJobId)}&operation=${operation}`,
+      { cache: "no-store", signal }
+    );
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.previewJob) {
+      throw new Error(payload.error ?? "Nao foi possivel acompanhar a previa.");
+    }
+    const previewJob = payload.previewJob as BlingPreviewJob;
+    setBlingPreviewJob(previewJob);
+    return previewJob;
+  }
+
+  async function pollBlingPreviewJob(
+    connectionId: string,
+    previewJobId: string,
+    operation: "IMPORT" | "SYNC",
+    correlationId: string,
+    signal: AbortSignal
+  ) {
+    for (let attempt = 0; attempt < blingJobMaxPollAttempts; attempt += 1) {
+      if (signal.aborted) return null;
+      const previewJob = await loadBlingPreviewJob(
+        connectionId,
+        previewJobId,
+        operation,
+        signal
+      );
+      if (blingImportCorrelationRef.current !== correlationId) return null;
+      if (previewJob.status === "COMPLETED") return previewJob;
+      if (["FAILED", "EXPIRED", "CANCELLED"].includes(previewJob.status)) {
+        throw new Error(
+          previewJob.status === "EXPIRED"
+            ? "A previa expirou. Consulte os produtos novamente."
+            : previewJob.errorMessage ?? "Nao foi possivel concluir a previa."
+        );
+      }
+      await new Promise<void>((resolve) => {
+        const timeout = window.setTimeout(resolve, blingJobPollIntervalMs);
+        signal.addEventListener("abort", () => {
+          window.clearTimeout(timeout);
+          resolve();
+        }, { once: true });
+      });
+    }
+    throw new Error("A previa continua em segundo plano. Reabra esta consulta para acompanhar.");
+  }
+
+  function closeBlingPreviewModal() {
+    blingPreviewPollAbortRef.current?.abort();
+    blingPreviewPollAbortRef.current = null;
+    blingImportRequestInFlight.current = false;
+    setBlingImportBusy(false);
+    setBlingImportOpen(false);
+  }
+
   async function openBlingOperationPreview(operation: "IMPORT" | "SYNC") {
-    if (blingImportRequestInFlight.current) return;
+    if (blingImportRequestInFlight.current) {
+      setBlingImportOpen(true);
+      return;
+    }
     const correlationId = window.crypto.randomUUID();
+    blingPreviewPollAbortRef.current?.abort();
+    const pollController = new AbortController();
+    blingPreviewPollAbortRef.current = pollController;
     blingImportRequestInFlight.current = true;
     blingImportCorrelationRef.current = correlationId;
     setBlingImportCorrelationId(correlationId);
     setBlingImportOperation(operation);
     setBlingImportOpen(true);
     setBlingImportPreview(null);
+    setBlingPreviewJob(null);
     setBlingSyncJob(null);
     setBlingImportMessage("");
 
@@ -1343,6 +1439,7 @@ export function ProductsPage() {
 
     setBlingImportBusy(true);
     let previewAccepted = false;
+    let activeCorrelationId = correlationId;
     try {
       const activeResponse = await fetch(
         `/api/products/import-from-bling?connectionId=${encodeURIComponent(connectionId)}&active=true&operation=${operation}`
@@ -1372,20 +1469,34 @@ export function ProductsPage() {
       const response = await fetch("/api/products/import-from-bling", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: "dry-run", operation, connectionId, correlationId })
+        body: JSON.stringify({ mode: "preview", operation, connectionId, correlationId })
       });
       const payload = await response.json().catch(() => ({}));
-      if (blingImportCorrelationRef.current !== correlationId) return;
-      if (!response.ok) {
+      if (!response.ok || !payload.previewJob?.id) {
         setBlingImportPreview(null);
         setBlingSyncJob(null);
         setBlingImportMessage(payload.error ?? "Nao foi possivel consultar os produtos do Bling agora.");
         return;
       }
-      const preview = payload.preview as BlingImportPreview | undefined;
+      const scheduled = payload.previewJob as BlingPreviewJob;
+      activeCorrelationId = scheduled.correlationId;
+      blingImportCorrelationRef.current = activeCorrelationId;
+      setBlingImportCorrelationId(activeCorrelationId);
+      setBlingPreviewJob(scheduled);
+      const completedJob = scheduled.status === "COMPLETED"
+        ? scheduled
+        : await pollBlingPreviewJob(
+            connectionId,
+            scheduled.id,
+            operation,
+            activeCorrelationId,
+            pollController.signal
+          );
+      if (!completedJob) return;
+      const preview = completedJob.preview ?? undefined;
       if (
         !preview
-        || !canConfirmBlingImportPreview(preview, correlationId)
+        || !canConfirmBlingImportPreview(preview, activeCorrelationId)
         || preview.operation !== operation
         || preview.connectionId !== connectionId
         || preview.pagesCompleted !== preview.pagesExpected
@@ -1399,15 +1510,20 @@ export function ProductsPage() {
       setBlingImportPreview(preview);
       previewAccepted = true;
       setBlingImportMessage("Consulta concluida. Nenhum produto foi alterado.");
-    } catch {
-      if (blingImportCorrelationRef.current !== correlationId) return;
+    } catch (error) {
+      if (pollController.signal.aborted) return;
+      if (blingImportCorrelationRef.current !== activeCorrelationId) return;
       setBlingImportPreview(null);
       setBlingSyncJob(null);
-      setBlingImportMessage("Nao foi possivel consultar os produtos do Bling agora.");
+      setBlingImportMessage(
+        error instanceof Error
+          ? error.message
+          : "Nao foi possivel consultar os produtos do Bling agora."
+      );
     } finally {
-      if (blingImportCorrelationRef.current === correlationId) {
-        blingImportRequestInFlight.current = false;
-        setBlingImportBusy(false);
+      blingImportRequestInFlight.current = false;
+      setBlingImportBusy(false);
+      if (blingImportCorrelationRef.current === activeCorrelationId) {
         if (!previewAccepted) {
           blingImportCorrelationRef.current = null;
           setBlingImportCorrelationId(null);
@@ -1475,10 +1591,12 @@ export function ProductsPage() {
 
   async function startBlingOperation(operation: "IMPORT" | "SYNC") {
     const connectionId = accountContext?.mode === "ERP_ACCOUNT" && accountContext.provider === "BLING" ? accountContext.connectionId : null;
-    if (!connectionId || !blingImportPreview || blingImportBusy) return;
+    if (!connectionId || !blingImportPreview || !blingPreviewJob || blingImportBusy) return;
     if (
       blingImportPreview.connectionId !== connectionId
       || blingImportPreview.operation !== operation
+      || blingPreviewJob.status !== "COMPLETED"
+      || blingPreviewJob.correlationId !== blingImportPreview.correlationId
       || !canConfirmBlingImportPreview(blingImportPreview, blingImportCorrelationId)
     ) {
       setBlingImportPreview(null);
@@ -1507,7 +1625,8 @@ export function ProductsPage() {
           confirmed: true,
           correlationId: blingImportPreview.correlationId,
           previewFingerprint: blingImportPreview.previewFingerprint,
-          confirmationToken: blingImportPreview.confirmationToken
+          confirmationToken: blingImportPreview.confirmationToken,
+          previewJobId: blingPreviewJob.id
         })
       });
       const payload = await response.json().catch(() => ({}));
@@ -1519,6 +1638,7 @@ export function ProductsPage() {
         return;
       }
       setBlingImportPreview(null);
+      setBlingPreviewJob(null);
       setBlingImportCorrelationId(null);
       blingImportCorrelationRef.current = null;
       setBlingSyncJob(payload.job as BlingSyncJob);
@@ -1929,7 +2049,7 @@ export function ProductsPage() {
         />
       ) : null}
       {blingImportOpen ? (
-        <div className="fixed inset-0 z-[70] grid place-items-center bg-black/70 px-4 py-6 backdrop-blur-sm" onClick={() => !blingImportBusy && setBlingImportOpen(false)}>
+        <div className="fixed inset-0 z-[70] grid place-items-center bg-black/70 px-4 py-6 backdrop-blur-sm" onClick={closeBlingPreviewModal}>
           <section aria-modal="true" className="matrix-scroll max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-lg border border-matrix-gold/35 bg-matrix-panel p-5" onClick={(event) => event.stopPropagation()} role="dialog">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -1945,10 +2065,23 @@ export function ProductsPage() {
                   Conta selecionada: {blingImportPreview?.connectionName ?? accountContext?.selectedOption?.label ?? "Bling"}
                 </p>
               </div>
-              <button aria-label="Fechar consulta Bling" className="grid h-9 w-9 place-items-center rounded-md border border-matrix-border text-matrix-muted" disabled={blingImportBusy} onClick={() => setBlingImportOpen(false)} type="button"><X className="h-4 w-4" /></button>
+              <button aria-label="Fechar consulta Bling" className="grid h-9 w-9 place-items-center rounded-md border border-matrix-border text-matrix-muted" onClick={closeBlingPreviewModal} type="button"><X className="h-4 w-4" /></button>
             </div>
 
-            {blingImportBusy && !blingSyncJob ? <p className="mt-5 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm text-matrix-muted">Consultando todas as páginas com segurança...</p> : null}
+            {blingImportBusy && !blingSyncJob ? (
+              <div className="mt-5 rounded-md border border-matrix-border bg-matrix-panel2 p-4 text-sm text-matrix-muted">
+                <p>Consultando em segundo plano com segurança...</p>
+                {blingPreviewJob ? (
+                  <div className="mt-2 space-y-1 text-xs">
+                    <p>Status: {blingPreviewJob.status} · Prévia: {blingPreviewJob.id}</p>
+                    <p>
+                      Páginas concluídas: {blingPreviewJob.progress.pagesCompleted} · Produtos processados: {blingPreviewJob.progress.itemsProcessed}
+                      {blingPreviewJob.progress.totalItems !== null ? `/${blingPreviewJob.progress.totalItems}` : ""}
+                    </p>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {blingImportPreview ? (
               <>
                 <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -2017,10 +2150,14 @@ export function ProductsPage() {
 
             {blingImportMessage ? <p className="mt-5 rounded-md border border-matrix-border bg-matrix-panel2 px-3 py-2 text-sm text-matrix-muted">{blingImportMessage}</p> : null}
             <div className="mt-5 flex flex-wrap justify-end gap-2">
-              <Button disabled={blingImportBusy} onClick={() => setBlingImportOpen(false)} type="button" variant="secondary">Fechar</Button>
+              <Button onClick={closeBlingPreviewModal} type="button" variant="secondary">Fechar</Button>
               {blingImportPreview ? (
                 <Button
-                  disabled={blingImportBusy || !canConfirmBlingImportPreview(blingImportPreview, blingImportCorrelationId)}
+                  disabled={
+                    blingImportBusy
+                    || blingPreviewJob?.status !== "COMPLETED"
+                    || !canConfirmBlingImportPreview(blingImportPreview, blingImportCorrelationId)
+                  }
                   onClick={() => void (
                     blingImportOperation === "IMPORT"
                       ? startBlingImport()

@@ -138,6 +138,15 @@ export async function collectBlingPreviewPages<T>(input: {
   fetchPage: (page: number) => Promise<NormalizedBlingPreviewPage<T>>;
   productKey: (product: T) => string;
   classifyFailure: (error: unknown) => SafeFailure;
+  onPageCompleted?: (progress: {
+    page: number;
+    pagesCompleted: number;
+    sourceRowsFetched: number;
+    uniqueProductsLoaded: number;
+    invalidRows: number;
+    pageCounts: number[];
+    processedExternalIds: string[];
+  }) => Promise<void> | void;
   now?: () => number;
 }): Promise<CollectedBlingPreviewPages<T>> {
   const now = input.now ?? Date.now;
@@ -234,6 +243,16 @@ export async function collectBlingPreviewPages<T>(input: {
       products.push(product);
       uniqueProductIds.add(input.productKey(product));
     }
+
+    await input.onPageCompleted?.({
+      page,
+      pagesCompleted: completedPages.length,
+      sourceRowsFetched,
+      uniqueProductsLoaded: uniqueProductIds.size,
+      invalidRows,
+      pageCounts: [...pageCounts],
+      processedExternalIds: [...uniqueProductIds]
+    });
 
     const reachedReportedTotal =
       totalReportedByBling !== null

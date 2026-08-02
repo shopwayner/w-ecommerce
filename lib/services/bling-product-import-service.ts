@@ -60,9 +60,69 @@ const jobTypeByOperation = {
   IMPORT: "BLING_PRODUCTS_IMPORT",
   SYNC: "BLING_PRODUCTS_SYNC"
 } as const;
+const previewJobTypeByOperation = {
+  IMPORT: "BLING_PRODUCTS_PREVIEW_IMPORT",
+  SYNC: "BLING_PRODUCTS_PREVIEW_SYNC"
+} as const;
+const previewJobTypes = Object.values(previewJobTypeByOperation);
 
 type JsonRecord = Record<string, unknown>;
 export type BlingProductJobOperation = keyof typeof jobTypeByOperation;
+
+export type BlingPreviewJobProgress = {
+  stage: "PENDING" | "CATALOG_PAGE" | "LOCAL_COMPARISON" | "COMPLETED";
+  currentPage: number;
+  pagesCompleted: number;
+  itemsProcessed: number;
+  totalItems: number | null;
+  uniqueProducts: number;
+  duplicateCount: number;
+  invalidCount: number;
+  withChanges: number;
+  withoutChanges: number;
+  failures: number;
+  heartbeatAt: string;
+  processedExternalIds?: string[];
+};
+
+export type BlingProductPreviewJobCursor = {
+  version: 1;
+  kind: "BLING_PRODUCT_PREVIEW";
+  operation: BlingProductJobOperation;
+  userId: string;
+  correlationId: string;
+  progress: BlingPreviewJobProgress;
+  preview?: BlingProductDryRun;
+  errorCode?: string;
+};
+
+export function parseBlingProductPreviewJobCursor(
+  value: string | null | undefined
+): BlingProductPreviewJobCursor | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<BlingProductPreviewJobCursor>;
+    if (
+      parsed.version !== 1
+      || parsed.kind !== "BLING_PRODUCT_PREVIEW"
+      || !["IMPORT", "SYNC"].includes(parsed.operation ?? "")
+      || typeof parsed.userId !== "string"
+      || typeof parsed.correlationId !== "string"
+      || !parsed.progress
+    ) return null;
+    return parsed as BlingProductPreviewJobCursor;
+  } catch {
+    return null;
+  }
+}
+
+export function previewJobType(operation: BlingProductJobOperation) {
+  return previewJobTypeByOperation[operation];
+}
+
+export function isPreviewJobType(type: string) {
+  return previewJobTypes.includes(type as (typeof previewJobTypes)[number]);
+}
 
 type BlingCatalogResponse = {
   data?: unknown;
@@ -355,8 +415,9 @@ export type BlingProductDryRun = {
 };
 
 type BlingImportPreviewConfirmation = {
-  version: 4;
+  version: 5;
   operation: "BLING_PRODUCT_IMPORT_PREVIEW";
+  previewJobId: string;
   jobOperation: BlingProductJobOperation;
   userId: string;
   organizationId: string;
@@ -1266,7 +1327,7 @@ async function classifyBlingProductsForConnection(input: {
   return { mappings, matches, summary };
 }
 
-async function validateConnection(
+export async function validateBlingProductImportConnection(
   organizationId: string,
   connectionId: string,
   options: { allowOfficialRefresh?: boolean } = {}
@@ -1307,6 +1368,7 @@ async function fetchAllProducts(input: {
   readOnly: boolean;
   criterion?: 1 | 5;
   correlationId?: string;
+  onProgress?: (progress: BlingPreviewJobProgress) => Promise<void> | void;
 }) {
   const collected = await collectBlingPreviewPages<NormalizedBlingProduct>({
     correlationId: input.correlationId ?? "background-catalog-read",
@@ -1338,7 +1400,22 @@ async function fetchAllProducts(input: {
       }
     },
     productKey: (product) => product.externalProductId,
-    classifyFailure: classifyPreviewFailure
+    classifyFailure: classifyPreviewFailure,
+    onPageCompleted: async (progress) => input.onProgress?.({
+      stage: "CATALOG_PAGE",
+      currentPage: progress.page,
+      pagesCompleted: progress.pagesCompleted,
+      itemsProcessed: progress.sourceRowsFetched,
+      totalItems: null,
+      uniqueProducts: progress.uniqueProductsLoaded,
+      duplicateCount: 0,
+      invalidCount: progress.invalidRows,
+      withChanges: 0,
+      withoutChanges: 0,
+      failures: 0,
+      heartbeatAt: new Date().toISOString(),
+      processedExternalIds: progress.processedExternalIds
+    })
   });
 
   return {
@@ -2908,41 +2985,6 @@ type BlingImportPreviewFingerprintInput = BlingImportPreviewProof & {
   matchSummary: BlingProductImportMatchSummary;
 };
 
-const latestPreviewCorrelations = new Map<string, string>();
-
-function previewCorrelationKey(input: {
-  userId: string;
-  organizationId: string;
-  connectionId: string;
-}) {
-  return `${input.userId}:${input.organizationId}:${input.connectionId}`;
-}
-
-export function registerBlingImportPreviewCorrelation(input: {
-  userId: string;
-  organizationId: string;
-  connectionId: string;
-  correlationId: string;
-}) {
-  latestPreviewCorrelations.set(previewCorrelationKey(input), input.correlationId);
-}
-
-export function resetBlingImportPreviewCorrelationsForTests() {
-  latestPreviewCorrelations.clear();
-}
-
-function invalidateBlingImportPreviewCorrelation(input: {
-  userId: string;
-  organizationId: string;
-  connectionId: string;
-  correlationId: string;
-}) {
-  const key = previewCorrelationKey(input);
-  if (latestPreviewCorrelations.get(key) === input.correlationId) {
-    latestPreviewCorrelations.delete(key);
-  }
-}
-
 export function createBlingImportPreviewFingerprint(
   input: BlingImportPreviewFingerprintInput
 ) {
@@ -2972,6 +3014,7 @@ export function createBlingImportPreviewFingerprint(
 
 export function createBlingImportPreviewConfirmation(
   input: {
+    previewJobId: string;
     userId: string;
     organizationId: string;
     connectionId: string;
@@ -3001,10 +3044,10 @@ export function createBlingImportPreviewConfirmation(
   if (recalculatedFingerprint !== input.previewFingerprint) {
     throw new Error("A prova da previa nao corresponde ao fingerprint informado.");
   }
-  registerBlingImportPreviewCorrelation(input);
   const confirmation: BlingImportPreviewConfirmation = {
-    version: 4,
+    version: 5,
     operation: "BLING_PRODUCT_IMPORT_PREVIEW",
+    previewJobId: input.previewJobId,
     jobOperation: input.operation ?? "IMPORT",
     userId: input.userId,
     organizationId: input.organizationId,
@@ -3035,7 +3078,8 @@ type BlingPreviewConfirmationErrorCode =
   | "PREVIEW_CONNECTION_MISMATCH"
   | "PREVIEW_OPERATION_MISMATCH"
   | "PREVIEW_CORRELATION_MISMATCH"
-  | "PREVIEW_FINGERPRINT_MISMATCH";
+  | "PREVIEW_FINGERPRINT_MISMATCH"
+  | "PREVIEW_JOB_MISMATCH";
 
 class BlingPreviewConfirmationValidationError extends Error {
   constructor(public readonly code: BlingPreviewConfirmationErrorCode) {
@@ -3085,6 +3129,7 @@ function validNonNegativeInteger(value: unknown) {
 export function verifyBlingImportPreviewConfirmation(
   encrypted: string,
   input: {
+    previewJobId: string;
     userId: string;
     organizationId: string;
     connectionId: string;
@@ -3106,6 +3151,9 @@ export function verifyBlingImportPreviewConfirmation(
     }
     if (confirmation.userId !== input.userId) {
       throw new BlingPreviewConfirmationValidationError("PREVIEW_USER_MISMATCH");
+    }
+    if (confirmation.previewJobId !== input.previewJobId) {
+      throw new BlingPreviewConfirmationValidationError("PREVIEW_JOB_MISMATCH");
     }
     if (confirmation.organizationId !== input.organizationId) {
       throw new BlingPreviewConfirmationValidationError(
@@ -3131,10 +3179,6 @@ export function verifyBlingImportPreviewConfirmation(
       throw new BlingPreviewConfirmationValidationError(
         "PREVIEW_FINGERPRINT_MISMATCH"
       );
-    }
-    const latestCorrelation = latestPreviewCorrelations.get(previewCorrelationKey(input));
-    if (latestCorrelation !== input.correlationId) {
-      throw new BlingPreviewConfirmationValidationError("PREVIEW_STALE");
     }
     const validTotalSource = [
       "RESPONSE",
@@ -3216,8 +3260,9 @@ export function verifyBlingImportPreviewConfirmation(
       );
     }
     if (
-      confirmation.version !== 4
+      confirmation.version !== 5
       || confirmation.operation !== "BLING_PRODUCT_IMPORT_PREVIEW"
+      || !confirmation.previewJobId
       || !["IMPORT", "SYNC"].includes(confirmation.jobOperation)
       || !validNonNegativeInteger(confirmation.pageSize)
       || confirmation.pageSize <= 0
@@ -3249,16 +3294,6 @@ export function verifyBlingImportPreviewConfirmation(
         : "PREVIEW_INVALID"
     );
   }
-}
-
-export function consumeBlingImportPreviewConfirmation(
-  encrypted: string,
-  input: Parameters<typeof verifyBlingImportPreviewConfirmation>[1],
-  now = new Date()
-) {
-  const confirmation = verifyBlingImportPreviewConfirmation(encrypted, input, now);
-  invalidateBlingImportPreviewCorrelation(input);
-  return confirmation;
 }
 
 async function loadMappedBlingProductsForSync(
@@ -3409,6 +3444,7 @@ export async function analyzeMappedBlingProductsForSyncPreview(
         product: NormalizedBlingProduct;
       }
     ) => Promise<{ sku: string; changes: BlingProductSyncChange[] }>;
+    onProgress?: (progress: BlingPreviewJobProgress) => Promise<void> | void;
   } = {}
 ) {
   const mapped = input.products.flatMap((product) => {
@@ -3424,6 +3460,8 @@ export async function analyzeMappedBlingProductsForSyncPreview(
     failures: 0
   };
   let nextIndex = 0;
+  let completedCount = 0;
+  let progressQueue = Promise.resolve();
   const workerCount = Math.min(3, Math.max(1, mapped.length));
   await Promise.all(Array.from({ length: workerCount }, async () => {
     while (nextIndex < mapped.length) {
@@ -3449,37 +3487,78 @@ export async function analyzeMappedBlingProductsForSyncPreview(
         else summary.withoutChanges += 1;
       } catch {
         summary.failures += 1;
+      } finally {
+        completedCount += 1;
+        if (dependencies.onProgress && (completedCount % 5 === 0 || completedCount === mapped.length)) {
+          const snapshot = { ...summary };
+          const processed = completedCount;
+          progressQueue = progressQueue.then(() => dependencies.onProgress?.({
+            stage: "LOCAL_COMPARISON",
+            currentPage: Math.max(1, Math.ceil(processed / pageSize)),
+            pagesCompleted: Math.floor(processed / pageSize),
+            itemsProcessed: processed,
+            totalItems: mapped.length,
+            uniqueProducts: mapped.length,
+            duplicateCount: 0,
+            invalidCount: 0,
+            withChanges: snapshot.withChanges,
+            withoutChanges: snapshot.withoutChanges,
+            failures: snapshot.failures,
+            heartbeatAt: new Date().toISOString()
+          })).then(() => undefined);
+        }
       }
     }
   }));
+  await progressQueue;
   return summary;
 }
 
 async function createMappedBlingSyncDryRun(input: {
+  previewJobId: string;
   userId: string;
   organizationId: string;
   connectionId: string;
   correlationId: string;
   connection: { id: string; name: string };
   startedAt: number;
+  onProgress?: (progress: BlingPreviewJobProgress) => Promise<void> | void;
 }): Promise<BlingProductDryRun> {
   const mapped = await loadMappedBlingProductsForSync(
     input.organizationId,
     input.connectionId
   );
   const products = mapped.map((row) => row.product);
+  await input.onProgress?.({
+    stage: "LOCAL_COMPARISON",
+    currentPage: 1,
+    pagesCompleted: 0,
+    itemsProcessed: 0,
+    totalItems: mapped.length,
+    uniqueProducts: mapped.length,
+    duplicateCount: 0,
+    invalidCount: 0,
+    withChanges: 0,
+    withoutChanges: 0,
+    failures: 0,
+    heartbeatAt: new Date().toISOString(),
+    processedExternalIds: mapped.map((row) => row.externalProductId)
+  });
   const matches = new Map<string, BlingProductImportMatch>(
     mapped.map((row) => [
       row.externalProductId,
       { kind: "MAPPING", productId: row.productId, conflictField: null }
     ])
   );
-  const syncAnalysis = await analyzeMappedBlingProductsForSyncPreview({
-    organizationId: input.organizationId,
-    connectionId: input.connectionId,
-    products,
-    matches
-  });
+  const syncAnalysis = await analyzeMappedBlingProductsForSyncPreview(
+    {
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      products,
+      matches
+    },
+    { onProgress: input.onProgress }
+  );
   const pageCounts = mappedSyncPageCounts(mapped.length);
   const integrity = evaluateBlingImportPreviewIntegrity({
     totalReportedByBling: null,
@@ -3549,6 +3628,7 @@ async function createMappedBlingSyncDryRun(input: {
     matchSummary
   });
   const confirmation = createBlingImportPreviewConfirmation({
+    previewJobId: input.previewJobId,
     userId: input.userId,
     organizationId: input.organizationId,
     connectionId: input.connectionId,
@@ -3631,7 +3711,7 @@ export class BlingProductImportService {
     organizationId: string;
     connectionId: string;
   }) {
-    const connection = await validateConnection(
+    const connection = await validateBlingProductImportConnection(
       input.organizationId,
       input.connectionId
     );
@@ -3764,17 +3844,18 @@ export class BlingProductImportService {
   }
 
   async dryRun(input: {
+    previewJobId: string;
     userId: string;
     organizationId: string;
     connectionId: string;
     operation: BlingProductJobOperation;
     correlationId: string;
+    onProgress?: (progress: BlingPreviewJobProgress) => Promise<void> | void;
   }): Promise<BlingProductDryRun> {
     const startedAt = Date.now();
-    registerBlingImportPreviewCorrelation(input);
-    let connection: Awaited<ReturnType<typeof validateConnection>>;
+    let connection: Awaited<ReturnType<typeof validateBlingProductImportConnection>>;
     try {
-      connection = await validateConnection(input.organizationId, input.connectionId);
+      connection = await validateBlingProductImportConnection(input.organizationId, input.connectionId);
     } catch (error) {
       throw new BlingImportPreviewError(
         "A conexao Bling nao esta pronta para a consulta.",
@@ -3790,7 +3871,8 @@ export class BlingProductImportService {
       return createMappedBlingSyncDryRun({
         ...input,
         connection,
-        startedAt
+        startedAt,
+        onProgress: input.onProgress
       });
     }
 
@@ -3798,7 +3880,8 @@ export class BlingProductImportService {
       organizationId: input.organizationId,
       connectionId: input.connectionId,
       correlationId: input.correlationId,
-      readOnly: true
+      readOnly: true,
+      onProgress: input.onProgress
     });
     const uniqueProducts = new Map<string, NormalizedBlingProduct>();
     let duplicateExternalIds = 0;
@@ -3918,6 +4001,7 @@ export class BlingProductImportService {
       matchSummary: matching.summary
     });
     const confirmation = createBlingImportPreviewConfirmation({
+      previewJobId: input.previewJobId,
       userId: input.userId,
       organizationId: input.organizationId,
       connectionId: input.connectionId,
@@ -4004,12 +4088,13 @@ export class BlingProductImportService {
     correlationId: string;
     previewFingerprint: string;
     confirmationToken: string;
+    previewJobId: string;
   }) {
     const startedAt = Date.now();
-    const confirmation = consumeBlingImportPreviewConfirmation(input.confirmationToken, input);
+    const confirmation = verifyBlingImportPreviewConfirmation(input.confirmationToken, input);
     const operation = input.operation ?? "IMPORT";
     try {
-      const connection = await validateConnection(
+      const connection = await validateBlingProductImportConnection(
         input.organizationId,
         input.connectionId
       );
@@ -4020,6 +4105,31 @@ export class BlingProductImportService {
         await transaction.$queryRaw<Array<{ lockState: string }>>`
           SELECT pg_advisory_xact_lock(hashtext(${lockKey}))::text AS "lockState"
         `;
+        const persistedPreview = await transaction.erpSyncJob.findFirst({
+          where: {
+            id: input.previewJobId,
+            organizationId: input.organizationId,
+            blingConnectionId: input.connectionId,
+            type: previewJobTypeByOperation[operation],
+            status: "COMPLETED"
+          },
+          select: { id: true, lastCursor: true }
+        });
+        const previewCursor = parseBlingProductPreviewJobCursor(
+          persistedPreview?.lastCursor
+        );
+        if (
+          !persistedPreview
+          || !previewCursor?.preview
+          || previewCursor.userId !== input.userId
+          || previewCursor.operation !== operation
+          || previewCursor.correlationId !== input.correlationId
+          || previewCursor.preview.previewFingerprint !== input.previewFingerprint
+          || previewCursor.preview.confirmationToken !== input.confirmationToken
+          || Date.parse(previewCursor.preview.previewExpiresAt) <= Date.now()
+        ) {
+          return invalidPreviewConfirmation(input.correlationId, "PREVIEW_STALE");
+        }
         const erpConnection =
           await ensureOrganizationBlingErpConnection({
             transaction,
@@ -4040,7 +4150,7 @@ export class BlingProductImportService {
         });
         if (existingJob) throw new Error("Ja existe uma sincronizacao de produtos em andamento para esta conta.");
 
-        return transaction.erpSyncJob.create({
+        const preparedJob = await transaction.erpSyncJob.create({
           data: {
             organizationId: input.organizationId,
             erpConnectionId: erpConnection.id,
@@ -4080,6 +4190,20 @@ export class BlingProductImportService {
             lastCursor: true
           }
         });
+        const consumed = await transaction.erpSyncJob.updateMany({
+          where: {
+            id: persistedPreview.id,
+            organizationId: input.organizationId,
+            blingConnectionId: input.connectionId,
+            type: previewJobTypeByOperation[operation],
+            status: "COMPLETED"
+          },
+          data: { status: "CONSUMED" }
+        });
+        if (consumed.count !== 1) {
+          return invalidPreviewConfirmation(input.correlationId, "PREVIEW_STALE");
+        }
+        return preparedJob;
       });
       return this.getJobStatus({
         organizationId: input.organizationId,
@@ -4116,7 +4240,7 @@ export class BlingProductImportService {
     connectionId: string;
     confirm: boolean;
   }): Promise<BlingProductStatusBackfillReport> {
-    await validateConnection(input.organizationId, input.connectionId);
+    await validateBlingProductImportConnection(input.organizationId, input.connectionId);
     const fetched = await fetchAllProducts({
       organizationId: input.organizationId,
       connectionId: input.connectionId,
@@ -4149,7 +4273,7 @@ export class BlingProductImportService {
       }
     });
     if (!job) throw new Error("Sincronizacao nao encontrada, ja concluida ou em andamento.");
-    await validateConnection(
+    await validateBlingProductImportConnection(
       input.organizationId,
       input.connectionId,
       { allowOfficialRefresh: true }
