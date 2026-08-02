@@ -146,5 +146,6 @@ test("24. removed integrations with mappings render the preservation warning", (
 });
 
 test("25. UI never asks for Bling login, password, access token or refresh token", () => {
+  assert.match(ui, /Cadastre esta URL de redirecionamento no aplicativo criado no Bling\./);
   assert.doesNotMatch(ui, /login do Bling|senha do Bling|access token|refresh token/i);
 });

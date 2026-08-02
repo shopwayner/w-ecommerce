@@ -968,6 +968,7 @@ export function ERPsPage() {
                         <label className="grid min-w-0 gap-2 text-sm text-matrix-muted">Client Secret<input autoComplete="new-password" className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" type="password" value={blingForm.clientSecret} onChange={(event) => setBlingForm((current) => ({ ...current, clientSecret: event.target.value }))} /></label>
                         <div className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel p-3 text-sm text-matrix-muted">
                           <span className="block font-medium text-matrix-fg">URL de redirecionamento oficial</span>
+                          <span className="mt-1 block">Cadastre esta URL de redirecionamento no aplicativo criado no Bling.</span>
                           <span className="mt-1 block break-all">{blingRedirectUri ?? "Não configurada"}</span>
                           <Button className="mt-3" disabled={!blingRedirectUri} onClick={async () => { if (blingRedirectUri) { await navigator.clipboard.writeText(blingRedirectUri); setCopyMessage("Redirect URI copiada."); } }} type="button" variant="secondary"><Copy className="h-4 w-4" />Copiar URL</Button>
                         </div>
