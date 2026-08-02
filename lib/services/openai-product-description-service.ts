@@ -96,10 +96,54 @@ export type OpenAIProductDescriptionErrorCode =
   | "OPENAI_DESCRIPTION_RATE_LIMITED"
   | "OPENAI_DESCRIPTION_GENERATION_FAILED";
 
+export type OpenAIProductDescriptionDiagnosticCode =
+  | OpenAIProductDescriptionErrorCode
+  | "OPENAI_DESCRIPTION_INVALID_SCHEMA"
+  | "OPENAI_DESCRIPTION_UNKNOWN_SECTION"
+  | "OPENAI_DESCRIPTION_EMPTY_SECTION"
+  | "OPENAI_DESCRIPTION_HTML_NOT_ALLOWED"
+  | "OPENAI_DESCRIPTION_MARKDOWN_NOT_ALLOWED"
+  | "OPENAI_DESCRIPTION_HEADING_NOT_ALLOWED"
+  | "OPENAI_DESCRIPTION_FORBIDDEN_CONTENT"
+  | "OPENAI_DESCRIPTION_LENGTH_INVALID"
+  | "OPENAI_DESCRIPTION_NUMERIC_FACT_UNSUPPORTED"
+  | "OPENAI_DESCRIPTION_PACKAGE_CONTENT_UNSUPPORTED"
+  | "OPENAI_DESCRIPTION_VALIDATION_FAILED";
+
+export type OpenAIProductDescriptionValidationStage =
+  | "configuration"
+  | "provider_request"
+  | "provider_response"
+  | "structured_schema"
+  | "structured_content"
+  | "package_content_validation"
+  | "evidence_validation"
+  | "html_assembly";
+
+export type OpenAIProductDescriptionErrorDiagnostic = {
+  stage: OpenAIProductDescriptionValidationStage;
+  rule: string;
+  code: OpenAIProductDescriptionDiagnosticCode;
+  field: string | null;
+  reason: string;
+  generatedNumericFact?: {
+    raw: string;
+    field: string;
+  } | null;
+  localNumericCandidates?: string[];
+};
+
 export class OpenAIProductDescriptionError extends Error {
   constructor(
     public readonly code: OpenAIProductDescriptionErrorCode,
-    message: string
+    message: string,
+    public readonly diagnostic: OpenAIProductDescriptionErrorDiagnostic = {
+      stage: "provider_request",
+      rule: "domain_error",
+      code,
+      field: null,
+      reason: "request_rejected"
+    }
   ) {
     super(message);
     this.name = "OpenAIProductDescriptionError";
@@ -113,6 +157,7 @@ export type OpenAIProductDescriptionProviderResponse = {
   outputParsed?: unknown;
   refusalPresent?: boolean;
   output?: unknown;
+  requestId?: string | null;
 };
 
 export type OpenAIProductDescriptionCreate = (
@@ -122,6 +167,9 @@ export type OpenAIProductDescriptionCreate = (
 
 export type OpenAIProductDescriptionLogEvent = {
   correlationId: string;
+  productId?: string;
+  organizationId?: string;
+  userId?: string;
   stage: "request_started" | "request_completed" | "request_failed";
   model: string;
   durationMs: number;
@@ -131,8 +179,17 @@ export type OpenAIProductDescriptionLogEvent = {
   sourceCount: number;
   officialSourceCount: number;
   sourceDomainHashes: string[];
+  usedWebSearch: boolean;
+  evidenceLevel: ProductDescriptionEvidenceLevel;
+  requestId: string | null;
   errorClass: string | null;
   errorCode: string | null;
+  validationStage: OpenAIProductDescriptionValidationStage | null;
+  validationRule: string | null;
+  rejectedField: string | null;
+  rejectionReason: string | null;
+  generatedNumericFact: { raw: string; field: string } | null;
+  localNumericCandidates: string[];
   retryCount: 0;
 };
 
@@ -222,14 +279,28 @@ export function readOpenAIProductDescriptionConfig(
   if (env.OPENAI_DESCRIPTION_AI_ENABLED !== "true") {
     throw new OpenAIProductDescriptionError(
       "OPENAI_DESCRIPTION_DISABLED",
-      "A geração de descrição com IA está desativada."
+      "A geração de descrição com IA está desativada.",
+      {
+        stage: "configuration",
+        rule: "feature_flag",
+        code: "OPENAI_DESCRIPTION_DISABLED",
+        field: "OPENAI_DESCRIPTION_AI_ENABLED",
+        reason: "feature_disabled"
+      }
     );
   }
   const apiKey = env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
     throw new OpenAIProductDescriptionError(
       "OPENAI_API_KEY_MISSING",
-      "A integração de IA não está configurada."
+      "A integração de IA não está configurada.",
+      {
+        stage: "configuration",
+        rule: "api_key_presence",
+        code: "OPENAI_API_KEY_MISSING",
+        field: "OPENAI_API_KEY",
+        reason: "api_key_missing"
+      }
     );
   }
   const model =
@@ -420,44 +491,116 @@ const generatedHtmlPattern = /<\/?[a-z][^>]*>|&(?:lt|gt);/i;
 const generatedMarkdownPattern = /(?:\*\*|__|`{1,3})|^(?:[-*•]\s+|#{1,6}\s+)/m;
 const dimensionItemPattern = /^(?:altura|largura|profundidade|comprimento|peso(?: liquido| bruto)?)\s*:/i;
 
-function invalidStructuredDescription(): never {
+function invalidStructuredDescription(
+  diagnostic: Omit<OpenAIProductDescriptionErrorDiagnostic, "stage"> & {
+    stage?: OpenAIProductDescriptionValidationStage;
+  } = {
+    rule: "structured_description",
+    code: "OPENAI_DESCRIPTION_VALIDATION_FAILED",
+    field: null,
+    reason: "invalid_structured_description"
+  }
+): never {
   throw new OpenAIProductDescriptionError(
     "OPENAI_DESCRIPTION_INVALID_RESPONSE",
-    "A IA não retornou uma descrição válida."
+    "A IA não retornou uma descrição válida.",
+    {
+      stage: diagnostic.stage ?? "structured_content",
+      rule: diagnostic.rule,
+      code: diagnostic.code,
+      field: diagnostic.field,
+      reason: diagnostic.reason
+    }
   );
 }
 
-function normalizeGeneratedDescriptionText(value: string, maxLength: number) {
+function normalizeGeneratedDescriptionText(
+  value: string,
+  maxLength: number,
+  field: string
+) {
   const normalized = value.trim().replace(/\s+/g, " ");
   if (!normalized) return "";
   const comparison = normalizedComparisonKey(normalized);
-  if (
-    normalized.length > maxLength ||
-    dangerousControlPattern.test(normalized) ||
-    emojiPattern.test(normalized) ||
-    urlPattern.test(normalized) ||
-    markdownLinkPattern.test(normalized) ||
-    citationPattern.test(normalized) ||
-    forbiddenMetadataTerms.test(normalized) ||
-    generatedHtmlPattern.test(normalized) ||
-    generatedMarkdownPattern.test(normalized) ||
-    generatedHeadingPrefixPattern.test(comparison) ||
-    exaggeratedCallToActionPattern.test(normalized) ||
-    dangerousInstallationPattern.test(normalized)
-  ) {
-    invalidStructuredDescription();
+  const reject = (
+    code: OpenAIProductDescriptionDiagnosticCode,
+    rule: string,
+    reason: string
+  ): never => invalidStructuredDescription({ code, rule, field, reason });
+  if (normalized.length > maxLength) {
+    reject("OPENAI_DESCRIPTION_LENGTH_INVALID", "field_max_length", "maximum_length_exceeded");
+  }
+  if (dangerousControlPattern.test(normalized)) {
+    reject("OPENAI_DESCRIPTION_FORBIDDEN_CONTENT", "control_characters", "dangerous_control_character");
+  }
+  if (emojiPattern.test(normalized)) {
+    reject("OPENAI_DESCRIPTION_FORBIDDEN_CONTENT", "emoji_not_allowed", "emoji_detected");
+  }
+  if (urlPattern.test(normalized) || markdownLinkPattern.test(normalized)) {
+    reject("OPENAI_DESCRIPTION_FORBIDDEN_CONTENT", "link_not_allowed", "link_detected");
+  }
+  if (citationPattern.test(normalized) || forbiddenMetadataTerms.test(normalized)) {
+    reject("OPENAI_DESCRIPTION_FORBIDDEN_CONTENT", "citation_not_allowed", "citation_detected");
+  }
+  if (generatedHtmlPattern.test(normalized)) {
+    reject("OPENAI_DESCRIPTION_HTML_NOT_ALLOWED", "html_not_allowed", "html_markup_detected");
+  }
+  if (generatedMarkdownPattern.test(normalized)) {
+    reject("OPENAI_DESCRIPTION_MARKDOWN_NOT_ALLOWED", "markdown_not_allowed", "markdown_detected");
+  }
+  if (generatedHeadingPrefixPattern.test(comparison)) {
+    reject("OPENAI_DESCRIPTION_HEADING_NOT_ALLOWED", "generated_heading_not_allowed", "section_heading_detected");
+  }
+  if (exaggeratedCallToActionPattern.test(normalized)) {
+    reject("OPENAI_DESCRIPTION_FORBIDDEN_CONTENT", "commercial_call_to_action", "exaggerated_call_to_action");
+  }
+  if (dangerousInstallationPattern.test(normalized)) {
+    reject("OPENAI_DESCRIPTION_FORBIDDEN_CONTENT", "dangerous_installation", "unsafe_installation_instruction");
   }
   return normalized;
 }
 
-function normalizeGeneratedDescriptionItems(value: unknown) {
-  if (!Array.isArray(value) || value.length > 40 || value.some((item) => typeof item !== "string")) {
-    invalidStructuredDescription();
+function normalizeGeneratedDescriptionItems(value: unknown, field: string) {
+  if (!Array.isArray(value)) {
+    invalidStructuredDescription({
+      stage: "structured_schema",
+      code: "OPENAI_DESCRIPTION_INVALID_SCHEMA",
+      rule: "array_type",
+      field,
+      reason: "expected_array"
+    });
+  }
+  if (value.length > 40) {
+    invalidStructuredDescription({
+      stage: "structured_schema",
+      code: "OPENAI_DESCRIPTION_INVALID_SCHEMA",
+      rule: "array_max_items",
+      field,
+      reason: "maximum_items_exceeded"
+    });
+  }
+  const invalidItemIndex = value.findIndex((item) => typeof item !== "string");
+  if (invalidItemIndex >= 0) {
+    invalidStructuredDescription({
+      stage: "structured_schema",
+      code: "OPENAI_DESCRIPTION_INVALID_SCHEMA",
+      rule: "array_item_type",
+      field: `${field}[${invalidItemIndex}]`,
+      reason: "expected_string"
+    });
   }
   const seen = new Set<string>();
-  return value.flatMap((item) => {
-    const normalized = normalizeGeneratedDescriptionText(item as string, 500);
-    if (!normalized) invalidStructuredDescription();
+  return value.flatMap((item, index) => {
+    const itemField = `${field}[${index}]`;
+    const normalized = normalizeGeneratedDescriptionText(item as string, 500, itemField);
+    if (!normalized) {
+      invalidStructuredDescription({
+        code: "OPENAI_DESCRIPTION_EMPTY_SECTION",
+        rule: "empty_array_item",
+        field: itemField,
+        reason: "empty_item_after_normalization"
+      });
+    }
     const key = normalizedComparisonKey(normalized);
     if (seen.has(key)) return [];
     seen.add(key);
@@ -490,25 +633,60 @@ export function validateOpenAIProductDescriptionContent(
 ): OpenAIProductDescriptionContent {
   const maxCharacters =
     options.maxCharacters ?? OPENAI_PRODUCT_DESCRIPTION_DEFAULT_MAX_CHARACTERS;
-  if (!isPlainRecord(value)) invalidStructuredDescription();
+  if (!isPlainRecord(value)) {
+    invalidStructuredDescription({
+      stage: "structured_schema",
+      code: "OPENAI_DESCRIPTION_INVALID_SCHEMA",
+      rule: "root_object",
+      field: "$",
+      reason: "expected_object"
+    });
+  }
   const keys = Object.keys(value).sort();
-  if (
-    keys.length !== productDescriptionContentKeys.length ||
-    keys.some((key, index) => key !== sortedProductDescriptionContentKeys[index]) ||
-    typeof value.introducao !== "string" ||
-    typeof value.maisSobreProduto !== "string"
-  ) {
-    invalidStructuredDescription();
+  const unknownKey = keys.find((key) => (
+    !productDescriptionContentKeys.includes(
+      key as typeof productDescriptionContentKeys[number]
+    )
+  ));
+  if (unknownKey) {
+    invalidStructuredDescription({
+      stage: "structured_schema",
+      code: "OPENAI_DESCRIPTION_UNKNOWN_SECTION",
+      rule: "unknown_property",
+      field: unknownKey,
+      reason: "property_not_allowed"
+    });
+  }
+  const missingKey = sortedProductDescriptionContentKeys.find((key) => !keys.includes(key));
+  if (keys.length !== productDescriptionContentKeys.length || missingKey) {
+    invalidStructuredDescription({
+      stage: "structured_schema",
+      code: "OPENAI_DESCRIPTION_INVALID_SCHEMA",
+      rule: "required_property",
+      field: missingKey ?? "$",
+      reason: "required_property_missing"
+    });
+  }
+  for (const field of ["introducao", "maisSobreProduto"] as const) {
+    if (typeof value[field] !== "string") {
+      invalidStructuredDescription({
+        stage: "structured_schema",
+        code: "OPENAI_DESCRIPTION_INVALID_SCHEMA",
+        rule: "property_type",
+        field,
+        reason: "expected_string"
+      });
+    }
   }
 
   const content: OpenAIProductDescriptionContent = {
-    introducao: normalizeGeneratedDescriptionText(value.introducao, 2_000),
-    fichaTecnica: normalizeGeneratedDescriptionItems(value.fichaTecnica),
-    conteudoEmbalagem: normalizeGeneratedDescriptionItems(value.conteudoEmbalagem),
-    vantagens: normalizeGeneratedDescriptionItems(value.vantagens),
-    dimensoes: normalizeGeneratedDescriptionItems(value.dimensoes),
-    tutorialInstalacao: normalizeGeneratedDescriptionItems(value.tutorialInstalacao),
-    maisSobreProduto: normalizeGeneratedDescriptionText(value.maisSobreProduto, 3_000)
+    introducao: normalizeGeneratedDescriptionText(value.introducao as string, 2_000, "introducao"),
+    fichaTecnica: normalizeGeneratedDescriptionItems(value.fichaTecnica, "fichaTecnica"),
+    conteudoEmbalagem: normalizeGeneratedDescriptionItems(value.conteudoEmbalagem, "conteudoEmbalagem"),
+    vantagens: normalizeGeneratedDescriptionItems(value.vantagens, "vantagens"),
+    dimensoes: normalizeGeneratedDescriptionItems(value.dimensoes, "dimensoes"),
+    tutorialInstalacao: normalizeGeneratedDescriptionItems(value.tutorialInstalacao, "tutorialInstalacao"),
+    maisSobreProduto: normalizeGeneratedDescriptionText(value.maisSobreProduto as string, 3_000, "maisSobreProduto")
   };
 
   if (content.dimensoes.length) {
@@ -561,7 +739,14 @@ export function validateOpenAIProductDescriptionContent(
     visibleContent.length < OPENAI_PRODUCT_DESCRIPTION_MIN_LENGTH ||
     visibleContent.length > maxCharacters
   ) {
-    invalidStructuredDescription();
+    invalidStructuredDescription({
+      code: "OPENAI_DESCRIPTION_LENGTH_INVALID",
+      rule: "total_visible_length",
+      field: "$",
+      reason: visibleContent.length < OPENAI_PRODUCT_DESCRIPTION_MIN_LENGTH
+        ? "minimum_visible_length_not_met"
+        : "maximum_visible_length_exceeded"
+    });
   }
   return content;
 }
@@ -613,7 +798,15 @@ export function buildOpenAIProductDescriptionHtml(
       : ""
   ].join(""));
   if (!productDescriptionHasVisibleContent(html) || html.length > maxCharacters) {
-    invalidStructuredDescription();
+    invalidStructuredDescription({
+      stage: "html_assembly",
+      code: "OPENAI_DESCRIPTION_VALIDATION_FAILED",
+      rule: "final_html",
+      field: "$html",
+      reason: !productDescriptionHasVisibleContent(html)
+        ? "html_has_no_visible_content"
+        : "html_maximum_length_exceeded"
+    });
   }
   return html;
 }
@@ -629,6 +822,7 @@ function numericFactTokens(value: string) {
 
 function validateConservativeLocalFallback(
   html: string,
+  content: OpenAIProductDescriptionContent,
   product: ProductDescriptionSource,
   sourceCount: number
 ) {
@@ -643,8 +837,18 @@ function validateConservativeLocalFallback(
     allowedAttributes: {},
     disallowedTagsMode: "discard"
   });
-  const unsupportedNumericFact = [...numericFactTokens(visibleDescription)]
-    .some((fact) => !localNumericFacts.has(fact));
+  const generatedFields: Array<[string, string]> = [
+    ["introducao", content.introducao],
+    ...content.fichaTecnica.map((value, index) => [`fichaTecnica[${index}]`, value] as [string, string]),
+    ...content.conteudoEmbalagem.map((value, index) => [`conteudoEmbalagem[${index}]`, value] as [string, string]),
+    ...content.vantagens.map((value, index) => [`vantagens[${index}]`, value] as [string, string]),
+    ...content.dimensoes.map((value, index) => [`dimensoes[${index}]`, value] as [string, string]),
+    ...content.tutorialInstalacao.map((value, index) => [`tutorialInstalacao[${index}]`, value] as [string, string]),
+    ["maisSobreProduto", content.maisSobreProduto]
+  ];
+  const unsupportedNumericFact = generatedFields
+    .flatMap(([field, value]) => [...numericFactTokens(value)].map((raw) => ({ field, raw })))
+    .find(({ raw }) => !localNumericFacts.has(raw));
   const normalizedDescription = normalizedComparisonKey(visibleDescription);
   const normalizedLocalSource = normalizedComparisonKey(localSource);
   const unsupportedConditionalSection = [
@@ -652,14 +856,43 @@ function validateConservativeLocalFallback(
     ["conteudo da embalagem", /\b(conteudo|embalagem|acompanha)\w*/],
     ["tutorial de instalacao", /\b(instala|monta)\w*/],
     ["cuidados e manutencao", /\b(cuidado|manutenc|limpeza)\w*/]
-  ].some(([heading, evidence]) => (
+  ].find(([heading, evidence]) => (
     normalizedDescription.includes(heading as string) &&
     !(evidence as RegExp).test(normalizedLocalSource)
   ));
   if (unsupportedNumericFact || unsupportedConditionalSection) {
+    const unsupportedHeading = String(unsupportedConditionalSection?.[0] ?? "");
+    const packageContentRejected = unsupportedHeading === "conteudo da embalagem";
     throw new OpenAIProductDescriptionError(
       "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE",
-      "A IA retornou informações sem sustentação suficiente."
+      "A IA retornou informações sem sustentação suficiente.",
+      {
+        stage: packageContentRejected
+          ? "package_content_validation"
+          : "evidence_validation",
+        rule: unsupportedNumericFact
+          ? "local_numeric_evidence"
+          : packageContentRejected
+            ? "local_package_content_evidence"
+            : "local_conditional_section_evidence",
+        code: unsupportedNumericFact
+          ? "OPENAI_DESCRIPTION_NUMERIC_FACT_UNSUPPORTED"
+          : packageContentRejected
+            ? "OPENAI_DESCRIPTION_PACKAGE_CONTENT_UNSUPPORTED"
+            : "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE",
+        field: unsupportedNumericFact
+          ? unsupportedNumericFact.field
+          : packageContentRejected
+            ? "conteudoEmbalagem"
+            : unsupportedHeading || "$generated",
+        reason: unsupportedNumericFact
+          ? "unsupported_numeric_fact"
+          : packageContentRejected
+            ? "package_content_without_evidence"
+            : "unsupported_conditional_section",
+        generatedNumericFact: unsupportedNumericFact ?? null,
+        localNumericCandidates: [...localNumericFacts].slice(0, 20)
+      }
     );
   }
 }
@@ -677,9 +910,18 @@ type OpenAIParseCall = (
 ) => {
   withResponse(): Promise<{
     data: ParsedSdkResponse;
-    response: { status: number };
+    response: {
+      status: number;
+      headers?: { get(name: string): string | null };
+    };
   }>;
 };
+
+function sanitizedProviderRequestId(value: unknown) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return /^[a-zA-Z0-9_-]{1,160}$/.test(normalized) ? normalized : null;
+}
 
 function containsRefusal(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(containsRefusal);
@@ -712,7 +954,10 @@ export function createOfficialOpenAIProductDescriptionResponse(
       incompleteReason: data.incomplete_details?.reason ?? null,
       outputParsed: data.output_parsed,
       refusalPresent: containsRefusal(data.output),
-      output: data.output
+      output: data.output,
+      requestId: sanitizedProviderRequestId(
+        response.headers?.get("x-request-id")
+      )
     };
   };
 }
@@ -771,7 +1016,10 @@ function safeLog(
   }
 }
 
-function classifyProviderError(error: unknown) {
+function classifyProviderError(
+  error: unknown,
+  fallbackRequestId: string | null = null
+) {
   const errorRecord = isPlainRecord(error) ? error : null;
   const status = typeof errorRecord?.status === "number"
     ? errorRecord.status
@@ -782,6 +1030,52 @@ function classifyProviderError(error: unknown) {
   const type = typeof errorRecord?.type === "string"
     ? errorRecord.type.slice(0, 80)
     : null;
+  const requestId = sanitizedProviderRequestId(
+    errorRecord?.request_id ?? errorRecord?.requestId
+  ) ?? fallbackRequestId;
+  if (error instanceof OpenAIProductDescriptionError) {
+    return {
+      errorClass: error.name,
+      errorCode: error.diagnostic.code,
+      requestId,
+      validationStage: error.diagnostic.stage,
+      validationRule: error.diagnostic.rule,
+      rejectedField: error.diagnostic.field,
+      rejectionReason: error.diagnostic.reason,
+      generatedNumericFact: error.diagnostic.generatedNumericFact ?? null,
+      localNumericCandidates: error.diagnostic.localNumericCandidates ?? []
+    };
+  }
+  if (error instanceof z.ZodError) {
+    const issue = error.issues[0];
+    return {
+      errorClass: "ZodError",
+      errorCode: "OPENAI_DESCRIPTION_INVALID_SCHEMA",
+      requestId,
+      validationStage: "structured_schema" as const,
+      validationRule: "zod_text_format_parse",
+      rejectedField: issue?.path.length ? issue.path.join(".") : "$",
+      rejectionReason: issue?.code ?? "schema_parse_failed",
+      generatedNumericFact: null,
+      localNumericCandidates: []
+    };
+  }
+  const providerFailure = (input: {
+    errorClass: string;
+    errorCode: string | null;
+    rule: string;
+    reason: string;
+  }) => ({
+    errorClass: input.errorClass,
+    errorCode: input.errorCode,
+    requestId,
+    validationStage: "provider_request" as const,
+    validationRule: input.rule,
+    rejectedField: null,
+    rejectionReason: input.reason,
+    generatedNumericFact: null,
+    localNumericCandidates: []
+  });
   if (error instanceof OpenAI.BadRequestError || status === 400) {
     if (
       code?.toLocaleLowerCase("en-US").includes("tool") ||
@@ -789,29 +1083,66 @@ function classifyProviderError(error: unknown) {
       code?.toLocaleLowerCase("en-US").includes("web_search") ||
       type?.toLocaleLowerCase("en-US").includes("web_search")
     ) {
-      return { errorClass: "BadRequestError", errorCode: "WEB_SEARCH_UNSUPPORTED" };
+      return providerFailure({
+        errorClass: "BadRequestError",
+        errorCode: "WEB_SEARCH_UNSUPPORTED",
+        rule: "provider_bad_request",
+        reason: "web_search_unsupported"
+      });
     }
-    return { errorClass: "BadRequestError", errorCode: code };
+    return providerFailure({
+      errorClass: "BadRequestError",
+      errorCode: code,
+      rule: "provider_bad_request",
+      reason: type ?? "bad_request"
+    });
   }
   if (error instanceof OpenAI.AuthenticationError || status === 401) {
-    return { errorClass: "AuthenticationError", errorCode: null };
+    return providerFailure({
+      errorClass: "AuthenticationError",
+      errorCode: code,
+      rule: "provider_authentication",
+      reason: type ?? "authentication_failed"
+    });
   }
   if (error instanceof OpenAI.PermissionDeniedError || status === 403) {
-    return { errorClass: "PermissionDeniedError", errorCode: null };
+    return providerFailure({
+      errorClass: "PermissionDeniedError",
+      errorCode: code,
+      rule: "provider_permission",
+      reason: type ?? "permission_denied"
+    });
   }
   if (error instanceof OpenAI.RateLimitError || status === 429) {
-    return { errorClass: "RateLimitError", errorCode: null };
+    return providerFailure({
+      errorClass: "RateLimitError",
+      errorCode: code,
+      rule: "provider_rate_limit",
+      reason: type ?? "rate_limited"
+    });
   }
   if (error instanceof OpenAI.APIConnectionTimeoutError) {
-    return { errorClass: "APIConnectionTimeoutError", errorCode: null };
+    return providerFailure({
+      errorClass: "APIConnectionTimeoutError",
+      errorCode: code,
+      rule: "provider_timeout",
+      reason: "connection_timeout"
+    });
   }
   if (error instanceof OpenAI.APIConnectionError) {
-    return { errorClass: "APIConnectionError", errorCode: null };
+    return providerFailure({
+      errorClass: "APIConnectionError",
+      errorCode: code,
+      rule: "provider_connection",
+      reason: "connection_failed"
+    });
   }
-  return {
+  return providerFailure({
     errorClass: error instanceof Error ? error.name.slice(0, 80) : "UnknownError",
-    errorCode: null
-  };
+    errorCode: code,
+    rule: "unknown_provider_error",
+    reason: type ?? "unknown_error"
+  });
 }
 
 export async function generateOpenAIProductDescription(
@@ -856,8 +1187,17 @@ export async function generateOpenAIProductDescription(
       httpStatus: response?.httpStatus ?? null,
       responseStatus: response?.status ?? null,
       ...diagnostics,
+      usedWebSearch: diagnostics.searchCount > 0,
+      evidenceLevel: diagnostics.sourceCount > 0 ? "LOCAL_AND_WEB" : "LOCAL_ONLY",
+      requestId: response?.requestId ?? null,
       errorClass: null,
       errorCode: null,
+      validationStage: null,
+      validationRule: null,
+      rejectedField: null,
+      rejectionReason: null,
+      generatedNumericFact: null,
+      localNumericCandidates: [],
       retryCount: 0,
       ...overrides
     });
@@ -871,7 +1211,14 @@ export async function generateOpenAIProductDescription(
         controller.abort();
         reject(new OpenAIProductDescriptionError(
           "OPENAI_DESCRIPTION_TIMEOUT",
-          "A geração demorou mais que o esperado."
+          "A geração demorou mais que o esperado.",
+          {
+            stage: "provider_request",
+            rule: "request_timeout",
+            code: "OPENAI_DESCRIPTION_TIMEOUT",
+            field: null,
+            reason: "timeout_exceeded"
+          }
         ));
       }, timeoutMs);
     });
@@ -883,36 +1230,69 @@ export async function generateOpenAIProductDescription(
     if (response.status === "incomplete") {
       throw new OpenAIProductDescriptionError(
         "OPENAI_DESCRIPTION_INVALID_RESPONSE",
-        "A resposta da IA ficou incompleta."
+        "A resposta da IA ficou incompleta.",
+        {
+          stage: "provider_response",
+          rule: "response_status",
+          code: "OPENAI_DESCRIPTION_INVALID_RESPONSE",
+          field: null,
+          reason: response.incompleteReason ?? "response_incomplete"
+        }
       );
     }
     if (response.refusalPresent) {
       throw new OpenAIProductDescriptionError(
         "OPENAI_DESCRIPTION_INVALID_RESPONSE",
-        "A IA recusou a solicitação."
+        "A IA recusou a solicitação.",
+        {
+          stage: "provider_response",
+          rule: "provider_refusal",
+          code: "OPENAI_DESCRIPTION_INVALID_RESPONSE",
+          field: null,
+          reason: "refusal_present"
+        }
       );
     }
     if (response.status && response.status !== "completed") {
       throw new OpenAIProductDescriptionError(
         "OPENAI_DESCRIPTION_GENERATION_FAILED",
-        "A requisição da IA não foi concluída."
+        "A requisição da IA não foi concluída.",
+        {
+          stage: "provider_response",
+          rule: "response_status",
+          code: "OPENAI_DESCRIPTION_GENERATION_FAILED",
+          field: null,
+          reason: "unexpected_response_status"
+        }
       );
     }
     if (response.outputParsed === undefined || response.outputParsed === null) {
       throw new OpenAIProductDescriptionError(
         "OPENAI_DESCRIPTION_INVALID_RESPONSE",
-        "A resposta estruturada da IA está ausente."
+        "A resposta estruturada da IA está ausente.",
+        {
+          stage: "provider_response",
+          rule: "structured_output",
+          code: "OPENAI_DESCRIPTION_INVALID_SCHEMA",
+          field: "$",
+          reason: "output_parsed_missing"
+        }
       );
     }
 
+    const content = validateOpenAIProductDescriptionContent(
+      response.outputParsed,
+      { maxCharacters: config.maxCharacters }
+    );
     const html = buildOpenAIProductDescriptionHtml(
       input.product.name,
-      response.outputParsed,
+      content,
       { maxCharacters: config.maxCharacters }
     );
     const diagnostics = sourceDiagnostics(response.output, input.officialDomains);
     validateConservativeLocalFallback(
       html,
+      content,
       input.product,
       diagnostics.sourceCount
     );
@@ -930,11 +1310,11 @@ export async function generateOpenAIProductDescription(
   } catch (error) {
     if (!terminalLogged) {
       terminalLogged = true;
-      const providerError = classifyProviderError(error);
+      const providerError = classifyProviderError(error, response?.requestId ?? null);
       log("request_failed", providerError);
     }
     if (error instanceof OpenAIProductDescriptionError) throw error;
-    const providerError = classifyProviderError(error);
+    const providerError = classifyProviderError(error, response?.requestId ?? null);
     if (providerError.errorClass === "RateLimitError") {
       throw new OpenAIProductDescriptionError(
         "OPENAI_DESCRIPTION_RATE_LIMITED",

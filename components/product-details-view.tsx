@@ -128,6 +128,55 @@ const statusLabels: Record<string, string> = {
   DRAFT: "Rascunho"
 };
 
+const descriptionAiErrorMessages: Record<string, string> = {
+  OPENAI_DESCRIPTION_DISABLED:
+    "A geração por IA não está disponível neste ambiente.",
+  OPENAI_DESCRIPTION_CONFIGURATION_UNAVAILABLE:
+    "A geração por IA não está configurada neste ambiente.",
+  OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE:
+    "Não há informações suficientes para gerar uma descrição segura deste produto.",
+  OPENAI_DESCRIPTION_NUMERIC_FACT_UNSUPPORTED:
+    "A IA gerou uma especificação numérica que não pôde ser confirmada pelos dados do produto.",
+  OPENAI_DESCRIPTION_PACKAGE_CONTENT_UNSUPPORTED:
+    "O conteúdo da embalagem gerado não pôde ser confirmado.",
+  OPENAI_DESCRIPTION_INVALID_SCHEMA:
+    "A descrição gerada não seguiu o formato exigido pelo sistema.",
+  OPENAI_DESCRIPTION_UNKNOWN_SECTION:
+    "A resposta gerada incluiu uma seção não permitida.",
+  OPENAI_DESCRIPTION_EMPTY_SECTION:
+    "A resposta gerada contém uma seção inválida ou vazia.",
+  OPENAI_DESCRIPTION_HTML_NOT_ALLOWED:
+    "A resposta gerada contém formatação não permitida.",
+  OPENAI_DESCRIPTION_MARKDOWN_NOT_ALLOWED:
+    "A resposta gerada contém formatação não permitida.",
+  OPENAI_DESCRIPTION_HEADING_NOT_ALLOWED:
+    "A resposta gerada incluiu um título de seção não permitido.",
+  OPENAI_DESCRIPTION_FORBIDDEN_CONTENT:
+    "A resposta gerada contém conteúdo que não pode ser aplicado com segurança.",
+  OPENAI_DESCRIPTION_LENGTH_INVALID:
+    "A resposta gerada possui um tamanho inválido.",
+  OPENAI_DESCRIPTION_VALIDATION_FAILED:
+    "A resposta gerada não pôde ser validada com segurança.",
+  OPENAI_DESCRIPTION_TIMEOUT:
+    "A geração demorou mais que o esperado. Tente novamente em alguns instantes.",
+  OPENAI_DESCRIPTION_RATE_LIMITED:
+    "O limite temporário de gerações foi atingido. Aguarde antes de tentar novamente."
+};
+
+function descriptionAiErrorMessage(code: string | undefined) {
+  return code
+    ? descriptionAiErrorMessages[code] ??
+        "Não foi possível gerar a descrição agora. Tente novamente."
+    : "Não foi possível gerar a descrição agora. Tente novamente.";
+}
+
+class ProductDescriptionAiRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProductDescriptionAiRequestError";
+  }
+}
+
 const conditionAliases = ["condition", "item_condition", "ITEM_CONDITION", "condicao"];
 const grossWeightAliases = ["grossWeight", "gross_weight", "grossWeightKg", "pesoBruto", "peso_bruto"];
 
@@ -1001,7 +1050,9 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
         evidenceLevel?: "LOCAL_ONLY" | "LOCAL_AND_WEB";
       };
       if (!response.ok) {
-        throw new Error(payload.error ?? "Não foi possível gerar a descrição.");
+        throw new ProductDescriptionAiRequestError(
+          descriptionAiErrorMessage(payload.code)
+        );
       }
       const nextDescription = sanitizeProductDescription(payload.html);
       if (!nextDescription || nextDescription.length > 12_000) {
@@ -1037,9 +1088,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     } catch (caughtError) {
       if (controller.signal.aborted) return;
       setDescriptionAiError(
-        caughtError instanceof Error &&
-          caughtError.message ===
-            "Geração de descrição com IA está temporariamente desativada."
+        caughtError instanceof ProductDescriptionAiRequestError
           ? caughtError.message
           : "Não foi possível gerar a descrição agora. Tente novamente."
       );

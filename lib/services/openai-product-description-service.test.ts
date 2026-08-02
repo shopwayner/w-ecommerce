@@ -433,11 +433,14 @@ test("free text provider response is rejected without fallback interpretation", 
 });
 
 test("local-only fallback rejects unsupported numeric facts", async () => {
+  const logs: OpenAIProductDescriptionLogEvent[] = [];
   await expectDescriptionError(
     () => generateOpenAIProductDescription(
       { product: partialProduct },
       {
         env: enabledEnv,
+        correlationId: "numeric-correlation",
+        logger: (event) => logs.push(event),
         createResponse: providerResponse(
           parsedContent({
             introducao: "Suporte para instalação com capacidade técnica declarada de 999 kg.",
@@ -450,6 +453,75 @@ test("local-only fallback rejects unsupported numeric facts", async () => {
     ),
     "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE"
   );
+  const terminal = logs.at(-1);
+  assert.equal(terminal?.errorClass, "OpenAIProductDescriptionError");
+  assert.equal(terminal?.errorCode, "OPENAI_DESCRIPTION_NUMERIC_FACT_UNSUPPORTED");
+  assert.equal(terminal?.validationStage, "evidence_validation");
+  assert.equal(terminal?.validationRule, "local_numeric_evidence");
+  assert.equal(terminal?.rejectedField, "introducao");
+  assert.equal(terminal?.rejectionReason, "unsupported_numeric_fact");
+  assert.deepEqual(terminal?.generatedNumericFact, {
+    raw: "999",
+    field: "introducao"
+  });
+  assert.equal(terminal?.retryCount, 0);
+  assert.notEqual(terminal?.errorCode, null);
+});
+
+test("invalid structured output logs the exact schema rejection", async () => {
+  const logs: OpenAIProductDescriptionLogEvent[] = [];
+  await expectDescriptionError(
+    () => generateOpenAIProductDescription(
+      { product: partialProduct },
+      {
+        env: enabledEnv,
+        logger: (event) => logs.push(event),
+        createResponse: async () => ({
+          httpStatus: 200,
+          status: "completed",
+          outputParsed: "invalid-root",
+          refusalPresent: false,
+          output: []
+        })
+      }
+    ),
+    "OPENAI_DESCRIPTION_INVALID_RESPONSE"
+  );
+  const terminal = logs.at(-1);
+  assert.equal(terminal?.errorCode, "OPENAI_DESCRIPTION_INVALID_SCHEMA");
+  assert.equal(terminal?.validationStage, "structured_schema");
+  assert.equal(terminal?.validationRule, "root_object");
+  assert.equal(terminal?.rejectedField, "$");
+  assert.equal(terminal?.rejectionReason, "expected_object");
+});
+
+test("package content without local evidence has its own stable diagnostic", async () => {
+  const logs: OpenAIProductDescriptionLogEvent[] = [];
+  await expectDescriptionError(
+    () => generateOpenAIProductDescription(
+      { product: partialProduct },
+      {
+        env: enabledEnv,
+        logger: (event) => logs.push(event),
+        createResponse: providerResponse(
+          parsedContent({
+            introducao: "Suporte destinado à organização da instalação conforme os dados cadastrados.",
+            fichaTecnica: ["Tipo: Suporte"],
+            conteudoEmbalagem: ["Produto principal"],
+            vantagens: []
+          }),
+          { output: [] }
+        )
+      }
+    ),
+    "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE"
+  );
+  const terminal = logs.at(-1);
+  assert.equal(terminal?.errorCode, "OPENAI_DESCRIPTION_PACKAGE_CONTENT_UNSUPPORTED");
+  assert.equal(terminal?.validationStage, "package_content_validation");
+  assert.equal(terminal?.validationRule, "local_package_content_evidence");
+  assert.equal(terminal?.rejectedField, "conteudoEmbalagem");
+  assert.equal(terminal?.rejectionReason, "package_content_without_evidence");
 });
 
 test("partial product remains conservative without invented sections", async () => {
@@ -490,7 +562,12 @@ test("official SDK adapter uses responses.parse with zero retry", async () => {
             output: [],
             status: "completed"
           },
-          response: { status: 200 }
+          response: {
+            status: 200,
+            headers: {
+              get: (name) => name === "x-request-id" ? "req_safe_123" : null
+            }
+          }
         })
       };
     }
@@ -502,6 +579,7 @@ test("official SDK adapter uses responses.parse with zero retry", async () => {
   const response = await create(request, { signal: new AbortController().signal });
   assert.equal(receivedBody, request);
   assert.equal(response.httpStatus, 200);
+  assert.equal(response.requestId, "req_safe_123");
   assert.deepEqual(response.outputParsed, validContent);
 });
 
@@ -707,6 +785,116 @@ test("disabled feature returns a stable safe code", async () => {
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), {
     code: "OPENAI_DESCRIPTION_DISABLED",
+    category: "OPENAI_DESCRIPTION_DISABLED",
+    correlationId: "route-correlation",
+    error: "Geração de descrição com IA está temporariamente desativada."
+  });
+});
+
+test("route enriches telemetry with product user and tenant context", async () => {
+  const logs: OpenAIProductDescriptionLogEvent[] = [];
+  const post = createProductDescriptionAiPost(routeDependencies({
+    logger: (event) => {
+      logs.push(event);
+    },
+    generateDescription: async (_input, context) => {
+      context.logger({
+        correlationId: context.correlationId,
+        stage: "request_failed",
+        model: "test-model",
+        durationMs: 10,
+        httpStatus: 200,
+        responseStatus: "completed",
+        searchCount: 1,
+        sourceCount: 0,
+        officialSourceCount: 0,
+        sourceDomainHashes: [],
+        usedWebSearch: true,
+        evidenceLevel: "LOCAL_ONLY",
+        requestId: "req_safe",
+        errorClass: "OpenAIProductDescriptionError",
+        errorCode: "OPENAI_DESCRIPTION_INVALID_SCHEMA",
+        validationStage: "structured_schema",
+        validationRule: "root_object",
+        rejectedField: "$",
+        rejectionReason: "expected_object",
+        generatedNumericFact: null,
+        localNumericCandidates: [],
+        retryCount: 0
+      });
+      return validResult;
+    }
+  }));
+  assert.equal((await post(descriptionRequest(), routeContext)).status, 200);
+  const logged = logs.at(-1);
+  assert.equal(logged?.productId, "product-1");
+  assert.equal(logged?.organizationId, "org-current");
+  assert.equal(logged?.userId, "user-current");
+  assert.equal(logged?.correlationId, "route-correlation");
+});
+
+test("route preserves detailed validation codes without exposing internal details", async () => {
+  const cases = [
+    {
+      diagnosticCode: "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE" as const
+    },
+    {
+      diagnosticCode: "OPENAI_DESCRIPTION_NUMERIC_FACT_UNSUPPORTED" as const
+    },
+    {
+      diagnosticCode: "OPENAI_DESCRIPTION_PACKAGE_CONTENT_UNSUPPORTED" as const
+    },
+    {
+      diagnosticCode: "OPENAI_DESCRIPTION_INVALID_SCHEMA" as const
+    }
+  ];
+  for (const current of cases) {
+    const post = createProductDescriptionAiPost(routeDependencies({
+      generateDescription: async () => {
+        throw new OpenAIProductDescriptionError(
+          current.diagnosticCode.includes("EVIDENCE") ||
+            current.diagnosticCode.includes("UNSUPPORTED")
+            ? "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE"
+            : "OPENAI_DESCRIPTION_INVALID_RESPONSE",
+          "internal detail must stay hidden",
+          {
+            stage: current.diagnosticCode === "OPENAI_DESCRIPTION_PACKAGE_CONTENT_UNSUPPORTED"
+              ? "package_content_validation"
+              : current.diagnosticCode === "OPENAI_DESCRIPTION_INVALID_SCHEMA"
+                ? "structured_schema"
+                : "evidence_validation",
+            rule: "test_rule",
+            code: current.diagnosticCode,
+            field: "testField",
+            reason: "test_reason"
+          }
+        );
+      }
+    }));
+    const response = await post(descriptionRequest(), routeContext);
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal(response.status, 502);
+    assert.equal(body.code, current.diagnosticCode);
+    assert.equal(body.correlationId, "route-correlation");
+    assert.doesNotMatch(String(body.error), /internal detail/);
+  }
+});
+
+test("missing API key is exposed only as a safe configuration code", async () => {
+  const post = createProductDescriptionAiPost(routeDependencies({
+    generateDescription: async () => {
+      throw new OpenAIProductDescriptionError(
+        "OPENAI_API_KEY_MISSING",
+        "internal configuration detail"
+      );
+    }
+  }));
+  const response = await post(descriptionRequest(), routeContext);
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    code: "OPENAI_DESCRIPTION_CONFIGURATION_UNAVAILABLE",
+    category: "OPENAI_API_KEY_MISSING",
+    correlationId: "route-correlation",
     error: "Geração de descrição com IA está temporariamente desativada."
   });
 });

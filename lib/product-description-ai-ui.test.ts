@@ -116,6 +116,20 @@ test("safe generation error preserves the current draft", () => {
   assert.match(viewSource, /descriptionAiError[\s\S]*role="alert"/);
 });
 
+test("backend validation codes reach specific safe UI messages", () => {
+  assert.match(viewSource, /descriptionAiErrorMessage\(payload\.code\)/);
+  assert.match(viewSource, /OPENAI_DESCRIPTION_CONFIGURATION_UNAVAILABLE:[\s\S]*não está configurada neste ambiente/);
+  assert.match(viewSource, /OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE:[\s\S]*Não há informações suficientes/);
+  assert.match(viewSource, /OPENAI_DESCRIPTION_NUMERIC_FACT_UNSUPPORTED:[\s\S]*especificação numérica que não pôde ser confirmada/);
+  assert.match(viewSource, /OPENAI_DESCRIPTION_PACKAGE_CONTENT_UNSUPPORTED:[\s\S]*conteúdo da embalagem gerado não pôde ser confirmado/);
+  assert.match(viewSource, /OPENAI_DESCRIPTION_INVALID_SCHEMA:[\s\S]*formato exigido pelo sistema/);
+  assert.match(viewSource, /OPENAI_DESCRIPTION_TIMEOUT:[\s\S]*demorou mais que o esperado/);
+  assert.match(viewSource, /OPENAI_DESCRIPTION_RATE_LIMITED:[\s\S]*limite temporário/);
+  assert.match(viewSource, /OPENAI_DESCRIPTION_DISABLED:[\s\S]*não está disponível neste ambiente/);
+  assert.match(viewSource, /ProductDescriptionAiRequestError/);
+  assert.match(viewSource, /Não foi possível gerar a descrição agora\. Tente novamente\./);
+});
+
 test("Cancel restores the saved snapshot and discards generated session state", () => {
   const cancelBlock = sourceBlock("const cancelEdit = useCallback", "function buildPayload");
   const resetBlock = sourceBlock(

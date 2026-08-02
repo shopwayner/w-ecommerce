@@ -220,55 +220,50 @@ async function validateRequestBody(request: Request) {
 }
 
 function productDescriptionErrorResponse(
-  error: OpenAIProductDescriptionError
+  error: OpenAIProductDescriptionError,
+  correlationId: string
 ) {
+  const publicCode = error.code === "OPENAI_API_KEY_MISSING"
+    ? "OPENAI_DESCRIPTION_CONFIGURATION_UNAVAILABLE"
+    : error.diagnostic.code;
+  const errorBody = (message: string) => ({
+    code: publicCode,
+    category: error.code,
+    correlationId,
+    error: message
+  });
   if (error.code === "OPENAI_DESCRIPTION_DISABLED") {
     return NextResponse.json(
-      {
-        code: error.code,
-        error: "Geração de descrição com IA está temporariamente desativada."
-      },
+      errorBody("Geração de descrição com IA está temporariamente desativada."),
       { status: 503 }
     );
   }
   if (error.code === "OPENAI_API_KEY_MISSING") {
     return NextResponse.json(
-      {
-        code: error.code,
-        error: "Geração de descrição com IA está temporariamente desativada."
-      },
+      errorBody("Geração de descrição com IA está temporariamente desativada."),
       { status: 503 }
     );
   }
   if (error.code === "OPENAI_DESCRIPTION_INVALID_INPUT") {
     return NextResponse.json(
-      { code: error.code, error: error.message },
+      errorBody(error.message),
       { status: 422 }
     );
   }
   if (error.code === "OPENAI_DESCRIPTION_TIMEOUT") {
     return NextResponse.json(
-      {
-        code: error.code,
-        error: "A geração demorou mais que o esperado. Tente novamente."
-      },
+      errorBody("A geração demorou mais que o esperado. Tente novamente."),
       { status: 504 }
     );
   }
   if (error.code === "OPENAI_DESCRIPTION_RATE_LIMITED") {
     return NextResponse.json(
-      {
-        code: error.code,
-        error: "A geração está temporariamente limitada. Aguarde e tente novamente."
-      },
+      errorBody("A geração está temporariamente limitada. Aguarde e tente novamente."),
       { status: 429 }
     );
   }
   return NextResponse.json(
-    {
-      code: error.code,
-      error: "Não foi possível gerar uma descrição válida. Tente novamente."
-    },
+    errorBody("Não foi possível gerar uma descrição válida. Tente novamente."),
     { status: 502 }
   );
 }
@@ -333,22 +328,29 @@ export function createProductDescriptionAiPost(
       );
     }
 
+    const correlationId = dependencies.createCorrelationId();
     try {
       const result = await dependencies.generateDescription(
         { product },
         {
-          correlationId: dependencies.createCorrelationId(),
-          logger: dependencies.logger
+          correlationId,
+          logger: (event) => dependencies.logger({
+            ...event,
+            productId: id,
+            organizationId: auth.context.organizationId,
+            userId: auth.context.user.id
+          })
         }
       );
       return NextResponse.json(result);
     } catch (error) {
       if (error instanceof OpenAIProductDescriptionError) {
-        return productDescriptionErrorResponse(error);
+        return productDescriptionErrorResponse(error, correlationId);
       }
       return NextResponse.json(
         {
           code: "OPENAI_DESCRIPTION_GENERATION_FAILED",
+          correlationId,
           error: "Não foi possível gerar uma descrição válida. Tente novamente."
         },
         { status: 502 }
