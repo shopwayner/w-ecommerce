@@ -14,22 +14,19 @@ const blingModal = erpsPage.slice(
   erpsPage.indexOf('{selected && selectedConnection && selected.key !== "bling" ? (')
 );
 
-test("new Bling accounts collect only internal metadata and explain official OAuth", () => {
+test("new Bling accounts support official OAuth and system-superuser custom credentials", () => {
   for (const label of ["Apelido da conta", "Tipo", "Observações"]) {
     assert.match(blingModal, new RegExp(label));
   }
-  assert.match(blingModal, /Você será redirecionado ao Bling/);
-  assert.match(blingModal, /aplicativo OAuth oficial configurado com segurança no servidor/);
-  assert.doesNotMatch(blingModal, /Client ID|Client Secret|senha do Bling|e-mail do Bling|token manual/i);
+  assert.match(blingModal, /Aplicativo oficial W Ecommerce/);
+  assert.match(blingModal, /Credenciais próprias|Aplicativo customizado/);
+  assert.match(blingModal, /Client ID/);
+  assert.match(blingModal, /Client Secret/);
+  assert.match(blingModal, /canUseCustomBlingApp/);
+  assert.doesNotMatch(blingModal, /senha do Bling|e-mail do Bling|token manual/i);
   assert.match(blingModal, /modalMode === "create"[\s\S]*?Autorizar nova conta/);
-  for (const page of [blingModal, integrationsPage]) {
-    for (const label of ["Apelido da conta", "Tipo", "Observa"] ) {
-      assert.match(page, new RegExp(label));
-    }
-    assert.match(page, /redirecionado ao Bling/);
-    assert.match(page, /Autorizar nova conta/);
-    assert.doesNotMatch(page, /Client ID|Client Secret|senha do Bling|e-mail do Bling|token manual/i);
-  }
+  assert.match(integrationsPage, /Autorizar nova conta/);
+  assert.doesNotMatch(integrationsPage, /senha do Bling|e-mail do Bling|token manual/i);
 });
 
 test("connection actions are distinct and status-aware", () => {

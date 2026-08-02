@@ -23,12 +23,14 @@ const erpCallback = source("app/api/erps/connections/[provider]/callback/route.t
 const worker = source("instrumentation.node.ts");
 const instrumentation = source("instrumentation.ts");
 
-test("OAuth Bling usa somente o aplicativo oficial configurado no backend", () => {
+test("OAuth Bling keeps official and per-connection credentials on the backend", () => {
   assert.match(oauthService, /process\.env\.BLING_CLIENT_ID/);
   assert.match(oauthService, /process\.env\.BLING_CLIENT_SECRET/);
   assert.match(oauthService, /process\.env\.BLING_REDIRECT_URI/);
-  assert.doesNotMatch(integrationsRoute, /clientIdEncrypted:\s*true/);
-  assert.doesNotMatch(integrationsRoute, /clientSecretEncrypted:\s*true/);
+  assert.match(integrationsRoute, /clientIdEncrypted:\s*true/);
+  assert.match(integrationsRoute, /clientSecretEncrypted:\s*true/);
+  assert.doesNotMatch(integrationsRoute, /clientIdEncrypted:\s*connection\.clientIdEncrypted/);
+  assert.doesNotMatch(integrationsRoute, /clientSecretEncrypted:\s*connection\.clientSecretEncrypted/);
   assert.doesNotMatch(productsPage, /BLING_CLIENT_(ID|SECRET)/);
   assert.match(blingStartRoute, /internalNotes:\s*parsed\.data\.internalNotes/);
   assert.match(oauthService, /internalNotes:\s*input\.internalNotes\?\.trim\(\)\s*\|\|\s*null/);

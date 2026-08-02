@@ -159,8 +159,20 @@ export const loginSchema = z.object({
 export const blingStartSchema = z.object({
   name: z.string().trim().min(2).max(80),
   role: z.enum(["MATRIX", "BRANCH", "OTHER"]),
-  internalNotes: z.string().trim().max(2000).optional().default("")
-}).strict();
+  internalNotes: z.string().trim().max(2000).optional().default(""),
+  credentialMode: z.enum(["OFFICIAL_APP", "CUSTOM_APP"]).default("OFFICIAL_APP"),
+  clientId: z.string().trim().max(512).optional(),
+  clientSecret: z.string().trim().max(2048).optional()
+}).strict().superRefine((value, context) => {
+  if (value.credentialMode !== "CUSTOM_APP") {
+    if (value.clientId || value.clientSecret) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Credenciais customizadas nao sao permitidas neste modo." });
+    }
+    return;
+  }
+  if (!value.clientId) context.addIssue({ code: z.ZodIssueCode.custom, path: ["clientId"], message: "Informe o Client ID." });
+  if (!value.clientSecret) context.addIssue({ code: z.ZodIssueCode.custom, path: ["clientSecret"], message: "Informe o Client Secret." });
+});
 
 export const internalGtinCatalogSchema = z.object({
   gtin: z.string().min(8).max(32),

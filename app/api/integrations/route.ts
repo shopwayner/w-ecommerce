@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
 import { planLimitService } from "@/lib/services/plan-limit-service";
-import { getBlingConnectionCredentialSummary } from "@/lib/services/bling-oauth-service";
+import { getBlingConnectionCredentialSummary, getBlingOAuthConfigurationStatus, getPublicBlingRedirectUri } from "@/lib/services/bling-oauth-service";
 import { hasSystemPermission, isSystemSuperuserContext } from "@/lib/auth/system-superuser";
 
 function safeLastError(status: string, value: string | null) {
@@ -45,7 +45,9 @@ export async function GET() {
           orderBy: { updatedAt: "desc" },
           take: 1,
           select: { expiresAt: true, createdAt: true }
-        }
+        },
+        clientIdEncrypted: true,
+        clientSecretEncrypted: true
       }
     }),
     planLimitService.checkBlingConnectionLimit(auth.context.organizationId, auth.context.user.id),
@@ -59,7 +61,8 @@ export async function GET() {
           select: {
             id: true,
             name: true,
-            updatedAt: true
+            updatedAt: true,
+            _count: { select: { mappings: true } }
           }
         })
       : Promise.resolve([])
@@ -69,17 +72,23 @@ export async function GET() {
     limit,
     permissions: {
       canRemove: hasSystemPermission(auth.context, "integrations:critical"),
-      canRestore
+      canRestore,
+      canUseCustomBlingApp: isSystemSuperuserContext(auth.context)
+    },
+    oauthConfiguration: {
+      officialAppConfigured: getBlingOAuthConfigurationStatus().configured,
+      redirectUri: getPublicBlingRedirectUri()
     },
     removed: removedConnections.map((connection) => ({
       id: connection.id,
       name: connection.name,
       provider: "BLING" as const,
       removedAt: connection.updatedAt,
-      organizationName: auth.context.organization.name
+      organizationName: auth.context.organization.name,
+      mappingCount: connection._count.mappings
     })),
     data: blingConnections.map((connection) => {
-      const credentialSummary = getBlingConnectionCredentialSummary();
+      const credentialSummary = getBlingConnectionCredentialSummary(connection);
       const tokenExpiresAt = connection.tokens[0]?.expiresAt ?? null;
       const tokenValidInFuture = Boolean(tokenExpiresAt && tokenExpiresAt.getTime() > Date.now());
       return {
@@ -103,6 +112,9 @@ export async function GET() {
         tokenValidInFuture,
         hasToken: connection.tokens.length > 0,
         credentialsConfigured: credentialSummary.credentialsConfigured,
+        credentialMode: credentialSummary.credentialMode,
+        clientIdMasked: credentialSummary.clientIdMasked,
+        clientSecretConfigured: credentialSummary.clientSecretConfigured,
         ready:
           connection.status === "ACTIVE"
           && credentialSummary.credentialsConfigured

@@ -19,6 +19,7 @@ import {
 type ERPKey = "bling" | "olist" | "omie" | "conta-azul" | "custom-api";
 type ERPModalMode = "create" | "manage";
 type BlingConnectionRole = "MATRIX" | "BRANCH" | "OTHER";
+type BlingCredentialMode = "OFFICIAL_APP" | "CUSTOM_APP";
 
 type ERPField = {
   key: string;
@@ -72,6 +73,9 @@ type BlingIntegratedConnection = {
   tokenExpiresAt: string | null;
   hasToken: boolean;
   credentialsConfigured: boolean;
+  credentialMode: BlingCredentialMode;
+  clientIdMasked: string | null;
+  clientSecretConfigured: boolean;
   internalNotes: string;
 };
 
@@ -90,6 +94,7 @@ type RemovedBlingConnection = {
   provider: "BLING";
   removedAt: string;
   organizationName: string;
+  mappingCount: number;
 };
 
 type ERP = {
@@ -115,6 +120,9 @@ type BlingFormState = {
   accountAlias: string;
   role: BlingConnectionRole;
   internalNotes: string;
+  credentialMode: BlingCredentialMode;
+  clientId: string;
+  clientSecret: string;
 };
 
 const erps: ERP[] = [
@@ -126,7 +134,7 @@ const erps: ERP[] = [
 ];
 
 const emptyForm: FormState = { accountAlias: "", credentials: {}, taxRate: "", orderImportStartDate: "", internalNotes: "", productSyncEnabled: false, orderSyncEnabled: false, stockSyncEnabled: false, invoiceSyncEnabled: false };
-const emptyBlingForm: BlingFormState = { accountAlias: "", role: "OTHER", internalNotes: "" };
+const emptyBlingForm: BlingFormState = { accountAlias: "", role: "OTHER", internalNotes: "", credentialMode: "OFFICIAL_APP", clientId: "", clientSecret: "" };
 const blingRoleOptions: Array<{ label: string; value: BlingConnectionRole }> = [
   { label: "Matriz", value: "MATRIX" },
   { label: "Filial", value: "BRANCH" },
@@ -243,6 +251,9 @@ export function ERPsPage() {
   const [blingAction, setBlingAction] = useState<"test" | "connect" | "reconnect" | "reauthorize" | "disconnect" | "remove" | null>(null);
   const [canRemoveBlingConnection, setCanRemoveBlingConnection] = useState(false);
   const [canRestoreBlingConnection, setCanRestoreBlingConnection] = useState(false);
+  const [canUseCustomBlingApp, setCanUseCustomBlingApp] = useState(false);
+  const [officialAppConfigured, setOfficialAppConfigured] = useState(false);
+  const [blingRedirectUri, setBlingRedirectUri] = useState<string | null>(null);
   const [restoringConnectionId, setRestoringConnectionId] = useState<string | null>(null);
   const [removeConfirmationOpen, setRemoveConfirmationOpen] = useState(false);
   const [removeConfirmationName, setRemoveConfirmationName] = useState("");
@@ -269,7 +280,8 @@ export function ERPsPage() {
       data?: BlingIntegratedConnection[];
       removed?: RemovedBlingConnection[];
       limit?: BlingConnectionLimit;
-      permissions?: { canRemove?: boolean; canRestore?: boolean };
+      permissions?: { canRemove?: boolean; canRestore?: boolean; canUseCustomBlingApp?: boolean };
+      oauthConfiguration?: { officialAppConfigured?: boolean; redirectUri?: string | null };
     };
     const accounts = payload.data ?? [];
     setBlingAccounts(accounts);
@@ -277,6 +289,9 @@ export function ERPsPage() {
     if (payload.limit) setBlingConnectionLimit(payload.limit);
     setCanRemoveBlingConnection(payload.permissions?.canRemove === true);
     setCanRestoreBlingConnection(payload.permissions?.canRestore === true);
+    setCanUseCustomBlingApp(payload.permissions?.canUseCustomBlingApp === true);
+    setOfficialAppConfigured(payload.oauthConfiguration?.officialAppConfigured === true);
+    setBlingRedirectUri(payload.oauthConfiguration?.redirectUri ?? null);
     setSelectedBlingAccount((current) => current ? accounts.find((account) => account.id === current.id) ?? current : current);
     return accounts;
   }
@@ -319,7 +334,7 @@ export function ERPsPage() {
     setSelectedConnectionId(null);
     setSelectedBlingAccount(null);
     setForm(emptyForm);
-    setBlingForm(emptyBlingForm);
+    setBlingForm({ ...emptyBlingForm, credentialMode: !officialAppConfigured && canUseCustomBlingApp ? "CUSTOM_APP" : "OFFICIAL_APP" });
     setShowSecrets({});
     setMessage("");
     setCopyMessage("");
@@ -353,7 +368,10 @@ export function ERPsPage() {
     setBlingForm({
       accountAlias: account.name,
       role: account.role,
-      internalNotes: account.internalNotes
+      internalNotes: account.internalNotes,
+      credentialMode: account.credentialMode,
+      clientId: "",
+      clientSecret: ""
     });
     setForm(emptyForm);
     setMessage("");
@@ -383,7 +401,11 @@ export function ERPsPage() {
         body: JSON.stringify({
           name: blingForm.accountAlias.trim(),
           role: blingForm.role,
-          internalNotes: blingForm.internalNotes.trim()
+          internalNotes: blingForm.internalNotes.trim(),
+          credentialMode: blingForm.credentialMode,
+          ...(blingForm.credentialMode === "CUSTOM_APP"
+            ? { clientId: blingForm.clientId.trim(), clientSecret: blingForm.clientSecret }
+            : {})
         })
       });
       const payload = await response.json().catch(() => ({}));
@@ -408,7 +430,15 @@ export function ERPsPage() {
       body: JSON.stringify({
         name: blingForm.accountAlias.trim(),
         role: blingForm.role,
-        internalNotes: blingForm.internalNotes.trim()
+        internalNotes: blingForm.internalNotes.trim(),
+        ...(canUseCustomBlingApp
+          ? {
+              credentialMode: blingForm.credentialMode,
+              ...(blingForm.credentialMode === "CUSTOM_APP" && blingForm.clientId.trim() && blingForm.clientSecret
+                ? { clientId: blingForm.clientId.trim(), clientSecret: blingForm.clientSecret }
+                : {})
+            }
+          : {})
       })
     });
     const payload = await response.json().catch(() => ({}));
@@ -425,7 +455,10 @@ export function ERPsPage() {
       setBlingForm({
         accountAlias: updated.name,
         role: updated.role,
-        internalNotes: updated.internalNotes
+        internalNotes: updated.internalNotes,
+        credentialMode: updated.credentialMode,
+        clientId: "",
+        clientSecret: ""
       });
     }
     setMessage("Conta Bling atualizada com segurança.");
@@ -643,6 +676,10 @@ export function ERPsPage() {
     blingForm.accountAlias.trim().length >= 2
     && (modalMode !== "create" || blingConnectionLimit.canCreate)
     && (modalMode !== "manage" || selectedConnectionId)
+    && (blingForm.credentialMode !== "OFFICIAL_APP" || officialAppConfigured)
+    && (blingForm.credentialMode !== "CUSTOM_APP"
+      || (modalMode === "manage" && selectedBlingAccount?.credentialMode === "CUSTOM_APP" && selectedBlingAccount.credentialsConfigured)
+      || (blingForm.clientId.trim() && blingForm.clientSecret))
   );
   const selectedBlingStatus = selectedBlingAccount?.status ?? "PENDING";
   const canTestSelectedBling = Boolean(selectedBlingAccount?.hasToken && selectedBlingStatus === "ACTIVE" && !blingAction);
@@ -820,6 +857,11 @@ export function ERPsPage() {
                       <dd className="mt-1 text-matrix-fg">{formatDate(connection.removedAt)}</dd>
                     </div>
                   </dl>
+                  {connection.mappingCount > 0 ? (
+                    <p className="mt-4 rounded-md border border-orange-500/35 bg-orange-500/10 p-3 text-sm text-orange-100">
+                      Existe uma integração removida com produtos vinculados. Restaure ou reconecte essa integração para preservar os vínculos existentes.
+                    </p>
+                  ) : null}
                   <Button
                     className="mt-5 w-full justify-center"
                     disabled={Boolean(restoringConnectionId)}
@@ -891,7 +933,7 @@ export function ERPsPage() {
               <section className="rounded-lg border border-matrix-border bg-matrix-panel2/58 p-4">
                 <div className="mb-4 flex items-center gap-2"><CheckCircle2 className="h-4 w-4 text-matrix-goldDark" /><h4 className="font-semibold text-matrix-fg">Configuração da conta</h4></div>
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <label className="grid gap-2 text-sm text-matrix-muted">Apelido da conta<input autoComplete="off" className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" value={blingForm.accountAlias} onChange={(event) => setBlingForm((current) => ({ ...current, accountAlias: event.target.value }))} /></label>
+                  <label className="grid gap-2 text-sm text-matrix-muted">Apelido da conta<input autoComplete="off" className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" value={blingForm.accountAlias} onChange={(event) => setBlingForm((current) => ({ ...current, accountAlias: event.target.value }))} />{blingForm.accountAlias.trim().length < 2 ? <span className="text-orange-200">Informe um apelido para continuar.</span> : null}</label>
                   <label className="grid gap-2 text-sm text-matrix-muted">Tipo<select className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" value={blingForm.role} onChange={(event) => setBlingForm((current) => ({ ...current, role: event.target.value as BlingConnectionRole }))}>{blingRoleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
                   <label className="grid gap-2 text-sm text-matrix-muted sm:col-span-2">Observações<textarea className="min-h-20 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" maxLength={2000} value={blingForm.internalNotes} onChange={(event) => setBlingForm((current) => ({ ...current, internalNotes: event.target.value }))} /></label>
                 </div>
@@ -901,22 +943,37 @@ export function ERPsPage() {
                 <div className="flex items-start gap-3">
                   <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-matrix-goldDark" />
                   <div className="min-w-0 flex-1">
-                    <h4 className="font-semibold text-matrix-fg">Aplicativo oficial W Ecommerce</h4>
-                    <p className="mt-1 text-sm text-matrix-muted">
-                      O W Ecommerce utiliza o aplicativo OAuth oficial configurado com segurança no servidor.
-                    </p>
-                    {modalMode === "create" ? (
-                      <p className="mt-2 text-sm text-matrix-muted">
-                        Você será redirecionado ao Bling para entrar na conta que deseja autorizar.
-                      </p>
+                    <h4 className="font-semibold text-matrix-fg">Modo de autorização</h4>
+                    <p className="mt-1 text-sm text-matrix-muted">Escolha qual aplicativo OAuth identificará esta conexão.</p>
+                    <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                      <button className={`min-w-0 rounded-md border px-3 py-3 text-left text-sm ${blingForm.credentialMode === "OFFICIAL_APP" ? "border-matrix-gold/70 bg-matrix-goldSoft/25 text-matrix-fg" : "border-matrix-border text-matrix-muted"}`} disabled={!canUseCustomBlingApp && modalMode === "manage" && blingForm.credentialMode === "CUSTOM_APP"} onClick={() => setBlingForm((current) => ({ ...current, credentialMode: "OFFICIAL_APP", clientId: "", clientSecret: "" }))} type="button">
+                        <strong className="block">Aplicativo oficial W Ecommerce</strong>
+                        <span className="mt-1 block">Utiliza o aplicativo OAuth oficial configurado pelo W Ecommerce.</span>
+                      </button>
+                      {canUseCustomBlingApp ? (
+                        <button className={`min-w-0 rounded-md border px-3 py-3 text-left text-sm ${blingForm.credentialMode === "CUSTOM_APP" ? "border-matrix-gold/70 bg-matrix-goldSoft/25 text-matrix-fg" : "border-matrix-border text-matrix-muted"}`} onClick={() => setBlingForm((current) => ({ ...current, credentialMode: "CUSTOM_APP" }))} type="button">
+                          <strong className="block">Credenciais próprias</strong>
+                          <span className="mt-1 block">Utilize um aplicativo criado na sua conta de desenvolvedor Bling. Somente para superusuários do sistema.</span>
+                        </button>
+                      ) : null}
+                    </div>
+                    {blingForm.credentialMode === "OFFICIAL_APP" ? (
+                      <p className={`mt-3 text-sm ${officialAppConfigured ? "text-emerald-200" : "text-orange-200"}`}>{officialAppConfigured ? "Aplicativo oficial configurado." : "O aplicativo oficial ainda não está configurado neste ambiente."}</p>
+                    ) : !canUseCustomBlingApp ? (
+                      <p className="mt-3 text-sm text-matrix-muted">Credenciais próprias configuradas e gerenciadas por um superusuário do sistema.</p>
                     ) : (
-                      <div className="mt-4 grid gap-3">
-                        <label className="grid gap-2 text-sm text-matrix-muted sm:col-span-2">
-                          Expiração da autorização
-                          <input className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-muted outline-none" disabled value={formatDate(selectedBlingAccount?.tokenExpiresAt)} />
-                        </label>
+                      <div className="mt-4 grid min-w-0 gap-3">
+                        {modalMode === "manage" && selectedBlingAccount?.clientIdMasked ? <p className="break-words text-sm text-matrix-muted">Client ID atual: {selectedBlingAccount.clientIdMasked}. Deixe os campos vazios para manter as credenciais atuais.</p> : null}
+                        <label className="grid min-w-0 gap-2 text-sm text-matrix-muted">Client ID<input autoComplete="off" className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" value={blingForm.clientId} onChange={(event) => setBlingForm((current) => ({ ...current, clientId: event.target.value }))} /></label>
+                        <label className="grid min-w-0 gap-2 text-sm text-matrix-muted">Client Secret<input autoComplete="new-password" className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-fg outline-none focus:border-matrix-gold/60" type="password" value={blingForm.clientSecret} onChange={(event) => setBlingForm((current) => ({ ...current, clientSecret: event.target.value }))} /></label>
+                        <div className="min-w-0 rounded-md border border-matrix-border bg-matrix-panel p-3 text-sm text-matrix-muted">
+                          <span className="block font-medium text-matrix-fg">URL de redirecionamento oficial</span>
+                          <span className="mt-1 block break-all">{blingRedirectUri ?? "Não configurada"}</span>
+                          <Button className="mt-3" disabled={!blingRedirectUri} onClick={async () => { if (blingRedirectUri) { await navigator.clipboard.writeText(blingRedirectUri); setCopyMessage("Redirect URI copiada."); } }} type="button" variant="secondary"><Copy className="h-4 w-4" />Copiar URL</Button>
+                        </div>
                       </div>
                     )}
+                    {modalMode === "manage" ? <label className="mt-4 grid gap-2 text-sm text-matrix-muted">Expiração da autorização<input className="rounded-md border border-matrix-border bg-matrix-panel px-3 py-2 text-matrix-muted outline-none" disabled value={formatDate(selectedBlingAccount?.tokenExpiresAt)} /></label> : null}
                   </div>
                 </div>
               </section>
@@ -1012,7 +1069,8 @@ export function ERPsPage() {
                 </section>
               ) : null}
 
-              {message ? <p className="rounded-lg border border-matrix-border bg-matrix-panel2/60 px-3 py-2 text-sm text-matrix-muted">{message}</p> : null}
+                {copyMessage ? <p className="text-sm text-emerald-200">{copyMessage}</p> : null}
+                {message ? <p className="rounded-lg border border-matrix-border bg-matrix-panel2/60 px-3 py-2 text-sm text-matrix-muted">{message}</p> : null}
 
               <div className="flex flex-wrap justify-end gap-2">
                 <Button variant="secondary" type="button" onClick={closeModal}>Cancelar</Button>

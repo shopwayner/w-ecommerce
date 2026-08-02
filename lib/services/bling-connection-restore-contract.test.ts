@@ -39,7 +39,9 @@ test("normal listings keep DISABLED hidden and removed connections are returned 
   assert.match(listRoute, /: Promise\.resolve\(\[\]\)/);
   assert.match(listRoute, /provider: "BLING" as const/);
   assert.match(listRoute, /organizationName: auth\.context\.organization\.name/);
-  assert.doesNotMatch(listRoute, /accessTokenEncrypted|refreshTokenEncrypted|clientSecretEncrypted/);
+  assert.doesNotMatch(listRoute, /accessTokenEncrypted|refreshTokenEncrypted/);
+  assert.match(listRoute, /clientSecretEncrypted: true/);
+  assert.doesNotMatch(listRoute, /clientSecretEncrypted: connection\.clientSecretEncrypted/);
 });
 
 test("administrative UI exposes a separate restore action with the required warning", () => {

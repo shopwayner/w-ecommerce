@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
-import { blingOAuthService } from "@/lib/services/bling-oauth-service";
+import { BlingCredentialsMissingError, blingOAuthService, getBlingConnectionCredentialSummary } from "@/lib/services/bling-oauth-service";
 import { BlingOAuthAuthorizationInProgressError } from "@/lib/services/bling-connection-entitlement-service";
 import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
 import { consumeSettingsRateLimit } from "@/lib/security/settings-rate-limit";
 import { createAuditLog } from "@/lib/services/audit-log-service";
 import { z } from "zod";
+import { randomUUID } from "crypto";
 
 const reconnectSchema = z.object({
   confirmed: z.literal(true),
@@ -14,6 +15,8 @@ const reconnectSchema = z.object({
 }).strict();
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const requestId = randomUUID();
+  const startedAt = Date.now();
   const auth = await requireApiAuth("integrations:write");
   if (!auth.ok) return auth.response;
   if (!hasAdministrativeAccess(auth.context)) {
@@ -44,7 +47,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       organizationId: auth.context.organizationId,
       status: { not: "DISABLED" }
     },
-    select: { id: true, status: true }
+    select: { id: true, status: true, clientIdEncrypted: true, clientSecretEncrypted: true }
   });
   if (!connection) return NextResponse.json({ error: "Conta Bling nao encontrada." }, { status: 404 });
   if (parsed.data.intent === "CONNECT" && connection.status !== "PENDING") {
@@ -60,8 +63,26 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     return NextResponse.json({ error: "Esta conta nao precisa ser reconectada." }, { status: 409 });
   }
   if (!(await blingOAuthService.hasUsableCredentials(connection.id, auth.context.organizationId))) {
+    const summary = getBlingConnectionCredentialSummary(connection);
+    console.warn("BLING_OAUTH_RECONNECT_REJECTED", {
+      requestId,
+      connectionId: connection.id,
+      intent: parsed.data.intent,
+      stage: "credentials_validation",
+      credentialMode: summary.credentialMode,
+      status: 409,
+      durationMs: Date.now() - startedAt
+    });
     return NextResponse.json(
-      { error: "A configuração da conta precisa ser revisada." },
+      {
+        error: summary.credentialMode === "CUSTOM_APP"
+          ? "As credenciais do aplicativo customizado precisam ser revisadas."
+          : "O aplicativo oficial Bling nao esta configurado no servidor.",
+        code: summary.credentialMode === "CUSTOM_APP"
+          ? "BLING_CUSTOM_APP_CREDENTIALS_NOT_CONFIGURED"
+          : "BLING_OFFICIAL_APP_NOT_CONFIGURED",
+        stage: "credentials_validation"
+      },
       { status: 409 }
     );
   }
@@ -117,6 +138,21 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         { status: 409 }
       );
     }
+    if (error instanceof BlingCredentialsMissingError) {
+      return NextResponse.json(
+        { error: "As credenciais do aplicativo Bling precisam ser revisadas.", code: "BLING_CREDENTIALS_NOT_CONFIGURED", stage: "credentials_validation" },
+        { status: 409 }
+      );
+    }
+    console.error("BLING_OAUTH_RECONNECT_FAILED", {
+      requestId,
+      connectionId: connection.id,
+      intent: parsed.data.intent,
+      stage: "oauth_state_creation",
+      errorCode: error instanceof Error ? error.name : "UNKNOWN_ERROR",
+      status: 400,
+      durationMs: Date.now() - startedAt
+    });
     return NextResponse.json({ error: "Não foi possível iniciar a conexão agora." }, { status: 400 });
   }
 }

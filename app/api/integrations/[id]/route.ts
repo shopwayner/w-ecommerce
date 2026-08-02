@@ -3,15 +3,22 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
-import { blingOAuthService } from "@/lib/services/bling-oauth-service";
+import { blingOAuthService, getEncryptedBlingCredentialUpdates, resolveBlingCredentialMode } from "@/lib/services/bling-oauth-service";
 import { sanitizeLogPayload } from "@/lib/utils";
-import { hasAdministrativeAccess } from "@/lib/auth/system-superuser";
+import { hasAdministrativeAccess, isSystemSuperuserContext } from "@/lib/auth/system-superuser";
 
 const updateConnectionSchema = z.object({
   name: z.string().trim().min(2).max(80),
   role: z.enum(["MATRIX", "BRANCH", "OTHER"]),
-  internalNotes: z.string().trim().max(2000).optional()
-}).strict();
+  internalNotes: z.string().trim().max(2000).optional(),
+  credentialMode: z.enum(["OFFICIAL_APP", "CUSTOM_APP"]).optional(),
+  clientId: z.string().trim().max(512).optional(),
+  clientSecret: z.string().trim().max(2048).optional()
+}).strict().superRefine((value, context) => {
+  if ((value.clientId && !value.clientSecret) || (!value.clientId && value.clientSecret)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Client ID e Client Secret devem ser informados juntos." });
+  }
+});
 
 const disconnectSchema = z.object({ confirmed: z.literal(true) }).strict();
 
@@ -27,6 +34,10 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error.errors[0]?.message ?? "Dados inválidos." }, { status: 400 });
   }
+  const requestsCredentialChange = parsed.data.credentialMode !== undefined || parsed.data.clientId !== undefined || parsed.data.clientSecret !== undefined;
+  if (requestsCredentialChange && !isSystemSuperuserContext(auth.context)) {
+    return NextResponse.json({ error: "Somente superusuarios do sistema podem alterar o aplicativo Bling." }, { status: 403 });
+  }
 
   const { id } = await params;
   const current = await prisma.blingConnection.findFirst({
@@ -35,7 +46,7 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
       organizationId: auth.context.organizationId,
       status: { not: "DISABLED" }
     },
-    select: { id: true }
+    select: { id: true, clientIdEncrypted: true, clientSecretEncrypted: true }
   });
   if (!current) return NextResponse.json({ error: "Conta Bling não encontrada." }, { status: 404 });
 
@@ -44,6 +55,17 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     role: parsed.data.role
   };
   if (parsed.data.internalNotes !== undefined) updateData.internalNotes = parsed.data.internalNotes || null;
+  if (requestsCredentialChange) {
+    const requestedMode = parsed.data.credentialMode ?? resolveBlingCredentialMode(current);
+    if (requestedMode === "OFFICIAL_APP") {
+      updateData.clientIdEncrypted = null;
+      updateData.clientSecretEncrypted = null;
+    } else if (parsed.data.clientId && parsed.data.clientSecret) {
+      Object.assign(updateData, getEncryptedBlingCredentialUpdates({ clientId: parsed.data.clientId, clientSecret: parsed.data.clientSecret }));
+    } else if (resolveBlingCredentialMode(current) !== "CUSTOM_APP") {
+      return NextResponse.json({ error: "Informe Client ID e Client Secret para usar um aplicativo customizado." }, { status: 400 });
+    }
+  }
 
   const updated = await prisma.$transaction(async (transaction) => {
     const connection = await transaction.blingConnection.update({
@@ -63,7 +85,8 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
           fields: [
             "name",
             "role",
-            "internalNotes"
+            "internalNotes",
+            ...(requestsCredentialChange ? ["credentialMode", "credentials"] : [])
           ]
         }) as Prisma.InputJsonObject
       }

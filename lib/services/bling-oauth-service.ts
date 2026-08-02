@@ -44,6 +44,17 @@ type OAuthStateInput = {
   internalNotes?: string;
   reconnectConnectionId?: string;
   reauthorizeConnectionId?: string;
+  credentialMode?: BlingCredentialMode;
+  clientId?: string;
+  clientSecret?: string;
+};
+
+export const BLING_CREDENTIAL_MODES = ["OFFICIAL_APP", "CUSTOM_APP"] as const;
+export type BlingCredentialMode = (typeof BLING_CREDENTIAL_MODES)[number];
+
+type EncryptedBlingCredentials = {
+  clientIdEncrypted: string | null;
+  clientSecretEncrypted: string | null;
 };
 
 type BlingCredentials = {
@@ -58,6 +69,9 @@ type PendingConnectionOAuthStateInput = {
   connectionName: string;
   connectionRole: ConnectionRole;
   internalNotes?: string;
+  credentialMode: BlingCredentialMode;
+  clientId?: string;
+  clientSecret?: string;
 };
 
 type ResumePendingConnectionOAuthStateInput = {
@@ -96,7 +110,7 @@ function getGlobalBlingCredentials(): BlingCredentials {
   const clientSecret = process.env.BLING_CLIENT_SECRET;
 
   if (!clientId || !clientSecret) {
-    throw new Error("Credenciais Bling nao configuradas.");
+    throw new BlingCredentialsMissingError();
   }
 
   return { clientId, clientSecret, redirectUri: getBlingRedirectUri() };
@@ -114,10 +128,63 @@ function getBlingRedirectUri() {
   }
 }
 
-export function getBlingConnectionCredentialSummary(_unusedConnection?: unknown) {
-  void _unusedConnection;
+export function getPublicBlingRedirectUri() {
+  try {
+    return getBlingRedirectUri();
+  } catch {
+    return null;
+  }
+}
+
+export function resolveBlingCredentialMode(credentials: EncryptedBlingCredentials): BlingCredentialMode {
+  return credentials.clientIdEncrypted || credentials.clientSecretEncrypted ? "CUSTOM_APP" : "OFFICIAL_APP";
+}
+
+function decryptStoredBlingCredentials(credentials: EncryptedBlingCredentials) {
+  if (resolveBlingCredentialMode(credentials) === "OFFICIAL_APP") return null;
+  if (!credentials.clientIdEncrypted || !credentials.clientSecretEncrypted) throw new BlingCredentialsMissingError();
+  try {
+    return {
+      clientId: decryptSecret(credentials.clientIdEncrypted),
+      clientSecret: decryptSecret(credentials.clientSecretEncrypted)
+    };
+  } catch {
+    throw new BlingCredentialsMissingError();
+  }
+}
+
+function maskClientId(clientId: string) {
+  if (clientId.length <= 6) return `${clientId.slice(0, 1)}***${clientId.slice(-1)}`;
+  return `${clientId.slice(0, 4)}${"*".repeat(Math.min(12, Math.max(4, clientId.length - 8)))}${clientId.slice(-4)}`;
+}
+
+export function getBlingConnectionCredentialSummary(credentials: EncryptedBlingCredentials) {
+  const credentialMode = resolveBlingCredentialMode(credentials);
+  if (credentialMode === "OFFICIAL_APP") {
+    return {
+      credentialMode,
+      credentialsConfigured: getBlingOAuthConfigurationStatus().configured,
+      clientIdMasked: null,
+      clientSecretConfigured: false
+    };
+  }
+  try {
+    const stored = decryptStoredBlingCredentials(credentials);
+    return {
+      credentialMode,
+      credentialsConfigured: Boolean(stored),
+      clientIdMasked: stored ? maskClientId(stored.clientId) : null,
+      clientSecretConfigured: Boolean(stored)
+    };
+  } catch {
+    return { credentialMode, credentialsConfigured: false, clientIdMasked: null, clientSecretConfigured: false };
+  }
+}
+
+export function getEncryptedBlingCredentialUpdates(input: { clientId: string; clientSecret: string }) {
   return {
-    credentialsConfigured: getBlingOAuthConfigurationStatus().configured
+    clientIdEncrypted: encryptSecret(input.clientId.trim()),
+    clientSecretEncrypted: encryptSecret(input.clientSecret.trim())
   };
 }
 
@@ -284,7 +351,13 @@ export class BlingOAuthService {
             name: input.connectionName.trim(),
             role: input.connectionRole,
             status: "PENDING",
-            internalNotes: input.internalNotes?.trim() || null
+            internalNotes: input.internalNotes?.trim() || null,
+            ...(input.credentialMode === "CUSTOM_APP"
+              ? getEncryptedBlingCredentialUpdates({
+                  clientId: input.clientId ?? "",
+                  clientSecret: input.clientSecret ?? ""
+                })
+              : {})
           },
           select: { id: true }
         });
@@ -382,15 +455,13 @@ export class BlingOAuthService {
   private async credentialsForConnection(connectionId: string, organizationId: string): Promise<BlingCredentials> {
     const connection = await prisma.blingConnection.findFirst({
       where: { id: connectionId, organizationId },
-      select: { id: true }
+      select: { clientIdEncrypted: true, clientSecretEncrypted: true }
     });
     if (!connection) throw new BlingCredentialsMissingError();
 
-    try {
-      return getGlobalBlingCredentials();
-    } catch {
-      throw new BlingCredentialsMissingError();
-    }
+    const stored = decryptStoredBlingCredentials(connection);
+    if (stored) return { ...stored, redirectUri: getBlingRedirectUri() };
+    try { return getGlobalBlingCredentials(); } catch { throw new BlingCredentialsMissingError(); }
   }
 
   async hasUsableCredentials(connectionId: string, organizationId: string) {
@@ -437,13 +508,22 @@ export class BlingOAuthService {
     }
 
     if (!targetConnectionId) {
-      getGlobalBlingCredentials();
+      const credentialMode = input.credentialMode ?? "OFFICIAL_APP";
+      if (credentialMode === "CUSTOM_APP") {
+        if (!input.clientId?.trim() || !input.clientSecret?.trim()) throw new BlingCredentialsMissingError();
+        getBlingRedirectUri();
+      } else {
+        getGlobalBlingCredentials();
+      }
       return this.reservePendingConnectionOAuthState({
         organizationId: input.organizationId,
         userId: input.userId,
         connectionName,
         connectionRole,
-        internalNotes: input.internalNotes
+        internalNotes: input.internalNotes,
+        credentialMode,
+        clientId: input.clientId,
+        clientSecret: input.clientSecret
       });
     }
 

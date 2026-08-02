@@ -268,15 +268,16 @@ test("two concurrent unlimited reservations still block duplicate authorization"
   assert.equal(state.used, 1);
 });
 
-test("frontend entitlement and organization tampering is rejected by the strict start schema", () => {
+test("credential mode is strict and frontend entitlement or organization tampering is rejected", () => {
   const valid = {
     name: "Bling",
     role: "OTHER",
     internalNotes: ""
   };
-  assert.equal(blingStartSchema.safeParse({ ...valid, clientId: "client-id" }).success, false);
-  assert.equal(blingStartSchema.safeParse({ ...valid, clientSecret: "client-secret" }).success, false);
   assert.equal(blingStartSchema.safeParse(valid).success, true);
+  assert.equal(blingStartSchema.safeParse({ ...valid, credentialMode: "CUSTOM_APP", clientId: "client-id", clientSecret: "client-secret" }).success, true);
+  assert.equal(blingStartSchema.safeParse({ ...valid, credentialMode: "CUSTOM_APP", clientId: "client-id" }).success, false);
+  assert.equal(blingStartSchema.safeParse({ ...valid, credentialMode: "OFFICIAL_APP", clientId: "client-id", clientSecret: "client-secret" }).success, false);
   assert.equal(blingStartSchema.safeParse({ ...valid, unlimited: true }).success, false);
   assert.equal(blingStartSchema.safeParse({ ...valid, organizationId: "another-tenant" }).success, false);
   assert.equal(blingStartSchema.safeParse({ ...valid, email: "owner-one@example.test" }).success, false);
