@@ -799,6 +799,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
   const [titleAiError, setTitleAiError] = useState<string | null>(null);
   const [descriptionAiLoading, setDescriptionAiLoading] = useState(false);
   const [descriptionAiError, setDescriptionAiError] = useState<string | null>(null);
+  const [descriptionAiNotice, setDescriptionAiNotice] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const saveInFlight = useRef(false);
@@ -823,6 +824,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     generatedDescriptionHistory.current.clear();
     setDescriptionAiLoading(false);
     setDescriptionAiError(null);
+    setDescriptionAiNotice(null);
   }, []);
 
   const baselineForm = useMemo(() => formFromProduct(currentProduct), [currentProduct]);
@@ -1029,6 +1031,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     descriptionAiRequest.current = controller;
     setDescriptionAiLoading(true);
     setDescriptionAiError(null);
+    setDescriptionAiNotice(null);
     setError(null);
     setFeedback(null);
 
@@ -1048,6 +1051,12 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
         usedWebSearch?: boolean;
         warnings?: string[];
         evidenceLevel?: "LOCAL_ONLY" | "LOCAL_AND_WEB";
+        researchSummary?: {
+          queriesAttempted: number;
+          officialSourcesFound: number;
+          fieldsConfirmed: number;
+          fieldsOmitted: number;
+        };
       };
       if (!response.ok) {
         throw new ProductDescriptionAiRequestError(
@@ -1083,6 +1092,11 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
       updateDirtyField("description", nextDescription);
       setDescriptionEditorResetKey((current) => current + 1);
       setDescriptionAiError(null);
+      setDescriptionAiNotice(
+        payload.warnings?.includes("OFFICIAL_SOURCES_NOT_FOUND")
+          ? "Descrição criada apenas com os dados disponíveis no cadastro."
+          : null
+      );
       setError(null);
       setFeedback(null);
     } catch (caughtError) {
@@ -1415,6 +1429,11 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
                 {descriptionAiError ? (
                   <p className="mt-2 text-xs font-semibold text-red-700" role="alert">
                     {descriptionAiError}
+                  </p>
+                ) : null}
+                {descriptionAiNotice ? (
+                  <p className="mt-2 text-xs text-matrix-muted" role="status">
+                    {descriptionAiNotice}
                   </p>
                 ) : null}
               </>

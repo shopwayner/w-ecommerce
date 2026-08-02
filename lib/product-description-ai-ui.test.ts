@@ -116,6 +116,17 @@ test("safe generation error preserves the current draft", () => {
   assert.match(viewSource, /descriptionAiError[\s\S]*role="alert"/);
 });
 
+test("local-only generation shows a discreet notice outside commercial HTML", () => {
+  const generation = sourceBlock(
+    "const generateDescription = useCallback",
+    "const reorderImage = useCallback"
+  );
+  assert.match(generation, /OFFICIAL_SOURCES_NOT_FOUND/);
+  assert.match(generation, /criada apenas com os dados disponíveis no cadastro\./);
+  assert.match(viewSource, /descriptionAiNotice[\s\S]*role="status"/);
+  assert.doesNotMatch(generation, /nextDescription\s*\+=|setDescriptionAiNotice\(nextDescription/);
+});
+
 test("backend validation codes reach specific safe UI messages", () => {
   assert.match(viewSource, /descriptionAiErrorMessage\(payload\.code\)/);
   assert.match(viewSource, /OPENAI_DESCRIPTION_CONFIGURATION_UNAVAILABLE:[\s\S]*não está configurada neste ambiente/);

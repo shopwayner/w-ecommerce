@@ -1,13 +1,19 @@
-import { createHash } from "node:crypto";
 import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
-import sanitizeHtml from "sanitize-html";
 import { z } from "zod";
 import {
   productDescriptionHasVisibleContent,
   sanitizeProductDescription
 } from "@/lib/product-description";
-import { isValidGtin } from "@/lib/services/internal-gtin-catalog-service";
+import {
+  buildLocalProductDescriptionEvidence,
+  buildOpenAIProductDescriptionResearchRequest,
+  buildProductDescriptionResearchQueries,
+  emptyProductDescriptionResearchResult,
+  validateProductDescriptionResearch,
+  type ProductDescriptionEvidenceFact,
+  type ProductDescriptionResearchSummary
+} from "@/lib/services/openai-product-description-research";
 
 export const OPENAI_PRODUCT_DESCRIPTION_DEFAULT_MAX_CHARACTERS = 12_000;
 export const OPENAI_PRODUCT_DESCRIPTION_TIMEOUT_MS = 30_000;
@@ -22,16 +28,19 @@ export type OpenAIProductDescriptionResult = {
   usedWebSearch: boolean;
   warnings: string[];
   evidenceLevel: ProductDescriptionEvidenceLevel;
+  researchSummary: ProductDescriptionResearchSummary;
 };
 
 export type OpenAIProductDescriptionContent = {
-  introducao: string;
+  introducao: string[];
   fichaTecnica: string[];
+  compatibilidade: string[];
   conteudoEmbalagem: string[];
   vantagens: string[];
   dimensoes: string[];
   tutorialInstalacao: string[];
-  maisSobreProduto: string;
+  cuidadosManutencao: string[];
+  maisSobreProduto: string[];
 };
 
 export type ProductDescriptionSource = {
@@ -178,6 +187,13 @@ export type OpenAIProductDescriptionLogEvent = {
   searchCount: number;
   sourceCount: number;
   officialSourceCount: number;
+  queryCount: number;
+  resultCount: number;
+  discardedSourceCount: number;
+  discardedSourceReasonCounts: Record<string, number>;
+  fieldsConfirmed: number;
+  fieldsOmitted: number;
+  providerCallCount: number;
   sourceDomainHashes: string[];
   usedWebSearch: boolean;
   evidenceLevel: ProductDescriptionEvidenceLevel;
@@ -207,15 +223,16 @@ const productDescriptionPrompt = [
   "Nunca invente material, compatibilidade, aplicação, modelo, cor, tamanho, medida, peso, voltagem, potência, certificação, garantia, conteúdo da embalagem, proteção IP, acessórios ou benefícios técnicos.",
   "Não inclua preço, custo, margem, estoque, frete, promoção, dados de cliente, organização, credenciais ou informações internas.",
   "Retorne exclusivamente o objeto JSON estruturado solicitado; não gere HTML, Markdown, títulos de seção, nomes de seção, listas formatadas ou texto fora do JSON.",
-  "Preencha somente estas propriedades: introducao, fichaTecnica, conteudoEmbalagem, vantagens, dimensoes, tutorialInstalacao e maisSobreProduto.",
+  "Preencha somente estas propriedades: introducao, fichaTecnica, compatibilidade, vantagens, conteudoEmbalagem, dimensoes, tutorialInstalacao, cuidadosManutencao e maisSobreProduto.",
   "Use texto simples em português do Brasil. O backend define o nome do produto, títulos, ordem, parágrafos e listas.",
-  "Introducao deve explicar brevemente o que é o produto, sua aplicação principal e finalidade prática, sem repetir a ficha técnica.",
+  "Introducao deve ter de um a três parágrafos que expliquem o produto, tipo, uso e diferenciais confirmados, sem repetir a ficha técnica.",
   "FichaTecnica e vantagens devem conter somente itens diretamente sustentados pelas evidências.",
-  "ConteudoEmbalagem, dimensoes, tutorialInstalacao e maisSobreProduto são condicionais; retorne string vazia ou array vazio quando não houver evidência suficiente.",
-  "Não inclua rótulos como Introdução, Ficha Técnica, Conteúdo da Embalagem, Vantagens, Dimensões, Tutorial de Instalação ou Mais sobre o Produto nos valores.",
+  "Compatibilidade, conteudoEmbalagem, dimensoes, tutorialInstalacao, cuidadosManutencao e maisSobreProduto são condicionais; retorne array vazio quando não houver evidência suficiente.",
+  "Não inclua rótulos de seção nos valores.",
   "Não use Especificações, Características, Dados Técnicos, Informações ou qualquer outro título alternativo.",
   "Não repita altura, largura, profundidade, comprimento ou peso em fichaTecnica quando esses dados estiverem em dimensoes.",
-  "Conteúdo da Embalagem só pode informar quantidade comprovada. Tutorial de Instalação só pode usar instruções seguras presentes em descrição, manual, fabricante ou documentação técnica confiável.",
+  "Conteúdo da Embalagem só pode informar quantidade comprovada. Compatibilidade exige modelo, veículo, máquina, equipamento ou sistema comprovado.",
+  "Tutorial de Instalação e Cuidados e Manutenção só podem usar instruções presentes nas evidências fornecidas.",
   "Não use chamadas comerciais como 'compre agora', 'garanta já o seu' ou 'não perca esta oportunidade'.",
   "Não use tags HTML, emoji, link, imagem, citação, URL ou Markdown.",
   "Não repita a mesma informação em vários campos nem use promessas absolutas ou superlativos sem prova.",
@@ -319,16 +336,20 @@ export function readOpenAIProductDescriptionConfig(
 }
 
 export function buildOpenAIProductDescriptionTextFormat(maxCharacters: number) {
-  const text = z.string().max(maxCharacters);
-  const items = z.array(z.string().min(1).max(500)).max(40);
+  const item = z.string().min(1).max(Math.min(500, maxCharacters));
+  const items = z.array(item).max(40);
   const schema = z.object({
-    introducao: text,
+    introducao: z.array(
+      z.string().min(1).max(Math.min(2_000, maxCharacters))
+    ).min(1).max(3),
     fichaTecnica: items,
+    compatibilidade: items,
     conteudoEmbalagem: items,
     vantagens: items,
     dimensoes: items,
     tutorialInstalacao: items,
-    maisSobreProduto: text
+    cuidadosManutencao: items,
+    maisSobreProduto: items
   }).strict();
   return zodTextFormat(schema, OPENAI_PRODUCT_DESCRIPTION_SCHEMA_NAME);
 }
@@ -401,71 +422,41 @@ function sanitizedProductSource(product: ProductDescriptionSource) {
 export function shouldUseProductDescriptionWebSearch(
   product: ProductDescriptionSource
 ) {
-  const gtin = collapseWhitespace(product.gtin ?? "");
-  const packagingGtin = collapseWhitespace(product.packagingGtin ?? "");
-  if (
-    (gtin && isValidGtin(gtin)) ||
-    (packagingGtin && isValidGtin(packagingGtin))
-  ) {
-    return true;
-  }
-  const brand = collapseWhitespace(product.brand ?? "");
-  if (brand && (
-    collapseWhitespace(product.model ?? "") ||
-    collapseWhitespace(product.manufacturerSku ?? "")
-  )) {
-    return true;
-  }
-  const meaningfulNameTokens = collapseWhitespace(product.name)
-    .split(/\s+/)
-    .filter((token) => token.length >= 3);
-  return Boolean(
-    (brand && meaningfulNameTokens.length >= 5) ||
-    (meaningfulNameTokens.length >= 7 && /\d/.test(product.name))
-  );
+  return buildProductDescriptionResearchQueries(product).length > 0;
 }
 
 export function buildOpenAIProductDescriptionRequest(
   input: OpenAIProductDescriptionInput,
-  config: OpenAIProductDescriptionConfig
+  config: OpenAIProductDescriptionConfig,
+  evidence: readonly ProductDescriptionEvidenceFact[] =
+    buildLocalProductDescriptionEvidence(input.product)
 ) {
-  const officialDomains = sanitizeOfficialDomains(input.officialDomains);
-  const useWebSearch = shouldUseProductDescriptionWebSearch(input.product);
-  const webSearchTool = {
-    type: "web_search" as const,
-    search_context_size: "medium" as const,
-    ...(officialDomains.length
-      ? { filters: { allowed_domains: officialDomains } }
-      : {})
-  };
-
   return {
     model: config.model,
     store: false,
     max_output_tokens: config.maxOutputTokens,
-    ...(useWebSearch
-      ? {
-          tools: [webSearchTool],
-          tool_choice: "auto" as const,
-          include: ["web_search_call.action.sources" as const]
-        }
-      : {}),
     input: [
       {
         role: "system" as const,
         content: [
           immutableInstruction,
           productDescriptionPrompt,
-          useWebSearch
-            ? "A ferramenta web_search está disponível. Pesquise somente quando a identificação for inequívoca e priorize fabricante, manual e catálogo oficial."
-            : "Não use pesquisa externa. Trabalhe exclusivamente com os dados locais fornecidos.",
-          "Retorne exatamente as sete propriedades do schema. Não acrescente metadados, avisos, títulos ou qualquer outra chave."
+          "Use exclusivamente os fatos do mapa de evidências fornecido. Não pesquise nesta etapa.",
+          "Cada item deve manter termos específicos que permitam vinculá-lo a pelo menos uma evidência.",
+          "Retorne exatamente as nove propriedades do schema. Não acrescente metadados, avisos, títulos ou qualquer outra chave."
         ].join("\n\n")
       },
       {
         role: "user" as const,
         content: JSON.stringify({
-          produto: sanitizedProductSource(input.product)
+          produto: sanitizedProductSource(input.product),
+          evidenciasConfirmadas: evidence.map((item, index) => ({
+            id: `E${index + 1}`,
+            fact: item.fact,
+            sourceField: item.sourceField,
+            evidenceLevel: item.evidenceLevel,
+            confidence: item.confidence
+          }))
         })
       }
     ],
@@ -478,15 +469,17 @@ export function buildOpenAIProductDescriptionRequest(
 const productDescriptionContentKeys = [
   "introducao",
   "fichaTecnica",
+  "compatibilidade",
   "conteudoEmbalagem",
   "vantagens",
   "dimensoes",
   "tutorialInstalacao",
+  "cuidadosManutencao",
   "maisSobreProduto"
 ] as const;
 const sortedProductDescriptionContentKeys = [...productDescriptionContentKeys].sort();
 
-const generatedHeadingPrefixPattern = /^(?:introducao|ficha tecnica|conteudo da embalagem|vantagens|dimensoes|tutorial de instalacao|mais sobre o produto|especificacoes|caracteristicas|dados tecnicos|informacoes)\s*:/i;
+const generatedHeadingPrefixPattern = /^(?:introducao|ficha tecnica|compatibilidade|conteudo da embalagem|vantagens|dimensoes|tutorial de instalacao|orientacoes de uso e ajuste|cuidados e manutencao|mais sobre o produto|especificacoes|caracteristicas|dados tecnicos|informacoes)\s*:/i;
 const generatedHtmlPattern = /<\/?[a-z][^>]*>|&(?:lt|gt);/i;
 const generatedMarkdownPattern = /(?:\*\*|__|`{1,3})|^(?:[-*•]\s+|#{1,6}\s+)/m;
 const dimensionItemPattern = /^(?:altura|largura|profundidade|comprimento|peso(?: liquido| bruto)?)\s*:/i;
@@ -667,27 +660,38 @@ export function validateOpenAIProductDescriptionContent(
       reason: "required_property_missing"
     });
   }
-  for (const field of ["introducao", "maisSobreProduto"] as const) {
-    if (typeof value[field] !== "string") {
+  for (const field of productDescriptionContentKeys) {
+    if (!Array.isArray(value[field])) {
       invalidStructuredDescription({
         stage: "structured_schema",
         code: "OPENAI_DESCRIPTION_INVALID_SCHEMA",
         rule: "property_type",
         field,
-        reason: "expected_string"
+        reason: "expected_array"
       });
     }
   }
 
   const content: OpenAIProductDescriptionContent = {
-    introducao: normalizeGeneratedDescriptionText(value.introducao as string, 2_000, "introducao"),
+    introducao: normalizeGeneratedDescriptionItems(value.introducao, "introducao"),
     fichaTecnica: normalizeGeneratedDescriptionItems(value.fichaTecnica, "fichaTecnica"),
+    compatibilidade: normalizeGeneratedDescriptionItems(value.compatibilidade, "compatibilidade"),
     conteudoEmbalagem: normalizeGeneratedDescriptionItems(value.conteudoEmbalagem, "conteudoEmbalagem"),
     vantagens: normalizeGeneratedDescriptionItems(value.vantagens, "vantagens"),
     dimensoes: normalizeGeneratedDescriptionItems(value.dimensoes, "dimensoes"),
     tutorialInstalacao: normalizeGeneratedDescriptionItems(value.tutorialInstalacao, "tutorialInstalacao"),
-    maisSobreProduto: normalizeGeneratedDescriptionText(value.maisSobreProduto as string, 3_000, "maisSobreProduto")
+    cuidadosManutencao: normalizeGeneratedDescriptionItems(value.cuidadosManutencao, "cuidadosManutencao"),
+    maisSobreProduto: normalizeGeneratedDescriptionItems(value.maisSobreProduto, "maisSobreProduto")
   };
+  if (content.introducao.length < 1 || content.introducao.length > 3) {
+    invalidStructuredDescription({
+      stage: "structured_schema",
+      code: "OPENAI_DESCRIPTION_INVALID_SCHEMA",
+      rule: "introduction_item_count",
+      field: "introducao",
+      reason: "introduction_requires_one_to_three_paragraphs"
+    });
+  }
 
   if (content.dimensoes.length) {
     content.fichaTecnica = content.fichaTecnica.filter((item) => (
@@ -696,11 +700,16 @@ export function validateOpenAIProductDescriptionContent(
   }
 
   const seenContent = new Set<string>();
-  if (content.introducao) {
-    isRepeatedGeneratedDescriptionText(content.introducao, seenContent);
-  }
+  content.introducao = removeRepeatedGeneratedDescriptionItems(
+    content.introducao,
+    seenContent
+  );
   content.fichaTecnica = removeRepeatedGeneratedDescriptionItems(
     content.fichaTecnica,
+    seenContent
+  );
+  content.compatibilidade = removeRepeatedGeneratedDescriptionItems(
+    content.compatibilidade,
     seenContent
   );
   content.conteudoEmbalagem = removeRepeatedGeneratedDescriptionItems(
@@ -719,21 +728,25 @@ export function validateOpenAIProductDescriptionContent(
     content.tutorialInstalacao,
     seenContent
   );
-  if (
-    content.maisSobreProduto &&
-    isRepeatedGeneratedDescriptionText(content.maisSobreProduto, seenContent)
-  ) {
-    content.maisSobreProduto = "";
-  }
+  content.cuidadosManutencao = removeRepeatedGeneratedDescriptionItems(
+    content.cuidadosManutencao,
+    seenContent
+  );
+  content.maisSobreProduto = removeRepeatedGeneratedDescriptionItems(
+    content.maisSobreProduto,
+    seenContent
+  );
 
   const visibleContent = [
-    content.introducao,
+    ...content.introducao,
     ...content.fichaTecnica,
+    ...content.compatibilidade,
     ...content.conteudoEmbalagem,
     ...content.vantagens,
     ...content.dimensoes,
     ...content.tutorialInstalacao,
-    content.maisSobreProduto
+    ...content.cuidadosManutencao,
+    ...content.maisSobreProduto
   ].filter(Boolean).join(" ");
   if (
     visibleContent.length < OPENAI_PRODUCT_DESCRIPTION_MIN_LENGTH ||
@@ -760,18 +773,38 @@ function escapeGeneratedDescriptionHtml(value: string) {
     .replace(/'/g, "&#39;");
 }
 
-function generatedDescriptionList(title: string, items: readonly string[]) {
+function generatedDescriptionList(
+  title: string,
+  items: readonly string[],
+  ordered = false
+) {
+  if (!items.length) return "";
+  const tag = ordered ? "ol" : "ul";
+  return [
+    `<p><strong>${title}</strong></p>`,
+    `<${tag}>${items.map((item) => `<li>${escapeGeneratedDescriptionHtml(item)}</li>`).join("")}</${tag}>`
+  ].join("");
+}
+
+function generatedDescriptionParagraphs(title: string, items: readonly string[]) {
   if (!items.length) return "";
   return [
     `<p><strong>${title}</strong></p>`,
-    `<ul>${items.map((item) => `<li>${escapeGeneratedDescriptionHtml(item)}</li>`).join("")}</ul>`
+    ...items.map((item) => `<p>${escapeGeneratedDescriptionHtml(item)}</p>`)
   ].join("");
+}
+
+function tutorialSectionTitle(productName: string, category?: string | null) {
+  const context = normalizedComparisonKey(`${productName} ${category ?? ""}`);
+  return /\bcapacete\b/.test(context)
+    ? "Orientações de Uso e Ajuste:"
+    : "Tutorial de Instalação:";
 }
 
 export function buildOpenAIProductDescriptionHtml(
   productName: string,
   value: unknown,
-  options: { maxCharacters?: number } = {}
+  options: { maxCharacters?: number; category?: string | null } = {}
 ) {
   const maxCharacters =
     options.maxCharacters ?? OPENAI_PRODUCT_DESCRIPTION_DEFAULT_MAX_CHARACTERS;
@@ -785,17 +818,21 @@ export function buildOpenAIProductDescriptionHtml(
   const content = validateOpenAIProductDescriptionContent(value, { maxCharacters });
   const html = sanitizeProductDescription([
     `<p><strong>${escapeGeneratedDescriptionHtml(normalizedProductName)}</strong></p>`,
-    content.introducao
-      ? `<p>${escapeGeneratedDescriptionHtml(content.introducao)}</p>`
-      : "",
+    ...content.introducao.map((paragraph) => (
+      `<p>${escapeGeneratedDescriptionHtml(paragraph)}</p>`
+    )),
     generatedDescriptionList("Ficha Técnica:", content.fichaTecnica),
-    generatedDescriptionList("Conteúdo da Embalagem:", content.conteudoEmbalagem),
+    generatedDescriptionList("Compatibilidade:", content.compatibilidade),
     generatedDescriptionList("Vantagens:", content.vantagens),
+    generatedDescriptionList("Conteúdo da Embalagem:", content.conteudoEmbalagem),
     generatedDescriptionList("Dimensões:", content.dimensoes),
-    generatedDescriptionList("Tutorial de Instalação:", content.tutorialInstalacao),
-    content.maisSobreProduto
-      ? `<p><strong>Mais sobre o Produto:</strong></p><p>${escapeGeneratedDescriptionHtml(content.maisSobreProduto)}</p>`
-      : ""
+    generatedDescriptionList(
+      tutorialSectionTitle(normalizedProductName, options.category),
+      content.tutorialInstalacao,
+      true
+    ),
+    generatedDescriptionList("Cuidados e Manutenção:", content.cuidadosManutencao),
+    generatedDescriptionParagraphs("Mais sobre o Produto:", content.maisSobreProduto)
   ].join(""));
   if (!productDescriptionHasVisibleContent(html) || html.length > maxCharacters) {
     invalidStructuredDescription({
@@ -820,81 +857,154 @@ function numericFactTokens(value: string) {
   );
 }
 
-function validateConservativeLocalFallback(
-  html: string,
-  content: OpenAIProductDescriptionContent,
-  product: ProductDescriptionSource,
-  sourceCount: number
-) {
-  if (sourceCount > 0) return;
-  const localSource = Object.values(sanitizedProductSource(product))
-    .filter((value) => value !== null && value !== undefined)
-    .map((value) => typeof value === "string" ? value : JSON.stringify(value))
-    .join("\n");
-  const localNumericFacts = numericFactTokens(localSource);
-  const visibleDescription = sanitizeHtml(html, {
-    allowedTags: [],
-    allowedAttributes: {},
-    disallowedTagsMode: "discard"
-  });
-  const generatedFields: Array<[string, string]> = [
-    ["introducao", content.introducao],
-    ...content.fichaTecnica.map((value, index) => [`fichaTecnica[${index}]`, value] as [string, string]),
-    ...content.conteudoEmbalagem.map((value, index) => [`conteudoEmbalagem[${index}]`, value] as [string, string]),
-    ...content.vantagens.map((value, index) => [`vantagens[${index}]`, value] as [string, string]),
-    ...content.dimensoes.map((value, index) => [`dimensoes[${index}]`, value] as [string, string]),
-    ...content.tutorialInstalacao.map((value, index) => [`tutorialInstalacao[${index}]`, value] as [string, string]),
-    ["maisSobreProduto", content.maisSobreProduto]
-  ];
-  const unsupportedNumericFact = generatedFields
-    .flatMap(([field, value]) => [...numericFactTokens(value)].map((raw) => ({ field, raw })))
-    .find(({ raw }) => !localNumericFacts.has(raw));
-  const normalizedDescription = normalizedComparisonKey(visibleDescription);
-  const normalizedLocalSource = normalizedComparisonKey(localSource);
-  const unsupportedConditionalSection = [
-    ["compatibilidade", /\b(compativ|aplica|serve)\w*/],
-    ["conteudo da embalagem", /\b(conteudo|embalagem|acompanha)\w*/],
-    ["tutorial de instalacao", /\b(instala|monta)\w*/],
-    ["cuidados e manutencao", /\b(cuidado|manutenc|limpeza)\w*/]
-  ].find(([heading, evidence]) => (
-    normalizedDescription.includes(heading as string) &&
-    !(evidence as RegExp).test(normalizedLocalSource)
-  ));
-  if (unsupportedNumericFact || unsupportedConditionalSection) {
-    const unsupportedHeading = String(unsupportedConditionalSection?.[0] ?? "");
-    const packageContentRejected = unsupportedHeading === "conteudo da embalagem";
-    throw new OpenAIProductDescriptionError(
-      "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE",
-      "A IA retornou informações sem sustentação suficiente.",
-      {
-        stage: packageContentRejected
-          ? "package_content_validation"
-          : "evidence_validation",
-        rule: unsupportedNumericFact
-          ? "local_numeric_evidence"
-          : packageContentRejected
-            ? "local_package_content_evidence"
-            : "local_conditional_section_evidence",
-        code: unsupportedNumericFact
-          ? "OPENAI_DESCRIPTION_NUMERIC_FACT_UNSUPPORTED"
-          : packageContentRejected
-            ? "OPENAI_DESCRIPTION_PACKAGE_CONTENT_UNSUPPORTED"
-            : "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE",
-        field: unsupportedNumericFact
-          ? unsupportedNumericFact.field
-          : packageContentRejected
-            ? "conteudoEmbalagem"
-            : unsupportedHeading || "$generated",
-        reason: unsupportedNumericFact
-          ? "unsupported_numeric_fact"
-          : packageContentRejected
-            ? "package_content_without_evidence"
-            : "unsupported_conditional_section",
-        generatedNumericFact: unsupportedNumericFact ?? null,
-        localNumericCandidates: [...localNumericFacts].slice(0, 20)
-      }
-    );
+const evidenceStopWords = new Set([
+  "a", "ao", "aos", "as", "com", "da", "das", "de", "do", "dos", "e",
+  "em", "o", "os", "para", "por", "produto", "seu", "sua", "um", "uma",
+  "altura", "aplicacao", "application", "attributes", "brand", "category",
+  "cm", "color", "condition", "cor", "categoria", "depth", "dimensao",
+  "dimensoes", "field", "height", "kg", "largura", "marca", "material",
+  "model", "modelo", "name", "nome", "peso", "profundidade", "type",
+  "tipo", "width"
+]);
+const evidenceSensitiveTerms = [
+  "abs", "eps", "policarbonato", "antirrisco", "uv", "ventilacao",
+  "exaustao", "forracao", "antialergica", "antibacteriana", "oculos",
+  "certificacao", "garantia", "viseira", "fecho"
+];
+
+function evidenceTokens(value: string) {
+  return new Set(
+    normalizedComparisonKey(value)
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length >= 2 && !evidenceStopWords.has(token))
+      .map((token) => token.length > 7 ? token.slice(0, 7) : token)
+  );
+}
+
+function canonicalNumericToken(raw: string) {
+  const normalized = raw.replace(/\s+/g, "").replace(/(\d)[x×](\d)/gi, "$1x$2");
+  if (/^\d+[x/]\d+$/i.test(normalized)) return normalized.toLocaleLowerCase("en-US");
+  const decimal = normalized.replace(/[^\d.,-]/g, "");
+  if (!decimal) return normalized.toLocaleLowerCase("en-US");
+  const lastComma = decimal.lastIndexOf(",");
+  const lastDot = decimal.lastIndexOf(".");
+  const separator = Math.max(lastComma, lastDot);
+  let canonical = decimal;
+  if (separator >= 0) {
+    const fractionLength = decimal.length - separator - 1;
+    canonical = fractionLength === 3 && !/[,.].*[,.]/.test(decimal)
+      ? decimal.replace(/[.,]/g, "")
+      : `${decimal.slice(0, separator).replace(/[.,]/g, "")}.${decimal.slice(separator + 1)}`;
   }
+  const parsed = Number(canonical);
+  return Number.isFinite(parsed) ? String(parsed) : normalized.toLocaleLowerCase("en-US");
+}
+
+function numericFactsCompatible(generated: string, evidence: string) {
+  const generatedFacts = [...numericFactTokens(generated)].map(canonicalNumericToken);
+  if (!generatedFacts.length) return true;
+  const evidenceFacts = new Set(
+    [...numericFactTokens(evidence)].map(canonicalNumericToken)
+  );
+  return generatedFacts.every((fact) => evidenceFacts.has(fact));
+}
+
+function itemHasEvidence(
+  value: string,
+  field: keyof OpenAIProductDescriptionContent,
+  evidence: readonly ProductDescriptionEvidenceFact[]
+) {
+  const normalized = normalizedComparisonKey(value);
+  const sensitive = evidenceSensitiveTerms.filter((term) => normalized.includes(term));
+  const generatedTokens = evidenceTokens(value);
+  if (sensitive.some((term) => !evidence.some((candidate) => (
+    normalizedComparisonKey(candidate.fact).includes(term)
+  )))) return false;
+  if (!numericFactsCompatible(value, evidence.map((candidate) => candidate.fact).join(" "))) {
+    return false;
+  }
+  return evidence.some((candidate) => {
+    if (
+      field === "conteudoEmbalagem" &&
+      !/(conteudo|embalagem|acompanha|quantidade|itensPorCaixa)/i.test(
+        `${candidate.sourceField} ${candidate.fact}`
+      )
+    ) return false;
+    if (
+      field === "compatibilidade" &&
+      !/(compatib|aplica|veiculo|modelo|linha|sistema|equipamento)/i.test(
+        `${candidate.sourceField} ${candidate.fact}`
+      )
+    ) return false;
+    const candidateTokens = evidenceTokens(candidate.fact);
+    const overlap = [...generatedTokens].filter((token) => candidateTokens.has(token));
+    const candidateHasMatchingNumber = numericFactTokens(value).size > 0 &&
+      numericFactsCompatible(value, candidate.fact);
+    return overlap.length >= Math.min(2, Math.max(1, generatedTokens.size)) ||
+      (sensitive.length > 0 && overlap.length >= 1) ||
+      (candidateHasMatchingNumber && overlap.length >= 1);
+  });
+}
+
+export function filterOpenAIProductDescriptionByEvidence(
+  content: OpenAIProductDescriptionContent,
+  evidence: readonly ProductDescriptionEvidenceFact[]
+) {
+  const filter = <K extends keyof OpenAIProductDescriptionContent>(
+    field: K,
+    values: OpenAIProductDescriptionContent[K]
+  ) => values.filter((value, index) => {
+    const supported = itemHasEvidence(value, field, evidence);
+    if (!supported) {
+      const unsupportedNumericFact = [...numericFactTokens(value)][0] ?? null;
+      const packageContentRejected = field === "conteudoEmbalagem";
+      throw new OpenAIProductDescriptionError(
+        "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE",
+        "A IA retornou informações sem sustentação suficiente.",
+        {
+          stage: packageContentRejected
+            ? "package_content_validation"
+            : "evidence_validation",
+          rule: unsupportedNumericFact
+            ? "mapped_numeric_evidence"
+            : packageContentRejected
+              ? "mapped_package_content_evidence"
+              : "mapped_fact_evidence",
+          code: unsupportedNumericFact
+            ? "OPENAI_DESCRIPTION_NUMERIC_FACT_UNSUPPORTED"
+            : packageContentRejected
+              ? "OPENAI_DESCRIPTION_PACKAGE_CONTENT_UNSUPPORTED"
+              : "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE",
+          field: `${field}[${index}]`,
+          reason: unsupportedNumericFact
+            ? "unsupported_numeric_fact"
+            : packageContentRejected
+              ? "package_content_without_evidence"
+              : "fact_without_evidence",
+          generatedNumericFact: unsupportedNumericFact
+            ? { raw: unsupportedNumericFact, field: `${field}[${index}]` }
+            : null,
+          localNumericCandidates: evidence
+            .flatMap((item) => [...numericFactTokens(item.fact)])
+            .slice(0, 20)
+        }
+      );
+    }
+    return supported;
+  });
+  const filtered: OpenAIProductDescriptionContent = {
+    introducao: filter("introducao", content.introducao),
+    fichaTecnica: filter("fichaTecnica", content.fichaTecnica),
+    compatibilidade: filter("compatibilidade", content.compatibilidade),
+    vantagens: filter("vantagens", content.vantagens),
+    conteudoEmbalagem: filter("conteudoEmbalagem", content.conteudoEmbalagem),
+    dimensoes: filter("dimensoes", content.dimensoes),
+    tutorialInstalacao: filter("tutorialInstalacao", content.tutorialInstalacao),
+    cuidadosManutencao: filter("cuidadosManutencao", content.cuidadosManutencao),
+    maisSobreProduto: filter("maisSobreProduto", content.maisSobreProduto)
+  };
+  return { content: filtered, fieldsOmitted: 0 };
 }
 
 type ParsedSdkResponse = {
@@ -905,7 +1015,7 @@ type ParsedSdkResponse = {
 };
 
 type OpenAIParseCall = (
-  body: ReturnType<typeof buildOpenAIProductDescriptionRequest>,
+  body: Record<string, unknown>,
   options: { signal: AbortSignal }
 ) => {
   withResponse(): Promise<{
@@ -946,8 +1056,7 @@ export function createOfficialOpenAIProductDescriptionResponse(
   ));
 
   return async (body, options) => {
-    const request = body as ReturnType<typeof buildOpenAIProductDescriptionRequest>;
-    const { data, response } = await parse(request, options).withResponse();
+    const { data, response } = await parse(body, options).withResponse();
     return {
       httpStatus: response.status,
       status: data.status ?? null,
@@ -959,49 +1068,6 @@ export function createOfficialOpenAIProductDescriptionResponse(
         response.headers?.get("x-request-id")
       )
     };
-  };
-}
-
-function readSourceDomains(output: unknown) {
-  const domains = new Set<string>();
-  let searchCount = 0;
-  const visit = (value: unknown) => {
-    if (Array.isArray(value)) {
-      value.forEach(visit);
-      return;
-    }
-    if (!isPlainRecord(value)) return;
-    if (value.type === "web_search_call") searchCount += 1;
-    if (typeof value.url === "string") {
-      try {
-        domains.add(new URL(value.url).hostname.toLocaleLowerCase("en-US"));
-      } catch {
-        // Provider source metadata can be absent or malformed; it is never trusted.
-      }
-    }
-    Object.values(value).forEach(visit);
-  };
-  visit(output);
-  return { domains: [...domains], searchCount };
-}
-
-function sourceDiagnostics(
-  output: unknown,
-  officialDomains: readonly string[] | undefined
-) {
-  const sources = readSourceDomains(output);
-  const official = new Set(sanitizeOfficialDomains(officialDomains));
-  return {
-    searchCount: sources.searchCount,
-    sourceCount: sources.domains.length,
-    officialSourceCount: sources.domains.filter((domain) => (
-      [...official].some((officialDomain) => (
-        domain === officialDomain || domain.endsWith(`.${officialDomain}`)
-      ))
-    )).length,
-    sourceDomainHashes: sources.domains
-      .map((domain) => createHash("sha256").update(domain).digest("hex").slice(0, 12))
-      .sort()
   };
 }
 
@@ -1172,13 +1238,15 @@ export async function generateOpenAIProductDescription(
   const timeoutMs = options.timeoutMs ?? OPENAI_PRODUCT_DESCRIPTION_TIMEOUT_MS;
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   let response: OpenAIProductDescriptionProviderResponse | null = null;
+  let researchResponse: OpenAIProductDescriptionProviderResponse | null = null;
+  let research = emptyProductDescriptionResearchResult();
+  let providerCallCount = 0;
   let terminalLogged = false;
 
   const log = (
     stage: OpenAIProductDescriptionLogEvent["stage"],
     overrides: Partial<OpenAIProductDescriptionLogEvent> = {}
   ) => {
-    const diagnostics = sourceDiagnostics(response?.output, input.officialDomains);
     safeLog(options.logger, {
       correlationId,
       stage,
@@ -1186,9 +1254,19 @@ export async function generateOpenAIProductDescription(
       durationMs: Date.now() - startedAt,
       httpStatus: response?.httpStatus ?? null,
       responseStatus: response?.status ?? null,
-      ...diagnostics,
-      usedWebSearch: diagnostics.searchCount > 0,
-      evidenceLevel: diagnostics.sourceCount > 0 ? "LOCAL_AND_WEB" : "LOCAL_ONLY",
+      searchCount: research.searchCount,
+      sourceCount: research.sourceCount,
+      officialSourceCount: research.officialSourceCount,
+      sourceDomainHashes: research.sourceDomainHashes,
+      queryCount: research.summary.queriesAttempted,
+      resultCount: research.summary.resultsFound,
+      discardedSourceCount: research.summary.discardedSources,
+      discardedSourceReasonCounts: research.summary.discardReasonCounts,
+      fieldsConfirmed: research.summary.fieldsConfirmed,
+      fieldsOmitted: research.summary.fieldsOmitted,
+      providerCallCount,
+      usedWebSearch: research.usedWebSearch,
+      evidenceLevel: research.sourceCount > 0 ? "LOCAL_AND_WEB" : "LOCAL_ONLY",
       requestId: response?.requestId ?? null,
       errorClass: null,
       errorCode: null,
@@ -1205,7 +1283,7 @@ export async function generateOpenAIProductDescription(
 
   log("request_started");
   try {
-    const request = buildOpenAIProductDescriptionRequest(input, config);
+    const queries = buildProductDescriptionResearchQueries(input.product);
     const timeout = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => {
         controller.abort();
@@ -1222,6 +1300,41 @@ export async function generateOpenAIProductDescription(
         ));
       }, timeoutMs);
     });
+    if (queries.length > 0) {
+      const researchRequest = buildOpenAIProductDescriptionResearchRequest(
+        input.product,
+        config,
+        sanitizeOfficialDomains(input.officialDomains)
+      );
+      providerCallCount += 1;
+      researchResponse = await Promise.race([
+        createResponse(researchRequest, { signal: controller.signal }),
+        timeout
+      ]);
+      if (
+        researchResponse.status === "completed" &&
+        researchResponse.outputParsed !== undefined &&
+        researchResponse.outputParsed !== null &&
+        !researchResponse.refusalPresent
+      ) {
+        research = validateProductDescriptionResearch(
+          researchResponse.outputParsed,
+          researchResponse.output,
+          input.product,
+          queries.length
+        );
+      } else {
+        research = emptyProductDescriptionResearchResult(queries.length);
+      }
+    }
+    const localEvidence = buildLocalProductDescriptionEvidence(input.product);
+    const combinedEvidence = [...localEvidence, ...research.evidence];
+    const request = buildOpenAIProductDescriptionRequest(
+      input,
+      config,
+      combinedEvidence
+    );
+    providerCallCount += 1;
     response = await Promise.race([
       createResponse(request, { signal: controller.signal }),
       timeout
@@ -1280,29 +1393,41 @@ export async function generateOpenAIProductDescription(
       );
     }
 
-    const content = validateOpenAIProductDescriptionContent(
+    const parsedContent = validateOpenAIProductDescriptionContent(
       response.outputParsed,
       { maxCharacters: config.maxCharacters }
     );
+    const evidenceResult = filterOpenAIProductDescriptionByEvidence(
+      parsedContent,
+      combinedEvidence
+    );
+    research = {
+      ...research,
+      summary: {
+        ...research.summary,
+        fieldsConfirmed: combinedEvidence.length,
+        fieldsOmitted: research.summary.fieldsOmitted + evidenceResult.fieldsOmitted
+      }
+    };
     const html = buildOpenAIProductDescriptionHtml(
       input.product.name,
-      content,
-      { maxCharacters: config.maxCharacters }
+      evidenceResult.content,
+      {
+        maxCharacters: config.maxCharacters,
+        category: input.product.category
+      }
     );
-    const diagnostics = sourceDiagnostics(response.output, input.officialDomains);
-    validateConservativeLocalFallback(
-      html,
-      content,
-      input.product,
-      diagnostics.sourceCount
-    );
+    const warnings = research.officialSourceCount === 0
+      ? ["OFFICIAL_SOURCES_NOT_FOUND"]
+      : [];
     const result: OpenAIProductDescriptionResult = {
       html,
-      usedWebSearch: diagnostics.searchCount > 0,
-      warnings: [],
-      evidenceLevel: diagnostics.sourceCount > 0
+      usedWebSearch: research.usedWebSearch,
+      warnings,
+      evidenceLevel: research.sourceCount > 0
         ? "LOCAL_AND_WEB"
-        : "LOCAL_ONLY"
+        : "LOCAL_ONLY",
+      researchSummary: research.summary
     };
     terminalLogged = true;
     log("request_completed");

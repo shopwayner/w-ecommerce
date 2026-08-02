@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NextResponse } from "next/server";
 import { createProductDescriptionAiPost } from "@/lib/services/openai-product-description-route";
+import { buildOpenAIProductDescriptionResearchRequest } from "@/lib/services/openai-product-description-research";
 import {
   buildOpenAIProductDescriptionHtml,
   buildOpenAIProductDescriptionRequest,
@@ -88,23 +89,27 @@ const partialProduct: ProductDescriptionSource = {
 };
 
 const validContent: OpenAIProductDescriptionContent = {
-  introducao: "Abraçadeira destinada à organização de instalações elétricas com eletroduto.",
+  introducao: ["Abraçadeira destinada à organização de instalações elétricas com eletroduto."],
   fichaTecnica: ["Marca: Andaluz", "Material: PVC", "Cor: Preto"],
+  compatibilidade: [],
   conteudoEmbalagem: [],
   vantagens: ["Aplicação em eletroduto 3/4"],
   dimensoes: [],
   tutorialInstalacao: [],
-  maisSobreProduto: ""
+  cuidadosManutencao: [],
+  maisSobreProduto: []
 };
 
 const partialContent: OpenAIProductDescriptionContent = {
-  introducao: "Suporte destinado à organização de instalações conforme os dados cadastrados.",
+  introducao: ["Suporte destinado à organização de instalações conforme os dados cadastrados."],
   fichaTecnica: ["Tipo: Suporte"],
+  compatibilidade: [],
   conteudoEmbalagem: [],
-  vantagens: ["Finalidade: Organização da instalação"],
+  vantagens: ["Uso como suporte para instalação"],
   dimensoes: [],
   tutorialInstalacao: [],
-  maisSobreProduto: ""
+  cuidadosManutencao: [],
+  maisSobreProduto: []
 };
 
 const validHtml = buildOpenAIProductDescriptionHtml(
@@ -116,7 +121,17 @@ const validResult: OpenAIProductDescriptionResult = {
   html: validHtml,
   usedWebSearch: true,
   warnings: [],
-  evidenceLevel: "LOCAL_AND_WEB"
+  evidenceLevel: "LOCAL_AND_WEB",
+  researchSummary: {
+    queriesAttempted: 5,
+    resultsFound: 2,
+    officialSourcesFound: 1,
+    usefulSourcesFound: 1,
+    fieldsConfirmed: 8,
+    fieldsOmitted: 0,
+    discardedSources: 0,
+    discardReasonCounts: {}
+  }
 };
 
 function parsedContent(overrides: Partial<OpenAIProductDescriptionContent> = {}) {
@@ -236,7 +251,9 @@ test("structured output is a strict object with the complete response contract",
   assert.equal(format.strict, true);
   assert.equal(schema.type, "object");
   assert.deepEqual(schema.required?.sort(), [
+    "compatibilidade",
     "conteudoEmbalagem",
+    "cuidadosManutencao",
     "dimensoes",
     "fichaTecnica",
     "introducao",
@@ -245,7 +262,7 @@ test("structured output is a strict object with the complete response contract",
     "vantagens"
   ]);
   assert.equal(schema.additionalProperties, false);
-  assert.equal(schema.properties?.introducao?.type, "string");
+  assert.equal(schema.properties?.introducao?.type, "array");
   assert.equal(schema.properties?.fichaTecnica?.type, "array");
   assert.equal(schema.properties?.fichaTecnica?.items?.type, "string");
   assert.equal(schema.properties?.fichaTecnica?.items?.minLength, 1);
@@ -307,15 +324,16 @@ test("a highly specific title can enable web search", () => {
 });
 
 test("web request uses Responses API tools only when evidence is sufficient", () => {
-  const request = buildOpenAIProductDescriptionRequest(
-    { product: completeProduct, officialDomains: ["andaluz.com.br"] },
-    readOpenAIProductDescriptionConfig(enabledEnv)
+  const request = buildOpenAIProductDescriptionResearchRequest(
+    completeProduct,
+    readOpenAIProductDescriptionConfig(enabledEnv),
+    ["andaluz.com.br"]
   );
   assert.equal(request.model, "test-model-with-web-search");
   assert.equal(request.store, false);
   assert.equal(request.tools?.[0]?.type, "web_search");
   assert.deepEqual(request.tools?.[0]?.filters?.allowed_domains, ["andaluz.com.br"]);
-  assert.equal(request.tool_choice, "auto");
+  assert.equal(request.tool_choice, "required");
 });
 
 test("prompt establishes local precedence and official source priority", () => {
@@ -325,12 +343,11 @@ test("prompt establishes local precedence and official source priority", () => {
   );
   const prompt = request.input[0].content;
   assert.match(prompt, /Dados locais estruturados prevalecem/);
-  assert.match(prompt, /fabricante, manual e catálogo oficial/);
   assert.match(prompt, /Nunca invente material, compatibilidade/);
   assert.match(prompt, /JSON estruturado/);
-  assert.match(prompt, /introducao, fichaTecnica, conteudoEmbalagem/);
+  assert.match(prompt, /introducao, fichaTecnica, compatibilidade/);
   assert.match(prompt, /não gere HTML, Markdown, títulos de seção/i);
-  assert.match(prompt, /exatamente as sete propriedades do schema/);
+  assert.match(prompt, /exatamente as nove propriedades do schema/);
 });
 
 test("valid structured content is normalized and rendered only by the backend", () => {
@@ -343,7 +360,7 @@ test("valid structured content is normalized and rendered only by the backend", 
 test("provider HTML is rejected instead of being trusted or sanitized", async () => {
   await expectDescriptionError(
     () => validateOpenAIProductDescriptionContent(parsedContent({
-      introducao: "<p>Conteúdo criado pela IA</p>"
+      introducao: ["<p>Conteúdo criado pela IA</p>"]
     })),
     "OPENAI_DESCRIPTION_INVALID_RESPONSE"
   );
@@ -356,7 +373,7 @@ test("URLs, emoji and citations in structured text are rejected", async () => {
     "Descrição segura do produto conforme [fonte: 1] consultada."
   ]) {
     await expectDescriptionError(
-      () => validateOpenAIProductDescriptionContent(parsedContent({ introducao: text })),
+      () => validateOpenAIProductDescriptionContent(parsedContent({ introducao: [text] })),
       "OPENAI_DESCRIPTION_INVALID_RESPONSE"
     );
   }
@@ -396,13 +413,15 @@ test("invalid structured response is rejected", async () => {
 test("completely empty structured content is rejected", async () => {
   await expectDescriptionError(
     () => validateOpenAIProductDescriptionContent({
-      introducao: "",
+      introducao: [],
       fichaTecnica: [],
+      compatibilidade: [],
       conteudoEmbalagem: [],
       vantagens: [],
       dimensoes: [],
       tutorialInstalacao: [],
-      maisSobreProduto: ""
+      cuidadosManutencao: [],
+      maisSobreProduto: []
     }),
     "OPENAI_DESCRIPTION_INVALID_RESPONSE"
   );
@@ -429,7 +448,7 @@ test("free text provider response is rejected without fallback interpretation", 
     ),
     "OPENAI_DESCRIPTION_INVALID_RESPONSE"
   );
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
 });
 
 test("local-only fallback rejects unsupported numeric facts", async () => {
@@ -443,7 +462,7 @@ test("local-only fallback rejects unsupported numeric facts", async () => {
         logger: (event) => logs.push(event),
         createResponse: providerResponse(
           parsedContent({
-            introducao: "Suporte para instalação com capacidade técnica declarada de 999 kg.",
+            introducao: ["Suporte para instalação com capacidade técnica declarada de 999 kg."],
             fichaTecnica: ["Tipo: Suporte"],
             vantagens: ["Finalidade: Organização da instalação"]
           }),
@@ -457,12 +476,12 @@ test("local-only fallback rejects unsupported numeric facts", async () => {
   assert.equal(terminal?.errorClass, "OpenAIProductDescriptionError");
   assert.equal(terminal?.errorCode, "OPENAI_DESCRIPTION_NUMERIC_FACT_UNSUPPORTED");
   assert.equal(terminal?.validationStage, "evidence_validation");
-  assert.equal(terminal?.validationRule, "local_numeric_evidence");
-  assert.equal(terminal?.rejectedField, "introducao");
+  assert.equal(terminal?.validationRule, "mapped_numeric_evidence");
+  assert.equal(terminal?.rejectedField, "introducao[0]");
   assert.equal(terminal?.rejectionReason, "unsupported_numeric_fact");
   assert.deepEqual(terminal?.generatedNumericFact, {
     raw: "999",
-    field: "introducao"
+    field: "introducao[0]"
   });
   assert.equal(terminal?.retryCount, 0);
   assert.notEqual(terminal?.errorCode, null);
@@ -505,7 +524,7 @@ test("package content without local evidence has its own stable diagnostic", asy
         logger: (event) => logs.push(event),
         createResponse: providerResponse(
           parsedContent({
-            introducao: "Suporte destinado à organização da instalação conforme os dados cadastrados.",
+            introducao: ["Suporte destinado à organização da instalação conforme os dados cadastrados."],
             fichaTecnica: ["Tipo: Suporte"],
             conteudoEmbalagem: ["Produto principal"],
             vantagens: []
@@ -519,8 +538,8 @@ test("package content without local evidence has its own stable diagnostic", asy
   const terminal = logs.at(-1);
   assert.equal(terminal?.errorCode, "OPENAI_DESCRIPTION_PACKAGE_CONTENT_UNSUPPORTED");
   assert.equal(terminal?.validationStage, "package_content_validation");
-  assert.equal(terminal?.validationRule, "local_package_content_evidence");
-  assert.equal(terminal?.rejectedField, "conteudoEmbalagem");
+  assert.equal(terminal?.validationRule, "mapped_package_content_evidence");
+  assert.equal(terminal?.rejectedField, "conteudoEmbalagem[0]");
   assert.equal(terminal?.rejectionReason, "package_content_without_evidence");
 });
 
@@ -583,7 +602,7 @@ test("official SDK adapter uses responses.parse with zero retry", async () => {
   assert.deepEqual(response.outputParsed, validContent);
 });
 
-test("one explicit generation performs one provider request and no retry", async () => {
+test("one explicit generation performs one research call and one generation call without retry", async () => {
   let calls = 0;
   const logs: OpenAIProductDescriptionLogEvent[] = [];
   const result = await generateOpenAIProductDescription(
@@ -598,7 +617,7 @@ test("one explicit generation performs one provider request and no retry", async
       }
     }
   );
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
   assert.equal(result.html, validHtml);
   assert.equal(logs.at(-1)?.retryCount, 0);
   assert.doesNotMatch(JSON.stringify(logs), /test-key|Abraçadeira|PVC/);
@@ -809,6 +828,13 @@ test("route enriches telemetry with product user and tenant context", async () =
         sourceCount: 0,
         officialSourceCount: 0,
         sourceDomainHashes: [],
+        queryCount: 1,
+        resultCount: 0,
+        discardedSourceCount: 0,
+        discardedSourceReasonCounts: {},
+        fieldsConfirmed: 0,
+        fieldsOmitted: 0,
+        providerCallCount: 1,
         usedWebSearch: true,
         evidenceLevel: "LOCAL_ONLY",
         requestId: "req_safe",
@@ -941,7 +967,7 @@ test("request lock is always released after a generation failure", async () => {
   assert.equal(released, 1);
 });
 
-test("provider metadata is rejected and backend warnings stay empty", async () => {
+test("provider metadata is rejected and backend owns fallback warnings", async () => {
   await expectDescriptionError(
     () => validateOpenAIProductDescriptionContent({
       ...validContent,
@@ -953,7 +979,7 @@ test("provider metadata is rejected and backend warnings stay empty", async () =
     { product: completeProduct },
     { env: enabledEnv, createResponse: providerResponse() }
   );
-  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.warnings, ["OFFICIAL_SOURCES_NOT_FOUND"]);
   assert.doesNotMatch(result.html, /Fonte web conflitante/);
 });
 
