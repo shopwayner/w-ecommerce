@@ -389,11 +389,45 @@ test("prompt establishes local precedence and official source priority", () => {
   );
   const prompt = request.input[0].content;
   assert.match(prompt, /Dados locais estruturados prevalecem/);
-  assert.match(prompt, /Nunca invente material, compatibilidade/);
+  assert.match(prompt, /NUNCA INVENTE INFORMAÇÕES\. NUNCA\./);
+  assert.match(prompt, /1\. Fabricante\.[\s\S]*2\. Manual\.[\s\S]*3\. Catálogo oficial\.[\s\S]*4\. Site oficial[\s\S]*5\. Distribuidor autorizado/);
+  assert.match(prompt, /pesquisa e hierarquia de fontes/i);
+  assert.match(prompt, /profissional, natural, objetiva, clara e fácil de entender/i);
+  assert.match(prompt, /Mercado Livre, Amazon, Shopee, Magalu, Olist e Bling/);
+  assert.match(prompt, /links, URLs, hiperlinks/);
+  assert.match(prompt, /citações automáticas, fontes, notas de rodapé/);
+  assert.match(prompt, /link do fabricante, link do anúncio, PDF do catálogo, manual, foto da embalagem e foto do produto/);
+  assert.match(prompt, /Antes de finalizar, revise todo o conteúdo/);
   assert.match(prompt, /JSON estruturado/);
   assert.match(prompt, /introducao, fichaTecnica, compatibilidade/);
+  assert.match(prompt, /ConteudoEmbalagem deve conter somente itens e quantidades oficialmente informados/);
+  assert.match(prompt, /TutorialInstalacao só deve ser preenchido quando fizer sentido/);
+  assert.match(prompt, /CuidadosManutencao deve conter apenas/);
+  assert.match(prompt, /Conhecimento geral serve somente para organizar/);
   assert.match(prompt, /não gere HTML, Markdown, títulos de seção/i);
   assert.match(prompt, /exatamente as nove propriedades do schema/);
+  assert.match(prompt, /O backend controla o nome do produto, os títulos, a ordem, os parágrafos, as listas e o HTML final/);
+});
+
+test("research and generation calls keep separate responsibilities", () => {
+  const config = readOpenAIProductDescriptionConfig(enabledEnv);
+  const research = buildOpenAIProductDescriptionResearchRequest(
+    completeProduct,
+    config
+  );
+  const generation = buildOpenAIProductDescriptionRequest(
+    { product: completeProduct },
+    config
+  );
+  assert.equal(research.input[0].role, "system");
+  assert.match(research.input[0].content, /Pesquise cuidadosamente o produto exato/);
+  assert.match(research.input[0].content, /ausência de GTIN na página não invalida sozinha/);
+  assert.match(research.input[0].content, /Distribuidor autorizado só é aceito/);
+  assert.equal(research.text.format.type, "json_schema");
+  assert.equal(generation.input[0].role, "system");
+  assert.match(generation.input[0].content, /NUNCA INVENTE INFORMAÇÕES/);
+  assert.match(generation.input[0].content, /Use exclusivamente os fatos do mapa de evidências/);
+  assert.equal(generation.text.format.type, "json_schema");
 });
 
 test("valid structured content is normalized and rendered only by the backend", () => {

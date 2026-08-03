@@ -342,6 +342,17 @@ export function buildProductDescriptionResearchQueries(
   const brand = clean(product.brand);
   const model = clean(product.model);
   const manufacturerSku = clean(product.manufacturerSku);
+  const brandTokens = new Set(comparisonKey(brand).split(/\s+/).filter(Boolean));
+  const nameWithoutBrandTokens = clean(product.name).split(/\s+/).filter((token) => (
+    !brandTokens.has(comparisonKey(token))
+  ));
+  const inferredModel = clean(model || nameWithoutBrandTokens.slice(1, 3).join(" "));
+  const conciseIdentity = clean([
+    nameWithoutBrandTokens[0],
+    brand,
+    inferredModel
+  ].filter(Boolean).join(" "));
+  const lineIdentity = clean([brand, inferredModel.split(/\s+/)[0]].filter(Boolean).join(" "));
   const nameTokens = clean(product.name).split(/\s+/).filter((token) => token.length >= 3);
   const eligible =
     Boolean((gtin && isValidGtin(gtin)) || (packagingGtin && isValidGtin(packagingGtin))) ||
@@ -351,11 +362,12 @@ export function buildProductDescriptionResearchQueries(
   if (!eligible) return [];
   if (gtin && isValidGtin(gtin)) add(gtin);
   else if (packagingGtin && isValidGtin(packagingGtin)) add(packagingGtin);
-  if (brand && model) add(`${brand} ${model}`);
-  if (brand && manufacturerSku) add(`${brand} ${manufacturerSku}`);
+  if (!gtin && !packagingGtin && brand && model) add(`${brand} ${model}`);
+  if (!gtin && !packagingGtin && brand && manufacturerSku) add(`${brand} ${manufacturerSku}`);
   add(product.name);
-  if (brand) add(`${brand} ${model || product.name} site oficial ficha técnica`);
-  if (brand) add(`${brand} ${model || product.name} manual catálogo PDF`);
+  if (brand && conciseIdentity) add(conciseIdentity);
+  if (lineIdentity) add(`${lineIdentity} ficha técnica`);
+  if (lineIdentity) add(`${lineIdentity} manual catálogo`);
   return queries.slice(0, OPENAI_PRODUCT_DESCRIPTION_MAX_RESEARCH_QUERIES);
 }
 
@@ -388,12 +400,14 @@ export function buildOpenAIProductDescriptionResearchRequest(
     input: [{
       role: "system" as const,
       content: [
-        "Pesquise documentação técnica do produto exato. Retorne somente JSON estruturado.",
-        "Execute as consultas fornecidas na ordem, sem repetir e pare quando houver evidência suficiente.",
-        "Priorize fabricante, manual, catálogo e ficha técnica oficiais; depois distribuidor autorizado.",
+        "Você é especialista em pesquisa técnica confiável para cadastro de produtos em e-commerce. Pesquise cuidadosamente o produto exato e retorne somente o JSON estruturado solicitado.",
+        "Execute as consultas fornecidas na ordem, sem repetir, e explore fabricante, manual, catálogo, ficha técnica e site oficial antes de concluir que não há evidência.",
+        "A prioridade é: fabricante; manual; catálogo oficial; site ou ficha técnica oficial; distribuidor autorizado com correspondência inequívoca.",
+        "Use GTIN, EAN, código do fabricante, referência, modelo, nome e marca para confirmar a identidade. A ausência de GTIN na página não invalida sozinha uma fonte quando marca e linha ou modelo correspondem inequivocamente.",
+        "Distribuidor autorizado só é aceito quando a ficha é clara, a reputação da fonte é compatível com essa classificação e marca, linha, modelo ou identificador correspondem sem conflito.",
         "Anúncio de vendedor nunca é fonte principal. Em conflito, preserve a fonte oficial ou omita o fato.",
         "Leia manuais e catálogos PDF quando encontrados, mas use somente fatos ligados ao GTIN, modelo, variante ou linha comprovada.",
-        "OFFICIAL_PRODUCT_LINE só é válido quando a fonte declara explicitamente que o fato vale para toda a linha.",
+        "OFFICIAL_PRODUCT_LINE só é válido para fonte oficial que declare explicitamente que o fato vale para toda a linha. Não aplique à variante um fato declarado apenas para outra cor, tamanho, tensão, versão ou configuração.",
         "Não deduza materiais, compatibilidade, certificação, conteúdo da embalagem, garantia ou medidas.",
         "O domínio declarado deve corresponder a uma fonte realmente consultada pela ferramenta."
       ].join("\n")
@@ -462,6 +476,41 @@ function identifierMatches(
   ));
 }
 
+const genericIdentityTokenPattern = /^(?:produto|kit|jogo|peca|peça|item|unidade|para|com|sem|de|da|do|das|dos|em)$/i;
+
+function meaningfulNameTokens(product: ProductDescriptionResearchProduct) {
+  const brandTokens = new Set(comparisonKey(product.brand ?? "").split(/\s+/).filter(Boolean));
+  return [...new Set(
+    comparisonKey(product.name)
+      .split(/[^a-z0-9]+/)
+      .filter((token) => (
+        token.length >= 3 &&
+        !/^\d+$/.test(token) &&
+        !brandTokens.has(token) &&
+        !genericIdentityTokenPattern.test(token)
+      ))
+  )];
+}
+
+function productIdentityMatches(
+  identifiers: readonly string[],
+  product: ProductDescriptionResearchProduct,
+  minimumNameTokenMatches: number
+) {
+  if (identifierMatches(identifiers, product)) return true;
+  const normalized = identifiers.map(comparisonKey).filter(Boolean);
+  const joined = normalized.join(" ");
+  const identifierTokens = new Set(joined.split(/[^a-z0-9]+/).filter(Boolean));
+  const brand = comparisonKey(product.brand ?? "");
+  if (!brand || !normalized.some((candidate) => (
+    candidate.includes(brand) || brand.includes(candidate)
+  ))) return false;
+  const matchedNameTokens = meaningfulNameTokens(product).filter((token) => (
+    identifierTokens.has(token)
+  ));
+  return matchedNameTokens.length >= minimumNameTokenMatches;
+}
+
 function matchedIdentifierTypes(
   identifiers: readonly string[],
   product: ProductDescriptionResearchProduct
@@ -520,7 +569,7 @@ export function validateProductDescriptionResearch(
     }
     if (
       ["EXACT_PRODUCT", "OFFICIAL_VARIANT"].includes(source.evidenceLevel) &&
-      !identifierMatches(source.matchedIdentifiers ?? [], product)
+      !productIdentityMatches(source.matchedIdentifiers ?? [], product, 2)
     ) {
       incrementCount(discardReasonCounts, "IDENTIFIER_MISMATCH");
       continue;
@@ -530,6 +579,20 @@ export function validateProductDescriptionResearch(
       !source.sourceType.startsWith("OFFICIAL_")
     ) {
       incrementCount(discardReasonCounts, "LINE_EVIDENCE_NOT_OFFICIAL");
+      continue;
+    }
+    if (
+      source.evidenceLevel === "OFFICIAL_PRODUCT_LINE" &&
+      !productIdentityMatches(source.matchedIdentifiers ?? [], product, 1)
+    ) {
+      incrementCount(discardReasonCounts, "LINE_IDENTITY_MISMATCH");
+      continue;
+    }
+    if (
+      source.evidenceLevel === "AUTHORIZED_DISTRIBUTOR" &&
+      !productIdentityMatches(source.matchedIdentifiers ?? [], product, 2)
+    ) {
+      incrementCount(discardReasonCounts, "DISTRIBUTOR_IDENTITY_MISMATCH");
       continue;
     }
     usefulSources.push(source);

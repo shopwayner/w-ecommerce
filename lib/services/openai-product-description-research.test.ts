@@ -195,16 +195,27 @@ test("research falls back to brand and model", () => {
   assert.equal(queries[0], "Race Tech Play Monocolor");
 });
 
+test("research builds controlled SKU 10311 queries when model is absent", () => {
+  const queries = buildProductDescriptionResearchQueries({ ...helmet, model: null });
+  assert.deepEqual(queries, [
+    "7908167822585",
+    helmet.name,
+    "Capacete Race Tech Play Monocolor",
+    "Race Tech Play ficha técnica",
+    "Race Tech Play manual catálogo"
+  ]);
+});
+
 test("research plan includes the full specific product name", () => {
   assert.ok(buildProductDescriptionResearchQueries(helmet).includes(helmet.name));
 });
 
 test("research plan includes an official technical-sheet query", () => {
-  assert.match(buildProductDescriptionResearchQueries(helmet).join("\n"), /site oficial ficha técnica/);
+  assert.match(buildProductDescriptionResearchQueries(helmet).join("\n"), /Race Tech Play ficha técnica/);
 });
 
-test("research plan includes a manual or catalog PDF query", () => {
-  assert.match(buildProductDescriptionResearchQueries(helmet).join("\n"), /manual catálogo PDF/);
+test("research plan includes a controlled manual and catalog query", () => {
+  assert.match(buildProductDescriptionResearchQueries(helmet).join("\n"), /Race Tech Play manual catálogo/);
 });
 
 test("research plan is unique and limited to five queries", () => {
@@ -311,6 +322,17 @@ test("another model without an exact identifier is not used", () => {
   assert.equal(result.summary.discardReasonCounts.IDENTIFIER_MISMATCH, 1);
 });
 
+test("an exact source without GTIN is accepted when brand and model match", () => {
+  const payload = {
+    sources: [{
+      ...researchPayload.sources[0],
+      matchedIdentifiers: ["Race Tech", "Play Monocolor"]
+    }]
+  };
+  const result = validateProductDescriptionResearch(payload, providerOutput, helmet, 5);
+  assert.equal(result.sourceCount, 1);
+});
+
 test("official product-line evidence can be applied to a variant", () => {
   const payload = {
     sources: [{
@@ -327,6 +349,42 @@ test("official product-line evidence can be applied to a variant", () => {
   assert.equal(result.evidence[0]?.evidenceLevel, "OFFICIAL_PRODUCT_LINE");
 });
 
+test("an official line source can match brand and declared line without GTIN", () => {
+  const payload = {
+    sources: [{
+      ...researchPayload.sources[0],
+      evidenceLevel: "OFFICIAL_PRODUCT_LINE" as const,
+      matchedIdentifiers: ["Race Tech", "Play"],
+      facts: [{
+        fact: "A linha Play foi desenvolvida para uso urbano",
+        sourceField: "catalog.play.application",
+        confidence: "HIGH" as const
+      }]
+    }]
+  };
+  const result = validateProductDescriptionResearch(payload, providerOutput, helmet, 5);
+  assert.equal(result.sourceCount, 1);
+  assert.equal(result.evidence[0]?.evidenceLevel, "OFFICIAL_PRODUCT_LINE");
+});
+
+test("another official product line is rejected", () => {
+  const payload = {
+    sources: [{
+      ...researchPayload.sources[0],
+      evidenceLevel: "OFFICIAL_PRODUCT_LINE" as const,
+      matchedIdentifiers: ["Race Tech", "Volt"],
+      facts: [{
+        fact: "A linha Volt usa casco composto",
+        sourceField: "catalog.volt.shell",
+        confidence: "HIGH" as const
+      }]
+    }]
+  };
+  const result = validateProductDescriptionResearch(payload, providerOutput, helmet, 5);
+  assert.equal(result.sourceCount, 0);
+  assert.equal(result.summary.discardReasonCounts.LINE_IDENTITY_MISMATCH, 1);
+});
+
 test("distributor claims cannot become official product-line evidence", () => {
   const payload = {
     sources: [{
@@ -338,6 +396,68 @@ test("distributor claims cannot become official product-line evidence", () => {
   const result = validateProductDescriptionResearch(payload, providerOutput, helmet, 5);
   assert.equal(result.sourceCount, 0);
   assert.equal(result.summary.discardReasonCounts.LINE_EVIDENCE_NOT_OFFICIAL, 1);
+});
+
+test("an authorized distributor requires an unequivocal product match", () => {
+  const acceptedPayload = {
+    sources: [{
+      ...researchPayload.sources[0],
+      domain: "distribuidor.example",
+      sourceType: "AUTHORIZED_DISTRIBUTOR" as const,
+      evidenceLevel: "AUTHORIZED_DISTRIBUTOR" as const,
+      matchedIdentifiers: ["Race Tech", "Play Monocolor"]
+    }]
+  };
+  const output = [{
+    type: "web_search_call",
+    action: { sources: [{ url: "https://distribuidor.example/play-monocolor" }] }
+  }];
+  assert.equal(validateProductDescriptionResearch(
+    acceptedPayload,
+    output,
+    helmet,
+    5
+  ).sourceCount, 1);
+
+  const rejectedPayload = {
+    sources: [{
+      ...acceptedPayload.sources[0],
+      matchedIdentifiers: ["Race Tech", "Volt Pro"]
+    }]
+  };
+  const rejected = validateProductDescriptionResearch(rejectedPayload, output, helmet, 5);
+  assert.equal(rejected.sourceCount, 0);
+  assert.equal(rejected.summary.discardReasonCounts.DISTRIBUTOR_IDENTITY_MISMATCH, 1);
+});
+
+test("an official source wins over an authorized distributor conflict", () => {
+  const payload = {
+    sources: [
+      researchPayload.sources[0],
+      {
+        ...researchPayload.sources[0],
+        domain: "distribuidor.example",
+        sourceType: "AUTHORIZED_DISTRIBUTOR" as const,
+        evidenceLevel: "AUTHORIZED_DISTRIBUTOR" as const,
+        matchedIdentifiers: ["Race Tech", "Play Monocolor"],
+        facts: [{
+          fact: "Material do casco: policarbonato",
+          sourceField: "technical.shellMaterial",
+          confidence: "HIGH" as const
+        }]
+      }
+    ]
+  };
+  const output = [{
+    type: "web_search_call",
+    action: { sources: [
+      { url: "https://racetech.example/catalogos/play.pdf" },
+      { url: "https://distribuidor.example/play-monocolor" }
+    ] }
+  }];
+  const result = validateProductDescriptionResearch(payload, output, helmet, 5);
+  assert.ok(result.evidence.some((item) => item.fact === "Material do casco: ABS"));
+  assert.ok(!result.evidence.some((item) => item.fact === "Material do casco: policarbonato"));
 });
 
 test("conflicting lower-priority facts are omitted", () => {
