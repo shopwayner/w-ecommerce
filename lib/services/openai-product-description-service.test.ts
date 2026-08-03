@@ -888,6 +888,12 @@ test("route enriches telemetry with product user and tenant context", async () =
         sourceCount: 0,
         officialSourceCount: 0,
         sourceDomainHashes: [],
+        acceptedSources: [],
+        externalFacts: [],
+        externalFactsAvailable: 0,
+        externalFactsReferenced: 0,
+        externalFactsValidated: 0,
+        externalFactsOmitted: 0,
         queryCount: 1,
         resultCount: 0,
         discardedSourceCount: 0,
@@ -906,6 +912,18 @@ test("route enriches telemetry with product user and tenant context", async () =
         rejectionReason: "expected_object",
         generatedNumericFact: null,
         localNumericCandidates: [],
+        evidenceRejection: null,
+        sectionItemCounts: {
+          introducao: 0,
+          fichaTecnica: 0,
+          compatibilidade: 0,
+          vantagens: 0,
+          conteudoEmbalagem: 0,
+          dimensoes: 0,
+          tutorialInstalacao: 0,
+          cuidadosManutencao: 0,
+          maisSobreProduto: 0
+        },
         evidenceMode: "LOCAL_ONLY_STRICT",
         localFactCount: 0,
     generatedFactCount: 0,
@@ -1198,8 +1216,14 @@ test("unknown evidence id is rejected in rich evidence mode", () => {
       buildLocalProductDescriptionEvidence(completeProduct),
       "LOCAL_AND_WEB"
     ),
-    (error: unknown) => error instanceof OpenAIProductDescriptionError &&
-      error.code === "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE"
+    (error: unknown) => {
+      assert.ok(error instanceof OpenAIProductDescriptionError);
+      assert.equal(
+        error.diagnostic.evidenceRejection?.filteringDecision,
+        "REJECTED_INVALID_EVIDENCE_ID"
+      );
+      return error.code === "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE";
+    }
   );
 });
 
@@ -1209,11 +1233,21 @@ test("GTIN evidence cannot support material", () => {
     fichaTecnica: ["Material: ABS"]
   });
   referenced.fichaTecnica[0].evidenceIds = ["local.gtin"];
-  assert.throws(() => filterReferencedOpenAIProductDescriptionByEvidence(
-    referenced,
-    buildLocalProductDescriptionEvidence(completeProduct),
-    "LOCAL_AND_WEB"
-  ));
+  assert.throws(
+    () => filterReferencedOpenAIProductDescriptionByEvidence(
+      referenced,
+      buildLocalProductDescriptionEvidence(completeProduct),
+      "LOCAL_AND_WEB"
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof OpenAIProductDescriptionError);
+      assert.equal(
+        error.diagnostic.evidenceRejection?.filteringDecision,
+        "REJECTED_SEMANTIC_MISMATCH"
+      );
+      return true;
+    }
+  );
 });
 
 test("weight evidence cannot support certification", () => {

@@ -82,6 +82,24 @@ export type ProductDescriptionEvidenceFact = {
   semanticType: ProductDescriptionEvidenceSemanticType;
 };
 
+export type ProductDescriptionAcceptedSourceDiagnostic = {
+  domainHash: string;
+  sourceType: ResearchSource["sourceType"];
+  evidenceLevel: ResearchSource["evidenceLevel"];
+  matchedIdentifierTypes: string[];
+  factCount: number;
+};
+
+export type ProductDescriptionExternalFactDiagnostic = {
+  factId: string;
+  semanticType: ProductDescriptionEvidenceSemanticType;
+  sourceType: ResearchSource["sourceType"];
+  sourceLevel: ProductDescriptionEvidenceLevel;
+  matchedIdentifierTypes: string[];
+  confidence: "HIGH" | "MEDIUM";
+  containsNumber: boolean;
+};
+
 export type ProductDescriptionResearchSummary = {
   queriesAttempted: number;
   resultsFound: number;
@@ -95,6 +113,8 @@ export type ProductDescriptionResearchSummary = {
 
 export type ProductDescriptionResearchResult = {
   evidence: ProductDescriptionEvidenceFact[];
+  acceptedSources: ProductDescriptionAcceptedSourceDiagnostic[];
+  externalFacts: ProductDescriptionExternalFactDiagnostic[];
   summary: ProductDescriptionResearchSummary;
   searchCount: number;
   sourceCount: number;
@@ -442,6 +462,26 @@ function identifierMatches(
   ));
 }
 
+function matchedIdentifierTypes(
+  identifiers: readonly string[],
+  product: ProductDescriptionResearchProduct
+) {
+  const candidates: Array<[string, string | null]> = [
+    ["GTIN", product.gtin],
+    ["PACKAGING_GTIN", product.packagingGtin],
+    ["MANUFACTURER_SKU", product.manufacturerSku],
+    ["MODEL", product.model],
+    ["BRAND", product.brand]
+  ];
+  const normalized = identifiers.map(comparisonKey).filter(Boolean);
+  return candidates.flatMap(([type, value]) => {
+    const expected = comparisonKey(value ?? "");
+    return expected && normalized.some((candidate) => (
+      candidate.includes(expected) || expected.includes(candidate)
+    )) ? [type] : [];
+  });
+}
+
 function incrementCount(counts: Record<string, number>, reason: string) {
   counts[reason] = (counts[reason] ?? 0) + 1;
 }
@@ -496,6 +536,7 @@ export function validateProductDescriptionResearch(
   }
 
   const factsByField = new Map<string, ProductDescriptionEvidenceFact>();
+  const externalFactsById = new Map<string, ProductDescriptionExternalFactDiagnostic>();
   let fieldsOmitted = Object.values(discardReasonCounts).reduce((sum, count) => sum + count, 0);
   const rank = (source: ResearchSource) => {
     if (source.sourceType === "OFFICIAL_MANUAL") return 5;
@@ -515,14 +556,25 @@ export function validateProductDescriptionResearch(
         continue;
       }
       if (!existing) {
+        const id = stableEvidenceId("web", `${source.domain}:${item.sourceField}`);
+        const semanticType = semanticTypeForField(item.sourceField);
         factsByField.set(key, {
-          id: stableEvidenceId("web", `${source.domain}:${item.sourceField}`),
+          id,
           fact: clean(item.fact),
           sourceType: source.sourceType,
           sourceField: clean(item.sourceField),
           confidence: item.confidence,
           evidenceLevel: source.evidenceLevel as ProductDescriptionEvidenceLevel,
-          semanticType: semanticTypeForField(item.sourceField)
+          semanticType
+        });
+        externalFactsById.set(id, {
+          factId: id,
+          semanticType,
+          sourceType: source.sourceType,
+          sourceLevel: source.evidenceLevel as ProductDescriptionEvidenceLevel,
+          matchedIdentifierTypes: matchedIdentifierTypes(source.matchedIdentifiers, product),
+          confidence: item.confidence,
+          containsNumber: /\d/.test(item.fact)
         });
       }
     }
@@ -530,6 +582,16 @@ export function validateProductDescriptionResearch(
   const officialSources = usefulSources.filter((source) => source.sourceType.startsWith("OFFICIAL_"));
   return {
     evidence: [...factsByField.values()],
+    acceptedSources: usefulSources.map((source) => ({
+      domainHash: createHash("sha256").update(comparisonKey(source.domain)).digest("hex").slice(0, 12),
+      sourceType: source.sourceType,
+      evidenceLevel: source.evidenceLevel,
+      matchedIdentifierTypes: matchedIdentifierTypes(source.matchedIdentifiers, product),
+      factCount: source.facts.filter((item) => (
+        externalFactsById.has(stableEvidenceId("web", `${source.domain}:${item.sourceField}`))
+      )).length
+    })),
+    externalFacts: [...externalFactsById.values()],
     summary: {
       queriesAttempted: Math.min(queriesPlanned, provider.searchCount),
       resultsFound: provider.urls.length,
@@ -555,6 +617,8 @@ export function emptyProductDescriptionResearchResult(
 ): ProductDescriptionResearchResult {
   return {
     evidence: [],
+    acceptedSources: [],
+    externalFacts: [],
     summary: {
       queriesAttempted,
       resultsFound: 0,

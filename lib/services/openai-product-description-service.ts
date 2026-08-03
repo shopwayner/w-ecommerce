@@ -11,8 +11,11 @@ import {
   buildProductDescriptionResearchQueries,
   emptyProductDescriptionResearchResult,
   validateProductDescriptionResearch,
+  type ProductDescriptionAcceptedSourceDiagnostic,
   type ProductDescriptionEvidenceFact,
+  type ProductDescriptionEvidenceLevel as ProductDescriptionFactEvidenceLevel,
   type ProductDescriptionEvidenceSemanticType,
+  type ProductDescriptionExternalFactDiagnostic,
   type ProductDescriptionResearchSummary
 } from "@/lib/services/openai-product-description-research";
 
@@ -155,6 +158,25 @@ export type OpenAIProductDescriptionErrorDiagnostic = {
     field: string;
   } | null;
   localNumericCandidates?: string[];
+  evidenceRejection?: ProductDescriptionEvidenceRejectionDiagnostic | null;
+};
+
+export type ProductDescriptionEvidenceRejectionDiagnostic = {
+  section: keyof OpenAIProductDescriptionContent;
+  index: number;
+  semanticType: ProductDescriptionEvidenceSemanticType | "UNKNOWN";
+  claimCount: number;
+  evidenceIdCount: number;
+  evidenceIds: string[];
+  claimedSemanticTypes: ProductDescriptionEvidenceSemanticType[];
+  evidenceSemanticTypes: ProductDescriptionEvidenceSemanticType[];
+  sourceLevels: ProductDescriptionFactEvidenceLevel[];
+  invalidEvidenceReason: "UNKNOWN_EVIDENCE_ID" | "SEMANTIC_MISMATCH" | "INSUFFICIENT_SUPPORT";
+  whetherOptional: boolean;
+  filteringDecision:
+    | "REJECTED_SEMANTIC_MISMATCH"
+    | "REJECTED_INVALID_EVIDENCE_ID"
+    | "REJECTED_EVIDENCE_MISMATCH_UNCLASSIFIED";
 };
 
 export class OpenAIProductDescriptionError extends Error {
@@ -216,6 +238,12 @@ export type OpenAIProductDescriptionLogEvent = {
   fieldsOmitted: number;
   providerCallCount: number;
   sourceDomainHashes: string[];
+  acceptedSources: ProductDescriptionAcceptedSourceDiagnostic[];
+  externalFacts: ProductDescriptionExternalFactDiagnostic[];
+  externalFactsAvailable: number;
+  externalFactsReferenced: number;
+  externalFactsValidated: number;
+  externalFactsOmitted: number;
   usedWebSearch: boolean;
   evidenceLevel: ProductDescriptionEvidenceLevel;
   requestId: string | null;
@@ -227,6 +255,8 @@ export type OpenAIProductDescriptionLogEvent = {
   rejectionReason: string | null;
   generatedNumericFact: { raw: string; field: string } | null;
   localNumericCandidates: string[];
+  evidenceRejection: ProductDescriptionEvidenceRejectionDiagnostic | null;
+  sectionItemCounts: Record<keyof OpenAIProductDescriptionContent, number>;
   evidenceMode: OpenAIProductDescriptionEvidenceMode;
   localFactCount: number;
   generatedFactCount: number;
@@ -1107,6 +1137,15 @@ type OmittedDescriptionFact = {
   reason: "UNKNOWN_EVIDENCE_ID" | "SEMANTIC_MISMATCH" | "INSUFFICIENT_SUPPORT";
 };
 
+type ProductDescriptionEvidenceFilterTrace = {
+  section: keyof OpenAIProductDescriptionContent;
+  index: number;
+  evidenceIds: string[];
+  decision: "ACCEPTED" | "OMITTED_OPTIONAL_UNSUPPORTED" | "OMITTED_FOR_LOCAL_FALLBACK" |
+    "REJECTED_SEMANTIC_MISMATCH" | "REJECTED_INVALID_EVIDENCE_ID" |
+    "REJECTED_EVIDENCE_MISMATCH_UNCLASSIFIED";
+};
+
 function semanticTypesClaimedByText(value: string) {
   const normalized = normalizedComparisonKey(value);
   const claimed = new Set<ProductDescriptionEvidenceSemanticType>();
@@ -1158,7 +1197,8 @@ function evidenceSemanticTypeForOmission(
 export function filterReferencedOpenAIProductDescriptionByEvidence(
   content: OpenAIProductDescriptionReferencedContent,
   evidence: readonly ProductDescriptionEvidenceFact[],
-  mode: OpenAIProductDescriptionEvidenceMode
+  mode: OpenAIProductDescriptionEvidenceMode,
+  onDecision?: (trace: ProductDescriptionEvidenceFilterTrace) => void
 ) {
   const evidenceById = new Map(evidence.map((item) => [item.id, item]));
   const omitted: OmittedDescriptionFact[] = [];
@@ -1172,8 +1212,17 @@ export function filterReferencedOpenAIProductDescriptionByEvidence(
       (candidate): candidate is ProductDescriptionEvidenceFact => Boolean(candidate)
     );
     const supported = !hasUnknownId && referencedEvidenceSupportsText(item.text, field, known);
-    if (supported) return [item.text];
+    if (supported) {
+      onDecision?.({
+        section: field,
+        index,
+        evidenceIds: item.evidenceIds,
+        decision: "ACCEPTED"
+      });
+      return [item.text];
+    }
 
+    const claimedSemanticTypes = [...semanticTypesClaimedByText(item.text)];
     const omission: OmittedDescriptionFact = {
       field,
       index,
@@ -1185,6 +1234,17 @@ export function filterReferencedOpenAIProductDescriptionByEvidence(
           : "INSUFFICIENT_SUPPORT"
     };
     if (mode === "LOCAL_AND_WEB") {
+      const filteringDecision = hasUnknownId
+        ? "REJECTED_INVALID_EVIDENCE_ID" as const
+        : omission.reason === "SEMANTIC_MISMATCH"
+          ? "REJECTED_SEMANTIC_MISMATCH" as const
+          : "REJECTED_EVIDENCE_MISMATCH_UNCLASSIFIED" as const;
+      onDecision?.({
+        section: field,
+        index,
+        evidenceIds: item.evidenceIds,
+        decision: filteringDecision
+      });
       throw new OpenAIProductDescriptionError(
         "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE",
         "A IA retornou informações sem sustentação suficiente.",
@@ -1197,10 +1257,32 @@ export function filterReferencedOpenAIProductDescriptionByEvidence(
           field: `${field}[${index}]`,
           reason: omission.reason.toLocaleLowerCase("en-US"),
           generatedNumericFact: null,
-          localNumericCandidates: []
+          localNumericCandidates: [],
+          evidenceRejection: {
+            section: field,
+            index,
+            semanticType: omission.semanticType,
+            claimCount: Math.max(1, claimedSemanticTypes.length),
+            evidenceIdCount: item.evidenceIds.length,
+            evidenceIds: item.evidenceIds,
+            claimedSemanticTypes,
+            evidenceSemanticTypes: [...new Set(known.map((candidate) => candidate.semanticType))],
+            sourceLevels: [...new Set(known.map((candidate) => candidate.evidenceLevel))],
+            invalidEvidenceReason: omission.reason,
+            whetherOptional: field !== "introducao",
+            filteringDecision
+          }
         }
       );
     }
+    onDecision?.({
+      section: field,
+      index,
+      evidenceIds: item.evidenceIds,
+      decision: field === "introducao"
+        ? "OMITTED_FOR_LOCAL_FALLBACK"
+        : "OMITTED_OPTIONAL_UNSUPPORTED"
+    });
     omitted.push(omission);
     return [];
   });
@@ -1440,7 +1522,8 @@ function classifyProviderError(
       rejectedField: error.diagnostic.field,
       rejectionReason: error.diagnostic.reason,
       generatedNumericFact: error.diagnostic.generatedNumericFact ?? null,
-      localNumericCandidates: error.diagnostic.localNumericCandidates ?? []
+      localNumericCandidates: error.diagnostic.localNumericCandidates ?? [],
+      evidenceRejection: error.diagnostic.evidenceRejection ?? null
     };
   }
   if (error instanceof z.ZodError) {
@@ -1454,7 +1537,8 @@ function classifyProviderError(
       rejectedField: issue?.path.length ? issue.path.join(".") : "$",
       rejectionReason: issue?.code ?? "schema_parse_failed",
       generatedNumericFact: null,
-      localNumericCandidates: []
+      localNumericCandidates: [],
+      evidenceRejection: null
     };
   }
   const providerFailure = (input: {
@@ -1471,7 +1555,8 @@ function classifyProviderError(
     rejectedField: null,
     rejectionReason: input.reason,
     generatedNumericFact: null,
-    localNumericCandidates: []
+    localNumericCandidates: [],
+    evidenceRejection: null
   });
   if (error instanceof OpenAI.BadRequestError || status === 400) {
     if (
@@ -1575,6 +1660,11 @@ export async function generateOpenAIProductDescription(
   const localEvidence = buildLocalProductDescriptionEvidence(input.product);
   let evidenceMode: OpenAIProductDescriptionEvidenceMode = "LOCAL_ONLY_STRICT";
   let generatedFactCount = 0;
+  let externalFactsReferenced = 0;
+  let externalFactsValidated = 0;
+  let sectionItemCounts = Object.fromEntries(
+    productDescriptionContentKeys.map((field) => [field, 0])
+  ) as Record<keyof OpenAIProductDescriptionContent, number>;
   let omittedSections: string[] = [];
   let omittedFacts: OmittedDescriptionFact[] = [];
   let warningCodes: string[] = [];
@@ -1597,6 +1687,12 @@ export async function generateOpenAIProductDescription(
       sourceCount: research.sourceCount,
       officialSourceCount: research.officialSourceCount,
       sourceDomainHashes: research.sourceDomainHashes,
+      acceptedSources: research.acceptedSources,
+      externalFacts: research.externalFacts,
+      externalFactsAvailable: research.externalFacts.length,
+      externalFactsReferenced,
+      externalFactsValidated,
+      externalFactsOmitted: Math.max(0, externalFactsReferenced - externalFactsValidated),
       queryCount: research.summary.queriesAttempted,
       resultCount: research.summary.resultsFound,
       discardedSourceCount: research.summary.discardedSources,
@@ -1605,7 +1701,7 @@ export async function generateOpenAIProductDescription(
       fieldsOmitted: research.summary.fieldsOmitted,
       providerCallCount,
       usedWebSearch: research.usedWebSearch,
-      evidenceLevel: evidenceMode === "LOCAL_AND_WEB" ? "LOCAL_AND_WEB" : "LOCAL_ONLY",
+      evidenceLevel: externalFactsValidated > 0 ? "LOCAL_AND_WEB" : "LOCAL_ONLY",
       requestId: response?.requestId ?? null,
       errorClass: null,
       errorCode: null,
@@ -1615,6 +1711,8 @@ export async function generateOpenAIProductDescription(
       rejectionReason: null,
       generatedNumericFact: null,
       localNumericCandidates: [],
+      evidenceRejection: null,
+      sectionItemCounts,
       evidenceMode,
       localFactCount: localEvidence.length,
       generatedFactCount,
@@ -1679,7 +1777,7 @@ export async function generateOpenAIProductDescription(
         research = emptyProductDescriptionResearchResult(queries.length);
       }
     }
-    evidenceMode = research.officialSourceCount === 0
+    evidenceMode = research.evidence.length === 0
       ? "LOCAL_ONLY_STRICT"
       : "LOCAL_AND_WEB";
     const combinedEvidence = evidenceMode === "LOCAL_ONLY_STRICT"
@@ -1759,10 +1857,28 @@ export async function generateOpenAIProductDescription(
       (sum, field) => sum + parsedContent[field].length,
       0
     );
+    sectionItemCounts = Object.fromEntries(
+      productDescriptionContentKeys.map((field) => [field, parsedContent[field].length])
+    ) as Record<keyof OpenAIProductDescriptionContent, number>;
+    const availableExternalIds = new Set(research.externalFacts.map((fact) => fact.factId));
+    const referencedExternalIds = new Set(
+      productDescriptionContentKeys.flatMap((field) => (
+        parsedContent[field].flatMap((item) => item.evidenceIds)
+      )).filter((id) => availableExternalIds.has(id))
+    );
+    externalFactsReferenced = referencedExternalIds.size;
+    const validatedExternalIds = new Set<string>();
     const evidenceResult = filterReferencedOpenAIProductDescriptionByEvidence(
       parsedContent,
       combinedEvidence,
-      evidenceMode
+      evidenceMode,
+      ({ evidenceIds, decision }) => {
+        if (decision !== "ACCEPTED") return;
+        for (const id of evidenceIds) {
+          if (availableExternalIds.has(id)) validatedExternalIds.add(id);
+        }
+        externalFactsValidated = validatedExternalIds.size;
+      }
     );
     omittedSections = [...new Set(evidenceResult.omitted.map((item) => item.field))].sort();
     omittedFacts = evidenceResult.omitted;
@@ -1793,7 +1909,7 @@ export async function generateOpenAIProductDescription(
       html,
       usedWebSearch: research.usedWebSearch,
       warnings: warningCodes,
-      evidenceLevel: evidenceMode === "LOCAL_AND_WEB"
+      evidenceLevel: externalFactsValidated > 0
         ? "LOCAL_AND_WEB"
         : "LOCAL_ONLY",
       researchSummary: research.summary

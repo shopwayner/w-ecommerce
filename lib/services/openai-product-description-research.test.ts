@@ -16,6 +16,7 @@ import {
   generateOpenAIProductDescription,
   OpenAIProductDescriptionError,
   type OpenAIProductDescriptionContent,
+  type OpenAIProductDescriptionLogEvent,
   type OpenAIProductDescriptionReferencedContent,
   type ProductDescriptionSource
 } from "./openai-product-description-service";
@@ -263,6 +264,17 @@ test("an official catalog with exact matching identifiers is accepted", () => {
   const result = validatedResearch();
   assert.equal(result.officialSourceCount, 1);
   assert.equal(result.summary.fieldsConfirmed, officialFacts.length);
+  assert.deepEqual(result.acceptedSources, [{
+    domainHash: result.sourceDomainHashes[0],
+    sourceType: "OFFICIAL_CATALOG",
+    evidenceLevel: "EXACT_PRODUCT",
+    matchedIdentifierTypes: ["GTIN", "MODEL"],
+    factCount: officialFacts.length
+  }]);
+  assert.equal(result.externalFacts.length, officialFacts.length);
+  assert.ok(result.externalFacts.every((fact) => !(
+    "fact" in fact || "domain" in fact || "url" in fact
+  )));
 });
 
 test("a seller listing is never accepted as the main evidence source", () => {
@@ -275,6 +287,8 @@ test("a seller listing is never accepted as the main evidence source", () => {
   const result = validateProductDescriptionResearch(payload, providerOutput, helmet, 5);
   assert.equal(result.sourceCount, 0);
   assert.equal(result.summary.discardReasonCounts.UNTRUSTED_SOURCE_TYPE, 1);
+  assert.deepEqual(result.acceptedSources, []);
+  assert.deepEqual(result.externalFacts, []);
 });
 
 test("a source domain absent from provider metadata is discarded", () => {
@@ -486,6 +500,86 @@ test("a complete mocked operation uses research evidence and returns summary cou
   assert.equal(result.warnings.length, 0);
 });
 
+test("semantic mismatch telemetry identifies the rejected item without logging its text", async () => {
+  const research = validatedResearch();
+  const identifierEvidence = research.evidence.find((fact) => (
+    fact.sourceType === "OFFICIAL_CATALOG" && fact.semanticType === "IDENTIFIER"
+  ));
+  assert.ok(identifierEvidence);
+  const failedContent: OpenAIProductDescriptionReferencedContent = {
+    introducao: [{
+      text: "Capacete com casco em ABS.",
+      evidenceIds: [identifierEvidence.id]
+    }],
+    fichaTecnica: [],
+    compatibilidade: [],
+    vantagens: [],
+    conteudoEmbalagem: [],
+    dimensoes: [],
+    tutorialInstalacao: [],
+    cuidadosManutencao: [],
+    maisSobreProduto: []
+  };
+  const logs: OpenAIProductDescriptionLogEvent[] = [];
+  let calls = 0;
+  await assert.rejects(() => generateOpenAIProductDescription(
+    { product: helmet },
+    {
+      env: {
+        OPENAI_DESCRIPTION_AI_ENABLED: "true",
+        OPENAI_DESCRIPTION_MODEL: "mock-model",
+        OPENAI_API_KEY: "mock-key"
+      },
+      logger: (event) => logs.push(event),
+      createResponse: async () => {
+        calls += 1;
+        return calls === 1
+          ? {
+              httpStatus: 200,
+              status: "completed",
+              outputParsed: researchPayload,
+              output: providerOutput,
+              refusalPresent: false
+            }
+          : {
+              httpStatus: 200,
+              status: "completed",
+              outputParsed: failedContent,
+              output: [],
+              refusalPresent: false
+            };
+      }
+    }
+  ), (error: unknown) => error instanceof OpenAIProductDescriptionError &&
+    error.code === "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE");
+
+  const terminal = logs.at(-1);
+  assert.equal(terminal?.validationRule, "referenced_fact_evidence");
+  assert.equal(terminal?.rejectedField, "introducao[0]");
+  assert.equal(terminal?.rejectionReason, "semantic_mismatch");
+  assert.deepEqual(terminal?.evidenceRejection, {
+    section: "introducao",
+    index: 0,
+    semanticType: "MATERIAL",
+    claimCount: 1,
+    evidenceIdCount: 1,
+    evidenceIds: [identifierEvidence.id],
+    claimedSemanticTypes: ["MATERIAL"],
+    evidenceSemanticTypes: ["IDENTIFIER"],
+    sourceLevels: ["EXACT_PRODUCT"],
+    invalidEvidenceReason: "SEMANTIC_MISMATCH",
+    whetherOptional: false,
+    filteringDecision: "REJECTED_SEMANTIC_MISMATCH"
+  });
+  assert.equal(terminal?.externalFactsAvailable, officialFacts.length);
+  assert.equal(terminal?.externalFactsReferenced, 1);
+  assert.equal(terminal?.externalFactsValidated, 0);
+  assert.equal(terminal?.externalFactsOmitted, 1);
+  assert.equal(terminal?.sectionItemCounts.introducao, 1);
+  assert.equal(terminal?.acceptedSources[0]?.sourceType, "OFFICIAL_CATALOG");
+  assert.doesNotMatch(JSON.stringify(logs), /Capacete com casco|Marca: Race Tech|racetech\.example/);
+});
+
 test("zero official sources produces a safe internal warning", async () => {
   const partialContent: OpenAIProductDescriptionContent = {
     introducao: ["Capacete Race Tech Play cadastrado no tamanho 54/XS."],
@@ -540,6 +634,63 @@ test("zero official sources produces a safe internal warning", async () => {
   assert.match(result.html, /Altura: 27 CM/);
   assert.doesNotMatch(result.html, /ABS|EPS|policarbonato|certificação/i);
   assert.doesNotMatch(result.html, /OFFICIAL_SOURCES_NOT_FOUND/);
+});
+
+test("an accepted source without usable facts does not promote the final evidence level", async () => {
+  const sourceWithoutFacts = {
+    sources: [{
+      ...researchPayload.sources[0],
+      facts: researchPayload.sources[0].facts.map((fact) => ({
+        ...fact,
+        confidence: "LOW" as const
+      }))
+    }]
+  };
+  const localContent: OpenAIProductDescriptionContent = {
+    introducao: ["Capacete Race Tech Play Monocolor cadastrado no tamanho 54/XS."],
+    fichaTecnica: ["Marca: Race Tech", "Modelo: Play Monocolor"],
+    compatibilidade: [],
+    vantagens: [],
+    conteudoEmbalagem: [],
+    dimensoes: [],
+    tutorialInstalacao: [],
+    cuidadosManutencao: [],
+    maisSobreProduto: []
+  };
+  let calls = 0;
+  const result = await generateOpenAIProductDescription(
+    { product: helmet },
+    {
+      env: {
+        OPENAI_DESCRIPTION_AI_ENABLED: "true",
+        OPENAI_DESCRIPTION_MODEL: "mock-model",
+        OPENAI_API_KEY: "mock-key"
+      },
+      createResponse: async () => {
+        calls += 1;
+        return calls === 1
+          ? {
+              httpStatus: 200,
+              status: "completed",
+              outputParsed: sourceWithoutFacts,
+              output: providerOutput,
+              refusalPresent: false
+            }
+          : {
+              httpStatus: 200,
+              status: "completed",
+              outputParsed: referencedContent(
+                localContent,
+                buildLocalProductDescriptionEvidence(helmet)
+              ),
+              output: [],
+              refusalPresent: false
+            };
+      }
+    }
+  );
+  assert.equal(result.researchSummary.officialSourcesFound, 1);
+  assert.equal(result.evidenceLevel, "LOCAL_ONLY");
 });
 
 test("research telemetry contains counts but no source URLs", () => {
