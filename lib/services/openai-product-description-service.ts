@@ -117,6 +117,7 @@ export type OpenAIProductDescriptionErrorCode =
   | "OPENAI_DESCRIPTION_INVALID_RESPONSE"
   | "OPENAI_DESCRIPTION_TIMEOUT"
   | "OPENAI_DESCRIPTION_RATE_LIMITED"
+  | "OPENAI_DESCRIPTION_RATE_LIMIT_UNAVAILABLE"
   | "OPENAI_DESCRIPTION_GENERATION_FAILED";
 
 export type OpenAIProductDescriptionDiagnosticCode =
@@ -166,7 +167,13 @@ export class OpenAIProductDescriptionError extends Error {
       code,
       field: null,
       reason: "request_rejected"
-    }
+    },
+    public readonly rateLimit: {
+      limit: number;
+      remaining: number;
+      retryAfterSeconds: number;
+      resetAt: number;
+    } | null = null
   ) {
     super(message);
     this.name = "OpenAIProductDescriptionError";
@@ -1543,6 +1550,7 @@ export async function generateOpenAIProductDescription(
     timeoutMs?: number;
     correlationId?: string;
     logger?: OpenAIProductDescriptionLogger;
+    beforeProviderRequest?: () => Promise<void>;
   } = {}
 ) {
   if (!collapseWhitespace(input.product.name)) {
@@ -1571,6 +1579,7 @@ export async function generateOpenAIProductDescription(
   let omittedFacts: OmittedDescriptionFact[] = [];
   let warningCodes: string[] = [];
   let providerCallCount = 0;
+  let providerRequestAuthorized = false;
   let terminalLogged = false;
 
   const log = (
@@ -1617,6 +1626,12 @@ export async function generateOpenAIProductDescription(
     });
   };
 
+  const authorizeProviderRequest = async () => {
+    if (providerRequestAuthorized) return;
+    await options.beforeProviderRequest?.();
+    providerRequestAuthorized = true;
+  };
+
   log("request_started");
   try {
     const queries = buildProductDescriptionResearchQueries(input.product);
@@ -1642,6 +1657,7 @@ export async function generateOpenAIProductDescription(
         config,
         sanitizeOfficialDomains(input.officialDomains)
       );
+      await authorizeProviderRequest();
       providerCallCount += 1;
       researchResponse = await Promise.race([
         createResponse(researchRequest, { signal: controller.signal }),
@@ -1675,6 +1691,7 @@ export async function generateOpenAIProductDescription(
       combinedEvidence,
       evidenceMode
     );
+    await authorizeProviderRequest();
     providerCallCount += 1;
     response = await Promise.race([
       createResponse(request, { signal: controller.signal }),

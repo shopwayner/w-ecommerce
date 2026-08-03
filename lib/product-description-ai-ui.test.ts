@@ -128,7 +128,10 @@ test("local-only generation shows a discreet notice outside commercial HTML", ()
 });
 
 test("backend validation codes reach specific safe UI messages", () => {
-  assert.match(viewSource, /descriptionAiErrorMessage\(payload\.code\)/);
+  assert.match(
+    viewSource,
+    /descriptionAiErrorMessage\(payload\.code, payload\.retryAfterSeconds\)/
+  );
   assert.match(viewSource, /OPENAI_DESCRIPTION_CONFIGURATION_UNAVAILABLE:[\s\S]*não está configurada neste ambiente/);
   assert.match(viewSource, /OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE:[\s\S]*Não há informações suficientes/);
   assert.match(viewSource, /OPENAI_DESCRIPTION_NUMERIC_FACT_UNSUPPORTED:[\s\S]*especificação numérica que não pôde ser confirmada/);
@@ -139,6 +142,23 @@ test("backend validation codes reach specific safe UI messages", () => {
   assert.match(viewSource, /OPENAI_DESCRIPTION_DISABLED:[\s\S]*não está disponível neste ambiente/);
   assert.match(viewSource, /ProductDescriptionAiRequestError/);
   assert.match(viewSource, /Não foi possível gerar a descrição agora\. Tente novamente\./);
+});
+
+test("rate limit shows the server TTL without applying a Description", () => {
+  const generation = sourceBlock(
+    "const generateDescription = useCallback",
+    "const reorderImage = useCallback"
+  );
+  assert.match(viewSource, /retryAfterSeconds\?: number/);
+  assert.match(viewSource, /seconds < 60/);
+  assert.match(viewSource, /Tente novamente em \$\{seconds\}/);
+  assert.match(viewSource, /Tente novamente em \$\{minutes\}/);
+  assert.match(generation, /if \(!response\.ok\)/);
+  assert.ok(
+    generation.indexOf("if (!response.ok)") <
+      generation.indexOf("descriptionDraftRef.current = nextDescription")
+  );
+  assert.match(generation, /setDescriptionAiLoading\(false\)/);
 });
 
 test("Cancel restores the saved snapshot and discards generated session state", () => {
@@ -152,6 +172,7 @@ test("Cancel restores the saved snapshot and discards generated session state", 
   assert.match(cancelBlock, /resetDescriptionAiSession\(\)/);
   assert.doesNotMatch(cancelBlock, /setIsDescriptionExpanded/);
   assert.match(resetBlock, /generatedDescriptionHistory\.current\.clear\(\)/);
+  assert.doesNotMatch(cancelBlock, /rate.?limit|refund|DELETE/);
 });
 
 test("Save persists the latest Description only through the local product PATCH", () => {

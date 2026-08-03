@@ -4,9 +4,9 @@ import { z } from "zod";
 import { requireApiAuth } from "@/lib/auth/api";
 import { prisma } from "@/lib/prisma";
 import {
-  consumeSettingsRateLimit,
-  type RateLimitResult
-} from "@/lib/security/settings-rate-limit";
+  consumeOpenAIProductDescriptionRateLimit,
+  type OpenAIProductDescriptionRateLimitResult
+} from "@/lib/security/openai-description-rate-limit";
 import {
   generateOpenAIProductDescription,
   OpenAIProductDescriptionError,
@@ -33,14 +33,18 @@ type ProductDescriptionRouteDependencies = {
     organizationId: string
   ) => Promise<ProductDescriptionSource | null>;
   consumeRateLimit: (
-    key: string,
-    options: { limit: number; windowMs: number }
-  ) => RateLimitResult;
+    identity: {
+      organizationId: string;
+      userId: string;
+      productId: string;
+    }
+  ) => Promise<OpenAIProductDescriptionRateLimitResult>;
   generateDescription: (
     input: { product: ProductDescriptionSource },
     context: {
       correlationId: string;
       logger: OpenAIProductDescriptionLogger;
+      beforeProviderRequest: () => Promise<void>;
     }
   ) => Promise<OpenAIProductDescriptionResult>;
   acquireRequestLock: (key: string) => (() => void) | null;
@@ -72,6 +76,7 @@ function logProductDescriptionAiEvent(event: OpenAIProductDescriptionLogEvent) {
   console.info("[openai.product-description]", event);
 }
 
+// TODO: replace with a distributed lock before running multiple app replicas.
 const activeProductDescriptionRequests = new Set<string>();
 
 function acquireProductDescriptionRequestLock(key: string) {
@@ -157,12 +162,13 @@ const defaultDependencies: ProductDescriptionRouteDependencies = {
       attributes: product.attributes
     };
   },
-  consumeRateLimit: consumeSettingsRateLimit,
+  consumeRateLimit: consumeOpenAIProductDescriptionRateLimit,
   generateDescription: (input, context) => generateOpenAIProductDescription(
     input,
     {
       correlationId: context.correlationId,
-      logger: context.logger
+      logger: context.logger,
+      beforeProviderRequest: context.beforeProviderRequest
     }
   ),
   createCorrelationId: randomUUID,
@@ -232,6 +238,15 @@ function productDescriptionErrorResponse(
     correlationId,
     error: message
   });
+  const rateLimit = error.rateLimit;
+  const rateLimitHeaders = rateLimit
+    ? {
+        "Retry-After": String(rateLimit.retryAfterSeconds),
+        "X-RateLimit-Limit": String(rateLimit.limit),
+        "X-RateLimit-Remaining": String(rateLimit.remaining),
+        "X-RateLimit-Reset": String(Math.ceil(rateLimit.resetAt / 1_000))
+      }
+    : undefined;
   if (error.code === "OPENAI_DESCRIPTION_DISABLED") {
     return NextResponse.json(
       errorBody("Geração de descrição com IA está temporariamente desativada."),
@@ -258,8 +273,18 @@ function productDescriptionErrorResponse(
   }
   if (error.code === "OPENAI_DESCRIPTION_RATE_LIMITED") {
     return NextResponse.json(
-      errorBody("A geração está temporariamente limitada. Aguarde e tente novamente."),
-      { status: 429 }
+      {
+        ...errorBody("A geração está temporariamente limitada. Aguarde e tente novamente."),
+        retryAfterSeconds: rateLimit?.retryAfterSeconds ?? null,
+        resetAt: rateLimit ? new Date(rateLimit.resetAt).toISOString() : null
+      },
+      { status: 429, headers: rateLimitHeaders }
+    );
+  }
+  if (error.code === "OPENAI_DESCRIPTION_RATE_LIMIT_UNAVAILABLE") {
+    return NextResponse.json(
+      errorBody("A geração por IA está temporariamente indisponível."),
+      { status: 503 }
     );
   }
   return NextResponse.json(
@@ -284,23 +309,6 @@ export function createProductDescriptionAiPost(
     if (!requestBody.ok) return requestBody.response;
 
     const { id } = await params;
-    const rateLimit = dependencies.consumeRateLimit(
-      `openai:description:${auth.context.organizationId}:${auth.context.user.id}:${id}`,
-      { limit: 3, windowMs: 10 * 60 * 1_000 }
-    );
-    if (!rateLimit.allowed) {
-      return NextResponse.json(
-        {
-          code: "OPENAI_DESCRIPTION_RATE_LIMITED",
-          error: "Muitas gerações em pouco tempo. Aguarde antes de tentar novamente."
-        },
-        {
-          status: 429,
-          headers: { "Retry-After": String(rateLimit.retryAfterSeconds) }
-        }
-      );
-    }
-
     const product = await dependencies.findProduct(
       id,
       auth.context.organizationId
@@ -329,6 +337,9 @@ export function createProductDescriptionAiPost(
     }
 
     const correlationId = dependencies.createCorrelationId();
+    const rateLimitState: {
+      current: OpenAIProductDescriptionRateLimitResult | null;
+    } = { current: null };
     try {
       const result = await dependencies.generateDescription(
         { product },
@@ -339,10 +350,55 @@ export function createProductDescriptionAiPost(
             productId: id,
             organizationId: auth.context.organizationId,
             userId: auth.context.user.id
-          })
+          }),
+          beforeProviderRequest: async () => {
+            let rateLimit: OpenAIProductDescriptionRateLimitResult;
+            try {
+              rateLimit = await dependencies.consumeRateLimit({
+                organizationId: auth.context.organizationId,
+                userId: auth.context.user.id,
+                productId: id
+              });
+            } catch {
+              throw new OpenAIProductDescriptionError(
+                "OPENAI_DESCRIPTION_RATE_LIMIT_UNAVAILABLE",
+                "O rate limit da geração de descrição está indisponível.",
+                {
+                  stage: "provider_request",
+                  rule: "rate_limit_storage",
+                  code: "OPENAI_DESCRIPTION_RATE_LIMIT_UNAVAILABLE",
+                  field: null,
+                  reason: "redis_unavailable"
+                }
+              );
+            }
+            rateLimitState.current = rateLimit;
+            if (!rateLimit.allowed) {
+              throw new OpenAIProductDescriptionError(
+                "OPENAI_DESCRIPTION_RATE_LIMITED",
+                "Muitas gerações em pouco tempo.",
+                {
+                  stage: "provider_request",
+                  rule: "generation_fixed_window",
+                  code: "OPENAI_DESCRIPTION_RATE_LIMITED",
+                  field: null,
+                  reason: "quota_exhausted"
+                },
+                rateLimit
+              );
+            }
+          }
         }
       );
-      return NextResponse.json(result);
+      return NextResponse.json(result, {
+        headers: rateLimitState.current
+          ? {
+              "X-RateLimit-Limit": String(rateLimitState.current.limit),
+              "X-RateLimit-Remaining": String(rateLimitState.current.remaining),
+              "X-RateLimit-Reset": String(Math.ceil(rateLimitState.current.resetAt / 1_000))
+            }
+          : undefined
+      });
     } catch (error) {
       if (error instanceof OpenAIProductDescriptionError) {
         return productDescriptionErrorResponse(error, correlationId);

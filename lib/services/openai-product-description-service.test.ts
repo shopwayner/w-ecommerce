@@ -642,6 +642,7 @@ test("official SDK adapter uses responses.parse with zero retry", async () => {
 
 test("one explicit generation performs one research call and one generation call without retry", async () => {
   let calls = 0;
+  let rateLimitConsumptions = 0;
   const logs: OpenAIProductDescriptionLogEvent[] = [];
   const result = await generateOpenAIProductDescription(
     { product: completeProduct },
@@ -649,6 +650,9 @@ test("one explicit generation performs one research call and one generation call
       env: enabledEnv,
       correlationId: "corr-safe",
       logger: (event) => logs.push(event),
+      beforeProviderRequest: async () => {
+        rateLimitConsumptions += 1;
+      },
       createResponse: async (...args) => {
         calls += 1;
         return providerResponse()(...args);
@@ -656,6 +660,7 @@ test("one explicit generation performs one research call and one generation call
     }
   );
   assert.equal(calls, 2);
+  assert.equal(rateLimitConsumptions, 1);
   assert.match(result.html, /Ficha Técnica/);
   assert.match(result.html, /Frete grátis: Não/);
   assert.match(result.html, /Dimensões/);
@@ -717,8 +722,11 @@ test("provider rate limit returns the stable code without retry", async () => {
 
 const allowedRateLimit = {
   allowed: true,
+  limit: 3,
   retryAfterSeconds: 0,
-  remaining: 2
+  remaining: 2,
+  resetAt: 601_000,
+  count: 1
 };
 
 function routeDependencies(
@@ -733,7 +741,7 @@ function routeDependencies(
       }
     }),
     findProduct: async () => completeProduct,
-    consumeRateLimit: () => allowedRateLimit,
+    consumeRateLimit: async () => allowedRateLimit,
     generateDescription: async () => validResult,
     acquireRequestLock: () => () => undefined,
     createCorrelationId: () => "route-correlation",
@@ -784,15 +792,21 @@ test("route preserves products:write permission denial", async () => {
 
 test("route scopes lookup to the authenticated tenant and hides foreign products", async () => {
   let lookup: [string, string] | null = null;
+  let consumed = 0;
   const post = createProductDescriptionAiPost(routeDependencies({
     findProduct: async (productId, organizationId) => {
       lookup = [productId, organizationId];
       return null;
+    },
+    consumeRateLimit: async () => {
+      consumed += 1;
+      return allowedRateLimit;
     }
   }));
   const response = await post(descriptionRequest(), routeContext);
   assert.deepEqual(lookup, ["product-1", "org-current"]);
   assert.equal(response.status, 404);
+  assert.equal(consumed, 0);
   assert.deepEqual(await response.json(), {
     code: "PRODUCT_NOT_FOUND",
     error: "Produto não encontrado."
@@ -819,7 +833,12 @@ test("route rejects every browser-supplied product fact", async () => {
 
 test("valid route returns only the structured description result", async () => {
   let receivedProduct: ProductDescriptionSource | null = null;
+  let consumed = 0;
   const post = createProductDescriptionAiPost(routeDependencies({
+    consumeRateLimit: async () => {
+      consumed += 1;
+      return allowedRateLimit;
+    },
     generateDescription: async (input) => {
       receivedProduct = input.product;
       return validResult;
@@ -828,6 +847,7 @@ test("valid route returns only the structured description result", async () => {
   const response = await post(descriptionRequest({}), routeContext);
   assert.equal(response.status, 200);
   assert.equal(receivedProduct, completeProduct);
+  assert.equal(consumed, 0);
   assert.deepEqual(await response.json(), validResult);
 });
 
@@ -972,23 +992,72 @@ test("missing API key is exposed only as a safe configuration code", async () =>
 });
 
 test("route rate limit is isolated by organization user and product", async () => {
-  let key = "";
+  let identity: Record<string, string> | null = null;
   const post = createProductDescriptionAiPost(routeDependencies({
-    consumeRateLimit: (receivedKey) => {
-      key = receivedKey;
-      return { allowed: false, retryAfterSeconds: 30, remaining: 0 };
+    consumeRateLimit: async (receivedIdentity) => {
+      identity = receivedIdentity;
+      return {
+        allowed: false,
+        limit: 3,
+        retryAfterSeconds: 30,
+        remaining: 0,
+        resetAt: 31_000,
+        count: 3
+      };
+    },
+    generateDescription: async (_input, context) => {
+      await context.beforeProviderRequest();
+      return validResult;
     }
   }));
   const response = await post(descriptionRequest(), routeContext);
-  assert.equal(key, "openai:description:org-current:user-current:product-1");
+  assert.deepEqual(identity, {
+    organizationId: "org-current",
+    userId: "user-current",
+    productId: "product-1"
+  });
   assert.equal(response.status, 429);
   assert.equal(response.headers.get("Retry-After"), "30");
+  assert.equal(response.headers.get("X-RateLimit-Limit"), "3");
+  assert.equal(response.headers.get("X-RateLimit-Remaining"), "0");
+  assert.equal(response.headers.get("X-RateLimit-Reset"), "31");
+  assert.deepEqual(await response.json(), {
+    code: "OPENAI_DESCRIPTION_RATE_LIMITED",
+    category: "OPENAI_DESCRIPTION_RATE_LIMITED",
+    correlationId: "route-correlation",
+    error: "A geração está temporariamente limitada. Aguarde e tente novamente.",
+    retryAfterSeconds: 30,
+    resetAt: "1970-01-01T00:00:31.000Z"
+  });
+});
+
+test("invalid local input is rejected before rate limit consumption", async () => {
+  let rateLimitConsumptions = 0;
+  await expectDescriptionError(
+    () => generateOpenAIProductDescription(
+      { product: { ...completeProduct, name: "  " } },
+      {
+        env: enabledEnv,
+        beforeProviderRequest: async () => {
+          rateLimitConsumptions += 1;
+        },
+        createResponse: providerResponse()
+      }
+    ),
+    "OPENAI_DESCRIPTION_INVALID_INPUT"
+  );
+  assert.equal(rateLimitConsumptions, 0);
 });
 
 test("concurrent request for the same tenant user and product is blocked", async () => {
   let generated = 0;
+  let consumed = 0;
   const post = createProductDescriptionAiPost(routeDependencies({
     acquireRequestLock: () => null,
+    consumeRateLimit: async () => {
+      consumed += 1;
+      return allowedRateLimit;
+    },
     generateDescription: async () => {
       generated += 1;
       return validResult;
@@ -997,6 +1066,67 @@ test("concurrent request for the same tenant user and product is blocked", async
   const response = await post(descriptionRequest(), routeContext);
   assert.equal(response.status, 409);
   assert.equal(generated, 0);
+  assert.equal(consumed, 0);
+});
+
+test("local failure before a provider request does not consume quota", async () => {
+  let consumed = 0;
+  const post = createProductDescriptionAiPost(routeDependencies({
+    consumeRateLimit: async () => {
+      consumed += 1;
+      return allowedRateLimit;
+    },
+    generateDescription: async () => {
+      throw new OpenAIProductDescriptionError(
+        "OPENAI_DESCRIPTION_DISABLED",
+        "disabled"
+      );
+    }
+  }));
+  assert.equal((await post(descriptionRequest(), routeContext)).status, 503);
+  assert.equal(consumed, 0);
+});
+
+test("failure after provider authorization consumes exactly one quota", async () => {
+  let consumed = 0;
+  const post = createProductDescriptionAiPost(routeDependencies({
+    consumeRateLimit: async () => {
+      consumed += 1;
+      return allowedRateLimit;
+    },
+    generateDescription: async (_input, context) => {
+      await context.beforeProviderRequest();
+      throw new OpenAIProductDescriptionError(
+        "OPENAI_DESCRIPTION_TIMEOUT",
+        "timeout"
+      );
+    }
+  }));
+  assert.equal((await post(descriptionRequest(), routeContext)).status, 504);
+  assert.equal(consumed, 1);
+});
+
+test("rate limit storage failure blocks the provider without exposing details", async () => {
+  let providerCalls = 0;
+  const post = createProductDescriptionAiPost(routeDependencies({
+    consumeRateLimit: async () => {
+      throw new Error("private redis detail");
+    },
+    generateDescription: async (_input, context) => {
+      await context.beforeProviderRequest();
+      providerCalls += 1;
+      return validResult;
+    }
+  }));
+  const response = await post(descriptionRequest(), routeContext);
+  assert.equal(response.status, 503);
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(await response.json(), {
+    code: "OPENAI_DESCRIPTION_RATE_LIMIT_UNAVAILABLE",
+    category: "OPENAI_DESCRIPTION_RATE_LIMIT_UNAVAILABLE",
+    correlationId: "route-correlation",
+    error: "A geração por IA está temporariamente indisponível."
+  });
 });
 
 test("request lock is always released after a generation failure", async () => {

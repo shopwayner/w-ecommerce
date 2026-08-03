@@ -163,7 +163,22 @@ const descriptionAiErrorMessages: Record<string, string> = {
     "O limite temporário de gerações foi atingido. Aguarde antes de tentar novamente."
 };
 
-function descriptionAiErrorMessage(code: string | undefined) {
+function descriptionAiErrorMessage(
+  code: string | undefined,
+  retryAfterSeconds?: number
+) {
+  if (
+    code === "OPENAI_DESCRIPTION_RATE_LIMITED" &&
+    Number.isFinite(retryAfterSeconds) &&
+    Number(retryAfterSeconds) > 0
+  ) {
+    const seconds = Math.ceil(Number(retryAfterSeconds));
+    if (seconds < 60) {
+      return `O limite temporário de gerações foi atingido. Tente novamente em ${seconds} ${seconds === 1 ? "segundo" : "segundos"}.`;
+    }
+    const minutes = Math.ceil(seconds / 60);
+    return `O limite temporário de gerações foi atingido. Tente novamente em ${minutes} ${minutes === 1 ? "minuto" : "minutos"}.`;
+  }
   return code
     ? descriptionAiErrorMessages[code] ??
         "Não foi possível gerar a descrição agora. Tente novamente."
@@ -1048,6 +1063,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
         html?: string;
         code?: string;
         error?: string;
+        retryAfterSeconds?: number;
         usedWebSearch?: boolean;
         warnings?: string[];
         evidenceLevel?: "LOCAL_ONLY" | "LOCAL_AND_WEB";
@@ -1060,7 +1076,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
       };
       if (!response.ok) {
         throw new ProductDescriptionAiRequestError(
-          descriptionAiErrorMessage(payload.code)
+          descriptionAiErrorMessage(payload.code, payload.retryAfterSeconds)
         );
       }
       const nextDescription = sanitizeProductDescription(payload.html);
