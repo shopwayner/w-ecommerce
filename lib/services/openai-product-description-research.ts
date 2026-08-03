@@ -46,12 +46,40 @@ export type ProductDescriptionEvidenceLevel =
   | "LOCAL_DESCRIPTION"
   | "AUTHORIZED_DISTRIBUTOR";
 
+export type ProductDescriptionEvidenceSemanticType =
+  | "NAME"
+  | "IDENTIFIER"
+  | "BRAND"
+  | "MODEL"
+  | "CATEGORY"
+  | "UNIT"
+  | "CONDITION"
+  | "STATUS"
+  | "FORMAT"
+  | "PRODUCT_TYPE"
+  | "PRODUCTION_TYPE"
+  | "DATE"
+  | "BOOLEAN"
+  | "QUANTITY"
+  | "WEIGHT"
+  | "DIMENSION"
+  | "ORIGIN"
+  | "PACKAGE_CONTENT"
+  | "COMPATIBILITY"
+  | "MATERIAL"
+  | "CERTIFICATION"
+  | "TECHNICAL_ATTRIBUTE"
+  | "LOCAL_DESCRIPTION"
+  | "OTHER";
+
 export type ProductDescriptionEvidenceFact = {
+  id: string;
   fact: string;
   sourceType: string;
   sourceField: string;
   confidence: "HIGH" | "MEDIUM";
   evidenceLevel: ProductDescriptionEvidenceLevel;
+  semanticType: ProductDescriptionEvidenceSemanticType;
 };
 
 export type ProductDescriptionResearchSummary = {
@@ -143,8 +171,47 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function stableEvidenceId(prefix: "local" | "web", field: string) {
+  return `${prefix}.${createHash("sha256").update(field).digest("hex").slice(0, 12)}`;
+}
+
+function semanticTypeForField(field: string): ProductDescriptionEvidenceSemanticType {
+  const key = comparisonKey(field);
+  if (/(conteudo|embalagem|package|acompanha)/.test(key)) return "PACKAGE_CONTENT";
+  if (/(compatib|aplica|veiculo|equipamento|sistema)/.test(key)) return "COMPATIBILITY";
+  if (/(material|composicao|casco|estrutura|innerstructure|shellmaterial|visor)/.test(key)) {
+    return "MATERIAL";
+  }
+  if (/(certifica|inmetro|norma)/.test(key)) return "CERTIFICATION";
+  if (/(peso|weight)/.test(key)) return "WEIGHT";
+  if (/(altura|largura|profundidade|comprimento|dimens|height|width|depth)/.test(key)) {
+    return "DIMENSION";
+  }
+  if (/(gtin|ean|sku|codigo|identifier)/.test(key)) return "IDENTIFIER";
+  if (/(marca|brand)/.test(key)) return "BRAND";
+  if (/(modelo|model|linha)/.test(key)) return "MODEL";
+  if (/(categoria|category)/.test(key)) return "CATEGORY";
+  if (/(unidade|unit)/.test(key)) return "UNIT";
+  if (/(condicao|condition)/.test(key)) return "CONDITION";
+  if (/(situacao|status)/.test(key)) return "STATUS";
+  if (/(formato|format)/.test(key)) return "FORMAT";
+  if (/(tipo.producao|production)/.test(key)) return "PRODUCTION_TYPE";
+  if (/(tipo|producttype)/.test(key)) return "PRODUCT_TYPE";
+  if (/(validade|date|data)/.test(key)) return "DATE";
+  if (/(fretegratis|freeshipping|boolean)/.test(key)) return "BOOLEAN";
+  if (/(volume|itensporcaixa|itemsperbox|quantidade|quantity)/.test(key)) return "QUANTITY";
+  if (/(origem|origin)/.test(key)) return "ORIGIN";
+  if (/(nome|name)/.test(key)) return "NAME";
+  return field.startsWith("attributes") ? "TECHNICAL_ATTRIBUTE" : "OTHER";
+}
+
+function isUsableEvidenceValue(value: unknown) {
+  const normalized = clean(String(value ?? ""));
+  return Boolean(normalized) && !/^(?:n[aã]o informado|sem informa[cç][aã]o|n\/?a|null|undefined|-)+$/i.test(normalized);
+}
+
 const privateAttributeKeyPattern =
-  /(?:cost|custo|margin|margem|price|preco|preço|token|secret|credential|senha|password|authorization|cookie|url|raw|metadata|organization|connection|account|internal.*id|(?:^|_)id$)/i;
+  /(?:cost|custo|margin|margem|price|preco|preço|stock|estoque|inventory|token|secret|credential|senha|password|authorization|cookie|url|raw|metadata|organization|connection|account|internal.*id|(?:^|_)id$)/i;
 
 function flattenLocalAttributes(
   value: unknown,
@@ -154,13 +221,15 @@ function flattenLocalAttributes(
   if (depth > 2 || value === null || value === undefined) return [];
   if (["string", "number", "boolean"].includes(typeof value)) {
     const fact = clean(String(value));
-    return fact
+    return isUsableEvidenceValue(fact)
       ? [{
+          id: stableEvidenceId("local", prefix),
           fact: `${prefix}: ${fact}`,
           sourceType: "LOCAL_STRUCTURED",
           sourceField: prefix,
           confidence: "HIGH",
-          evidenceLevel: "LOCAL_STRUCTURED"
+          evidenceLevel: "LOCAL_STRUCTURED",
+          semanticType: semanticTypeForField(prefix)
         }]
       : [];
   }
@@ -210,13 +279,15 @@ export function buildLocalProductDescriptionEvidence(
     ["origin", product.origin]
   ];
   const structured = fields.flatMap(([field, value]) => {
-    if (value === null || value === undefined || clean(String(value)) === "") return [];
+    if (value === null || value === undefined || !isUsableEvidenceValue(value)) return [];
     return [{
+      id: `local.${field}`,
       fact: `${field}: ${clean(String(value))}`,
       sourceType: "LOCAL_STRUCTURED",
       sourceField: `product.${field}`,
       confidence: "HIGH" as const,
-      evidenceLevel: "LOCAL_STRUCTURED" as const
+      evidenceLevel: "LOCAL_STRUCTURED" as const,
+      semanticType: semanticTypeForField(field)
     }];
   });
   const description = clean(product.currentDescription);
@@ -225,11 +296,13 @@ export function buildLocalProductDescriptionEvidence(
     ...flattenLocalAttributes(product.attributes),
     ...(description
       ? [{
+          id: "local.description",
           fact: description.slice(0, 4_000),
           sourceType: "LOCAL_DESCRIPTION",
           sourceField: "product.currentDescription",
           confidence: "MEDIUM" as const,
-          evidenceLevel: "LOCAL_DESCRIPTION" as const
+          evidenceLevel: "LOCAL_DESCRIPTION" as const,
+          semanticType: "LOCAL_DESCRIPTION" as const
         }]
       : [])
   ];
@@ -443,11 +516,13 @@ export function validateProductDescriptionResearch(
       }
       if (!existing) {
         factsByField.set(key, {
+          id: stableEvidenceId("web", `${source.domain}:${item.sourceField}`),
           fact: clean(item.fact),
           sourceType: source.sourceType,
           sourceField: clean(item.sourceField),
           confidence: item.confidence,
-          evidenceLevel: source.evidenceLevel as ProductDescriptionEvidenceLevel
+          evidenceLevel: source.evidenceLevel as ProductDescriptionEvidenceLevel,
+          semanticType: semanticTypeForField(item.sourceField)
         });
       }
     }

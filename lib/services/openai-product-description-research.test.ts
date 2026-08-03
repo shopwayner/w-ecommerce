@@ -11,12 +11,15 @@ import {
 } from "./openai-product-description-research";
 import {
   buildOpenAIProductDescriptionHtml,
+  buildOpenAIProductDescriptionRequest,
   filterOpenAIProductDescriptionByEvidence,
   generateOpenAIProductDescription,
   OpenAIProductDescriptionError,
   type OpenAIProductDescriptionContent,
+  type OpenAIProductDescriptionReferencedContent,
   type ProductDescriptionSource
 } from "./openai-product-description-service";
+import { readOpenAIProductDescriptionConfig } from "./openai-product-description-service";
 
 const helmet: ProductDescriptionSource & ProductDescriptionResearchProduct = {
   name: "Capacete Play Monocolor Matte Black 54 XS Race Tech",
@@ -134,6 +137,41 @@ function validatedResearch() {
     helmet,
     buildProductDescriptionResearchQueries(helmet).length
   );
+}
+
+function referencedContent(
+  content: OpenAIProductDescriptionContent,
+  evidence: readonly ProductDescriptionEvidenceFact[]
+): OpenAIProductDescriptionReferencedContent {
+  const words = (value: string) => new Set(value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("pt-BR")
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length >= 3));
+  return Object.fromEntries(Object.entries(content).map(([field, values]) => [
+    field,
+    values.map((text) => {
+      const textWords = words(text);
+      const preferredTypes = field === "dimensoes"
+        ? new Set(["DIMENSION", "WEIGHT"])
+        : field === "conteudoEmbalagem"
+          ? new Set(["PACKAGE_CONTENT"])
+          : field === "compatibilidade"
+            ? new Set(["COMPATIBILITY"])
+            : new Set<string>();
+      const evidenceIds = evidence
+        .map((item) => ({
+          id: item.id,
+          score: [...words(item.fact)].filter((word) => textWords.has(word)).length +
+            (preferredTypes.has(item.semanticType) ? 20 : 0)
+        }))
+        .sort((left, right) => right.score - left.score)
+        .slice(0, 12)
+        .map((item) => item.id);
+      return { text, evidenceIds };
+    })
+  ])) as OpenAIProductDescriptionReferencedContent;
 }
 
 function assertEvidenceRejected(
@@ -431,7 +469,10 @@ test("a complete mocked operation uses research evidence and returns summary cou
           : {
               httpStatus: 200,
               status: "completed",
-              outputParsed: helmetContent,
+              outputParsed: referencedContent(
+                helmetContent,
+                [...buildLocalProductDescriptionEvidence(helmet), ...validatedResearch().evidence]
+              ),
               output: [],
               refusalPresent: false
             };
@@ -479,7 +520,10 @@ test("zero official sources produces a safe internal warning", async () => {
           : {
               httpStatus: 200,
               status: "completed",
-              outputParsed: partialContent,
+              outputParsed: referencedContent(
+                partialContent,
+                buildLocalProductDescriptionEvidence(helmet)
+              ),
               output: [],
               refusalPresent: false
             };
@@ -487,6 +531,13 @@ test("zero official sources produces a safe internal warning", async () => {
     }
   );
   assert.deepEqual(result.warnings, ["OFFICIAL_SOURCES_NOT_FOUND"]);
+  assert.equal(result.evidenceLevel, "LOCAL_ONLY");
+  assert.equal(result.usedWebSearch, true);
+  assert.match(result.html, /Marca: Race Tech/);
+  assert.match(result.html, /Linha: Play/);
+  assert.match(result.html, /Cor: Matte Black/);
+  assert.match(result.html, /Tamanho: 54\/XS/);
+  assert.match(result.html, /Altura: 27 CM/);
   assert.doesNotMatch(result.html, /ABS|EPS|policarbonato|certificação/i);
   assert.doesNotMatch(result.html, /OFFICIAL_SOURCES_NOT_FOUND/);
 });
@@ -497,4 +548,28 @@ test("research telemetry contains counts but no source URLs", () => {
   assert.equal(result.summary.queriesAttempted, 1);
   assert.equal(result.summary.officialSourcesFound, 1);
   assert.doesNotMatch(serialized, /https?:|racetech\.example/);
+});
+
+test("discarded external facts never enter the local-only generation context", () => {
+  const rejected = validateProductDescriptionResearch(
+    researchPayload,
+    [{ type: "web_search_call", action: { sources: [{ url: "https://other.example/item" }] } }],
+    helmet,
+    1
+  );
+  assert.equal(rejected.officialSourceCount, 0);
+  assert.equal(rejected.evidence.length, 0);
+  const request = buildOpenAIProductDescriptionRequest(
+    { product: helmet },
+    readOpenAIProductDescriptionConfig({
+      OPENAI_DESCRIPTION_AI_ENABLED: "true",
+      OPENAI_DESCRIPTION_MODEL: "mock-model",
+      OPENAI_API_KEY: "mock-key"
+    }),
+    buildLocalProductDescriptionEvidence(helmet),
+    "LOCAL_ONLY_STRICT"
+  );
+  const serialized = request.input[1].content;
+  assert.match(serialized, /LOCAL_ONLY_STRICT/);
+  assert.doesNotMatch(serialized, /ABS|EPS|policarbonato|ventila[cç][aã]o/i);
 });

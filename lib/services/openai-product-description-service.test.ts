@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NextResponse } from "next/server";
 import { createProductDescriptionAiPost } from "@/lib/services/openai-product-description-route";
-import { buildOpenAIProductDescriptionResearchRequest } from "@/lib/services/openai-product-description-research";
+import {
+  buildLocalProductDescriptionEvidence,
+  buildOpenAIProductDescriptionResearchRequest
+} from "@/lib/services/openai-product-description-research";
 import {
   buildOpenAIProductDescriptionHtml,
   buildOpenAIProductDescriptionRequest,
   buildOpenAIProductDescriptionTextFormat,
+  buildDeterministicLocalDescriptionContent,
   createOfficialOpenAIProductDescriptionResponse,
+  filterReferencedOpenAIProductDescriptionByEvidence,
   generateOpenAIProductDescription,
   OpenAIProductDescriptionError,
   OPENAI_PRODUCT_DESCRIPTION_DEFAULT_MAX_CHARACTERS,
@@ -16,9 +21,11 @@ import {
   readOpenAIProductDescriptionConfig,
   shouldUseProductDescriptionWebSearch,
   validateOpenAIProductDescriptionContent,
+  validateOpenAIProductDescriptionReferencedContent,
   type OpenAIProductDescriptionCreate,
   type OpenAIProductDescriptionContent,
   type OpenAIProductDescriptionLogEvent,
+  type OpenAIProductDescriptionReferencedContent,
   type OpenAIProductDescriptionResult,
   type ProductDescriptionSource
 } from "./openai-product-description-service";
@@ -138,8 +145,32 @@ function parsedContent(overrides: Partial<OpenAIProductDescriptionContent> = {})
   return { ...validContent, ...overrides };
 }
 
+function referencedContent(
+  content: OpenAIProductDescriptionContent = validContent,
+  product: ProductDescriptionSource = completeProduct
+): OpenAIProductDescriptionReferencedContent {
+  const evidenceIds = buildLocalProductDescriptionEvidence(product)
+    .sort((left, right) => {
+      const priority = (id: string) => id.startsWith("local.") && !id.startsWith("local.attributes")
+        ? 0
+        : 1;
+      return priority(left.id) - priority(right.id);
+    })
+    .slice(0, 9)
+    .map((item) => item.id);
+  const attributeIds = buildLocalProductDescriptionEvidence(product)
+    .filter((item) => item.id.startsWith("local.") && item.sourceField.startsWith("attributes"))
+    .slice(0, 3)
+    .map((item) => item.id);
+  const selectedEvidenceIds = [...new Set([...evidenceIds, ...attributeIds])].slice(0, 12);
+  return Object.fromEntries(Object.entries(content).map(([field, values]) => [
+    field,
+    values.map((text) => ({ text, evidenceIds: selectedEvidenceIds }))
+  ])) as OpenAIProductDescriptionReferencedContent;
+}
+
 function providerResponse(
-  parsed: OpenAIProductDescriptionContent = validContent,
+  parsed: unknown = referencedContent(),
   overrides: Partial<Awaited<ReturnType<OpenAIProductDescriptionCreate>>> = {}
 ): OpenAIProductDescriptionCreate {
   return async () => ({
@@ -243,7 +274,12 @@ test("structured output is a strict object with the complete response contract",
     properties?: Record<string, {
       type?: string;
       maxLength?: number;
-      items?: { type?: string; minLength?: number; maxLength?: number };
+      items?: { type?: string; minLength?: number; maxLength?: number; $ref?: string };
+    }>;
+    definitions?: Record<string, {
+      type?: string;
+      required?: string[];
+      additionalProperties?: boolean;
     }>;
   };
   assert.equal(format.type, "json_schema");
@@ -264,9 +300,15 @@ test("structured output is a strict object with the complete response contract",
   assert.equal(schema.additionalProperties, false);
   assert.equal(schema.properties?.introducao?.type, "array");
   assert.equal(schema.properties?.fichaTecnica?.type, "array");
-  assert.equal(schema.properties?.fichaTecnica?.items?.type, "string");
-  assert.equal(schema.properties?.fichaTecnica?.items?.minLength, 1);
-  assert.equal(schema.properties?.fichaTecnica?.items?.maxLength, 500);
+  const itemReference = schema.properties?.fichaTecnica?.items?.$ref;
+  assert.equal(typeof itemReference, "string");
+  const itemDefinition = schema.definitions?.[itemReference?.split("/").at(-1) ?? ""];
+  assert.equal(itemDefinition?.type, "object");
+  assert.deepEqual(itemDefinition?.required?.sort(), [
+    "evidenceIds",
+    "text"
+  ]);
+  assert.equal(itemDefinition?.additionalProperties, false);
   assert.equal(schema.properties?.html, undefined);
   assert.equal(schema.properties?.usedWebSearch, undefined);
 });
@@ -276,12 +318,16 @@ test("complete product context keeps false and zero while excluding private fact
     { product: completeProduct },
     readOpenAIProductDescriptionConfig(enabledEnv)
   );
-  const context = JSON.parse(request.input[1].content) as { produto: Record<string, unknown> };
+  const context = JSON.parse(request.input[1].content) as {
+    modo: string;
+    evidenciasConfirmadas: Array<{ id: string; fact: string }>;
+  };
   const serialized = JSON.stringify(context);
-  assert.equal(context.produto.freteGratis, false);
-  assert.equal(context.produto.volumes, "0");
-  assert.equal(context.produto.itensPorCaixa, "0");
-  assert.match(serialized, /"material":"PVC"/);
+  assert.equal(context.modo, "LOCAL_AND_WEB");
+  assert.ok(context.evidenciasConfirmadas.some((item) => item.id === "local.freeShipping" && item.fact.endsWith("false")));
+  assert.ok(context.evidenciasConfirmadas.some((item) => item.id === "local.volumes" && item.fact.endsWith("0")));
+  assert.ok(context.evidenciasConfirmadas.some((item) => item.id === "local.itemsPerBox" && item.fact.endsWith("0")));
+  assert.match(serialized, /attributes\.material: PVC/);
   assert.doesNotMatch(serialized, /999\.00|500\.00|must-never|secret-id/);
   assert.doesNotMatch(serialized, /accessToken|costPrice|salePrice|internal_id/);
 });
@@ -451,40 +497,34 @@ test("free text provider response is rejected without fallback interpretation", 
   assert.equal(calls, 2);
 });
 
-test("local-only fallback rejects unsupported numeric facts", async () => {
+test("local-only fallback omits unsupported numeric facts with sanitized telemetry", async () => {
   const logs: OpenAIProductDescriptionLogEvent[] = [];
-  await expectDescriptionError(
-    () => generateOpenAIProductDescription(
-      { product: partialProduct },
-      {
-        env: enabledEnv,
-        correlationId: "numeric-correlation",
-        logger: (event) => logs.push(event),
-        createResponse: providerResponse(
-          parsedContent({
-            introducao: ["Suporte para instalação com capacidade técnica declarada de 999 kg."],
-            fichaTecnica: ["Tipo: Suporte"],
-            vantagens: ["Finalidade: Organização da instalação"]
-          }),
-          { output: [] }
-        )
-      }
-    ),
-    "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE"
+  const unsupported = parsedContent({
+    introducao: ["Suporte para instalação com capacidade técnica declarada de 999 kg."],
+    fichaTecnica: ["Tipo: Suporte"],
+    vantagens: ["Finalidade: Organização da instalação"]
+  });
+  const result = await generateOpenAIProductDescription(
+    { product: partialProduct },
+    {
+      env: enabledEnv,
+      correlationId: "numeric-correlation",
+      logger: (event) => logs.push(event),
+      createResponse: providerResponse(
+        referencedContent(unsupported, partialProduct),
+        { output: [] }
+      )
+    }
   );
   const terminal = logs.at(-1);
-  assert.equal(terminal?.errorClass, "OpenAIProductDescriptionError");
-  assert.equal(terminal?.errorCode, "OPENAI_DESCRIPTION_NUMERIC_FACT_UNSUPPORTED");
-  assert.equal(terminal?.validationStage, "evidence_validation");
-  assert.equal(terminal?.validationRule, "mapped_numeric_evidence");
-  assert.equal(terminal?.rejectedField, "introducao[0]");
-  assert.equal(terminal?.rejectionReason, "unsupported_numeric_fact");
-  assert.deepEqual(terminal?.generatedNumericFact, {
-    raw: "999",
-    field: "introducao[0]"
-  });
+  assert.equal(terminal?.stage, "request_completed");
+  assert.equal(terminal?.evidenceMode, "LOCAL_ONLY_STRICT");
+  assert.ok(terminal?.omittedSections.includes("introducao"));
+  assert.equal(terminal?.omittedFacts[0]?.field, "introducao");
+  assert.equal(terminal?.omittedFacts[0]?.semanticType, "WEIGHT");
+  assert.ok(result.warnings.includes("UNSUPPORTED_FACT_OMITTED"));
+  assert.doesNotMatch(result.html, /999/);
   assert.equal(terminal?.retryCount, 0);
-  assert.notEqual(terminal?.errorCode, null);
 });
 
 test("invalid structured output logs the exact schema rejection", async () => {
@@ -514,33 +554,29 @@ test("invalid structured output logs the exact schema rejection", async () => {
   assert.equal(terminal?.rejectionReason, "expected_object");
 });
 
-test("package content without local evidence has its own stable diagnostic", async () => {
+test("package content without local evidence is omitted in local-only strict mode", async () => {
   const logs: OpenAIProductDescriptionLogEvent[] = [];
-  await expectDescriptionError(
-    () => generateOpenAIProductDescription(
-      { product: partialProduct },
-      {
-        env: enabledEnv,
-        logger: (event) => logs.push(event),
-        createResponse: providerResponse(
-          parsedContent({
-            introducao: ["Suporte destinado à organização da instalação conforme os dados cadastrados."],
-            fichaTecnica: ["Tipo: Suporte"],
-            conteudoEmbalagem: ["Produto principal"],
-            vantagens: []
-          }),
-          { output: [] }
-        )
-      }
-    ),
-    "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE"
+  const unsupported = parsedContent({
+    introducao: ["Suporte destinado à organização da instalação conforme os dados cadastrados."],
+    fichaTecnica: ["Tipo: Suporte"],
+    conteudoEmbalagem: ["Produto principal"],
+    vantagens: []
+  });
+  const result = await generateOpenAIProductDescription(
+    { product: partialProduct },
+    {
+      env: enabledEnv,
+      logger: (event) => logs.push(event),
+      createResponse: providerResponse(
+        referencedContent(unsupported, partialProduct),
+        { output: [] }
+      )
+    }
   );
   const terminal = logs.at(-1);
-  assert.equal(terminal?.errorCode, "OPENAI_DESCRIPTION_PACKAGE_CONTENT_UNSUPPORTED");
-  assert.equal(terminal?.validationStage, "package_content_validation");
-  assert.equal(terminal?.validationRule, "mapped_package_content_evidence");
-  assert.equal(terminal?.rejectedField, "conteudoEmbalagem[0]");
-  assert.equal(terminal?.rejectionReason, "package_content_without_evidence");
+  assert.ok(result.warnings.includes("UNSUPPORTED_FACT_OMITTED"));
+  assert.equal(terminal?.omittedFacts[0]?.field, "conteudoEmbalagem");
+  assert.doesNotMatch(result.html, /Conteúdo da Embalagem/);
 });
 
 test("partial product remains conservative without invented sections", async () => {
@@ -549,7 +585,7 @@ test("partial product remains conservative without invented sections", async () 
     {
       env: enabledEnv,
       createResponse: providerResponse(
-        partialContent,
+        referencedContent(partialContent, partialProduct),
         { output: [] }
       )
     }
@@ -564,8 +600,10 @@ test("conflicting web data is governed by the local precedence instruction", () 
     readOpenAIProductDescriptionConfig(enabledEnv)
   );
   assert.match(request.input[0].content, /omita o dado conflitante/);
-  const context = JSON.parse(request.input[1].content) as { produto: Record<string, unknown> };
-  assert.match(JSON.stringify(context), /"material":"PVC"/);
+  const context = JSON.parse(request.input[1].content) as {
+    evidenciasConfirmadas: Array<{ fact: string }>;
+  };
+  assert.ok(context.evidenciasConfirmadas.some((item) => item.fact === "attributes.material: PVC"));
 });
 
 test("official SDK adapter uses responses.parse with zero retry", async () => {
@@ -577,7 +615,7 @@ test("official SDK adapter uses responses.parse with zero retry", async () => {
       return {
         withResponse: async () => ({
           data: {
-            output_parsed: validContent,
+            output_parsed: referencedContent(),
             output: [],
             status: "completed"
           },
@@ -599,7 +637,7 @@ test("official SDK adapter uses responses.parse with zero retry", async () => {
   assert.equal(receivedBody, request);
   assert.equal(response.httpStatus, 200);
   assert.equal(response.requestId, "req_safe_123");
-  assert.deepEqual(response.outputParsed, validContent);
+  assert.deepEqual(response.outputParsed, referencedContent());
 });
 
 test("one explicit generation performs one research call and one generation call without retry", async () => {
@@ -618,7 +656,9 @@ test("one explicit generation performs one research call and one generation call
     }
   );
   assert.equal(calls, 2);
-  assert.equal(result.html, validHtml);
+  assert.match(result.html, /Ficha Técnica/);
+  assert.match(result.html, /Frete grátis: Não/);
+  assert.match(result.html, /Dimensões/);
   assert.equal(logs.at(-1)?.retryCount, 0);
   assert.doesNotMatch(JSON.stringify(logs), /test-key|Abraçadeira|PVC/);
 });
@@ -629,7 +669,7 @@ test("actual provider sources determine web-search metadata", async () => {
     {
       env: enabledEnv,
       createResponse: providerResponse(
-        partialContent,
+        referencedContent(partialContent, partialProduct),
         { output: [] }
       )
     }
@@ -846,6 +886,12 @@ test("route enriches telemetry with product user and tenant context", async () =
         rejectionReason: "expected_object",
         generatedNumericFact: null,
         localNumericCandidates: [],
+        evidenceMode: "LOCAL_ONLY_STRICT",
+        localFactCount: 0,
+    generatedFactCount: 0,
+    omittedSections: [],
+    omittedFacts: [],
+    warningCodes: [],
         retryCount: 0
       });
       return validResult;
@@ -979,8 +1025,178 @@ test("provider metadata is rejected and backend owns fallback warnings", async (
     { product: completeProduct },
     { env: enabledEnv, createResponse: providerResponse() }
   );
-  assert.deepEqual(result.warnings, ["OFFICIAL_SOURCES_NOT_FOUND"]);
+  assert.deepEqual(result.warnings, [
+    "OFFICIAL_SOURCES_NOT_FOUND",
+    "UNSUPPORTED_FACT_OMITTED"
+  ]);
   assert.doesNotMatch(result.html, /Fonte web conflitante/);
+});
+
+test("local evidence catalog excludes cost price stock null and uninformed values", () => {
+  const evidence = buildLocalProductDescriptionEvidence({
+    ...completeProduct,
+    packagingGtin: null,
+    manufacturerSku: "Não informado",
+    attributes: {
+      material: "PVC",
+      costPrice: "4.56",
+      salePrice: "9.99",
+      stock: 12,
+      empty: "",
+      ignored: "Não informado"
+    }
+  });
+  const serialized = JSON.stringify(evidence);
+  assert.doesNotMatch(serialized, /4\.56|9\.99|stock|manufacturerSku|packagingGtin/);
+  assert.match(serialized, /attributes\.material: PVC/);
+});
+
+test("every generated factual item requires one or more evidence ids", () => {
+  const referenced = referencedContent();
+  for (const items of Object.values(referenced)) {
+    for (const item of items) assert.ok(item.evidenceIds.length > 0);
+  }
+  assert.deepEqual(validateOpenAIProductDescriptionReferencedContent(referenced), referenced);
+});
+
+test("unknown evidence id is rejected in rich evidence mode", () => {
+  const referenced = referencedContent();
+  referenced.fichaTecnica[0].evidenceIds = ["local.unknown"];
+  assert.throws(
+    () => filterReferencedOpenAIProductDescriptionByEvidence(
+      referenced,
+      buildLocalProductDescriptionEvidence(completeProduct),
+      "LOCAL_AND_WEB"
+    ),
+    (error: unknown) => error instanceof OpenAIProductDescriptionError &&
+      error.code === "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE"
+  );
+});
+
+test("GTIN evidence cannot support material", () => {
+  const referenced = referencedContent({
+    ...validContent,
+    fichaTecnica: ["Material: ABS"]
+  });
+  referenced.fichaTecnica[0].evidenceIds = ["local.gtin"];
+  assert.throws(() => filterReferencedOpenAIProductDescriptionByEvidence(
+    referenced,
+    buildLocalProductDescriptionEvidence(completeProduct),
+    "LOCAL_AND_WEB"
+  ));
+});
+
+test("weight evidence cannot support certification", () => {
+  const referenced = referencedContent({
+    ...validContent,
+    fichaTecnica: ["Certificação: Inmetro"]
+  });
+  referenced.fichaTecnica[0].evidenceIds = ["local.weight"];
+  assert.throws(() => filterReferencedOpenAIProductDescriptionByEvidence(
+    referenced,
+    buildLocalProductDescriptionEvidence(completeProduct),
+    "LOCAL_AND_WEB"
+  ));
+});
+
+test("local-only strict keeps valid items while omitting unsupported optional items", () => {
+  const referenced = referencedContent({
+    ...validContent,
+    fichaTecnica: ["Marca: Andaluz", "Certificação: Inmetro"]
+  });
+  referenced.fichaTecnica[0].evidenceIds = ["local.brand"];
+  referenced.fichaTecnica[1].evidenceIds = ["local.weight"];
+  const filtered = filterReferencedOpenAIProductDescriptionByEvidence(
+    referenced,
+    buildLocalProductDescriptionEvidence(completeProduct),
+    "LOCAL_ONLY_STRICT"
+  );
+  assert.deepEqual(filtered.content.fichaTecnica, ["Marca: Andaluz"]);
+  assert.ok(filtered.omitted.some(({ field, index, semanticType }) => (
+    field === "fichaTecnica" && index === 1 && semanticType === "CERTIFICATION"
+  )));
+});
+
+test("backend assembles local technical facts dimensions and attributes deterministically", () => {
+  const content = buildDeterministicLocalDescriptionContent(completeProduct, {
+    ...validContent,
+    fichaTecnica: ["Material deformado pela IA"],
+    dimensoes: ["Altura deformada pela IA"]
+  });
+  assert.ok(content.fichaTecnica.includes("Marca: Andaluz"));
+  assert.ok(content.fichaTecnica.includes("Material: PVC"));
+  assert.ok(content.fichaTecnica.includes("Cor: Preto"));
+  assert.ok(content.dimensoes.includes("Peso líquido: 0,03 kg"));
+  assert.ok(content.dimensoes.includes("Altura: 2 CM"));
+  assert.doesNotMatch(JSON.stringify(content), /deformad/);
+});
+
+test("local-only minimum content produces a sanitized description", () => {
+  const content = buildDeterministicLocalDescriptionContent(partialProduct, {
+    ...partialContent,
+    fichaTecnica: [],
+    dimensoes: []
+  });
+  const html = buildOpenAIProductDescriptionHtml(partialProduct.name, content);
+  assert.match(html, /Ficha Técnica/);
+  assert.doesNotMatch(html, /evidenceIds|OFFICIAL_SOURCES_NOT_FOUND/);
+});
+
+test("local-only fallback rejects when fewer than two local technical facts remain", () => {
+  const sparse: ProductDescriptionSource = Object.fromEntries(
+    Object.keys(partialProduct).map((key) => [key, null])
+  ) as unknown as ProductDescriptionSource;
+  sparse.name = "Produto sem dados técnicos";
+  sparse.attributes = null;
+  assert.throws(
+    () => buildDeterministicLocalDescriptionContent(sparse, {
+      introducao: [],
+      fichaTecnica: [],
+      compatibilidade: [],
+      conteudoEmbalagem: [],
+      vantagens: [],
+      dimensoes: [],
+      tutorialInstalacao: [],
+      cuidadosManutencao: [],
+      maisSobreProduto: []
+    }),
+    (error: unknown) => error instanceof OpenAIProductDescriptionError &&
+      error.code === "OPENAI_DESCRIPTION_INSUFFICIENT_EVIDENCE"
+  );
+});
+
+test("local-only strict does not accept unsupported helmet claims from the product name", () => {
+  const helmet = {
+    ...completeProduct,
+    name: "Capacete Play Monocolor Matte Black 54/XS Race Tech",
+    brand: "Race Tech",
+    model: "Play Monocolor",
+    attributes: { line: "Play", color: "Matte Black", size: "54/XS" }
+  };
+  const referenced = referencedContent({
+    ...validContent,
+    introducao: ["Capacete com conforto, proteção e segurança para uso urbano."],
+    fichaTecnica: ["Material: ABS", "Estrutura: EPS", "Viseira: policarbonato", "Certificação: Inmetro"]
+  }, helmet);
+  const filtered = filterReferencedOpenAIProductDescriptionByEvidence(
+    referenced,
+    buildLocalProductDescriptionEvidence(helmet),
+    "LOCAL_ONLY_STRICT"
+  );
+  assert.equal(filtered.content.introducao.length, 0);
+  assert.equal(filtered.content.fichaTecnica.length, 0);
+  assert.ok(filtered.fieldsOmitted >= 5);
+});
+
+test("description result contract never exposes internal evidence ids", () => {
+  assert.deepEqual(Object.keys(validResult).sort(), [
+    "evidenceLevel",
+    "html",
+    "researchSummary",
+    "usedWebSearch",
+    "warnings"
+  ]);
+  assert.doesNotMatch(JSON.stringify(validResult), /evidenceIds|local\.|web\./);
 });
 
 test("service and route tests never call a real provider or persistence API", () => {
