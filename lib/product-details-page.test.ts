@@ -49,9 +49,12 @@ test("return targets are fail-closed to the products listing", () => {
   assert.equal(normalizeProductReturnTo("/products#unsafe"), "/products");
 });
 
-test("name, image and view action navigate to the dedicated route", () => {
+test("name and image are semantic links while the view action keeps dedicated navigation", () => {
+  assert.match(productsSource, /import Link from "next\/link"/);
   assert.match(productsSource, /function openProductDetails\(productId: string\)/);
-  assert.ok((productsSource.match(/onClick=\{\(\) => openProductDetails\(product\.id\)\}/g) ?? []).length >= 3);
+  assert.equal((productsSource.match(/href=\{buildProductDetailsHref\(product\.id, productListReturnTo\)\}/g) ?? []).length, 2);
+  assert.ok((productsSource.match(/prefetch=\{false\}/g) ?? []).length >= 2);
+  assert.equal((productsSource.match(/onClick=\{\(\) => openProductDetails\(product\.id\)\}/g) ?? []).length, 1);
   assert.match(productsSource, /buildProductDetailsHref\(productId, returnTo\)/);
   assert.doesNotMatch(productsSource, /ProductDetailsModal|viewingProduct/);
 });
@@ -60,6 +63,7 @@ test("selection and copy controls remain independent from details navigation", (
   assert.match(productsSource, /<ProductCheckbox[\s\S]*?onChange=\{\(checked\) => toggleProductSelection\(product\.id, checked\)\}/);
   assert.match(productsSource, /label="Copiar SKU" text=\{product\.sku\}/);
   assert.match(productsSource, /label="Copiar EAN" text=\{product\.ean\}/);
+  assert.match(productsSource, /label="Copiar titulo" text=\{product\.name\}/);
   assert.doesNotMatch(
     productsSource,
     /<ProductCopyButton[^>]*onClick=\{\(\) => openProductDetails/

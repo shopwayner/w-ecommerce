@@ -462,6 +462,7 @@ export function ProductsPage() {
   const [pagination, setPagination] = useState<ProductListPagination>(emptyPagination);
   const [urlStateReady, setUrlStateReady] = useState(false);
   const [urlNavigationVersion, setUrlNavigationVersion] = useState(0);
+  const [productListReturnTo, setProductListReturnTo] = useState("/products");
   const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -523,11 +524,13 @@ export function ProductsPage() {
     if (nextPageSize !== 20) params.set("limit", String(nextPageSize));
     const nextUrl = `${window.location.pathname}${params.size ? `?${params.toString()}` : ""}`;
     window.history[mode === "push" ? "pushState" : "replaceState"]({}, "", nextUrl);
+    setProductListReturnTo(nextUrl);
   }, []);
 
   useEffect(() => {
     function readUrlState() {
       const params = new URLSearchParams(window.location.search);
+      setProductListReturnTo(`${window.location.pathname}${window.location.search}`);
       const nextFilters = parseProductListFilters(params);
       const nextSearch = params.get("q") ?? "";
       const requestedPage = Math.max(1, Number.parseInt(params.get("page") ?? "1", 10) || 1);
@@ -1321,8 +1324,7 @@ export function ProductsPage() {
     );
   }
 
-  function openProductDetails(productId: string) {
-    const returnTo = `${window.location.pathname}${window.location.search}`;
+  function rememberProductListPosition(returnTo: string) {
     const tableScroller = document.querySelector<HTMLElement>(
       '[data-testid="products-list-area"] .matrix-scroll'
     );
@@ -1337,6 +1339,11 @@ export function ProductsPage() {
     } catch {
       // Navigation must not depend on optional browser storage.
     }
+  }
+
+  function openProductDetails(productId: string) {
+    const returnTo = `${window.location.pathname}${window.location.search}`;
+    rememberProductListPosition(returnTo);
     router.push(buildProductDetailsHref(productId, returnTo));
   }
 
@@ -1796,27 +1803,29 @@ export function ProductsPage() {
               onChange={(checked) => toggleProductSelection(product.id, checked)}
             />,
               <div key={`${product.id}-name`} className="flex min-w-0 items-center gap-2">
-              <button
+              <Link
                 aria-label={`Ver ${product.name}`}
                 className="grid h-[34px] w-[34px] shrink-0 place-items-center overflow-hidden rounded-md border border-matrix-border bg-matrix-panel2/80 transition hover:border-matrix-gold/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold"
-                onClick={() => openProductDetails(product.id)}
-                type="button"
+                href={buildProductDetailsHref(product.id, productListReturnTo)}
+                onClick={() => rememberProductListPosition(productListReturnTo)}
+                prefetch={false}
               >
                 <ProductListThumbnail
                   key={product.imageUrl ?? `${product.id}-without-image`}
                   alt={product.name}
                   src={product.imageUrl}
                 />
-              </button>
+              </Link>
               <div className="min-w-0">
                 <div className="flex min-w-0 items-center gap-1">
-                  <button
+                  <Link
                     className="min-w-0 truncate text-left transition hover:text-matrix-goldDark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold"
-                    onClick={() => openProductDetails(product.id)}
-                    type="button"
+                    href={buildProductDetailsHref(product.id, productListReturnTo)}
+                    onClick={() => rememberProductListPosition(productListReturnTo)}
+                    prefetch={false}
                   >
                     {product.name}
-                  </button>
+                  </Link>
                   <ProductCopyButton className="!h-4 !w-4 [&_svg]:!h-2.5 [&_svg]:!w-2.5" label="Copiar titulo" text={product.name} />
                 </div>
                 {getBlingCatalogStatusMessage(product.blingStatus) ? (
