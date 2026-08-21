@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { requireApiAuth } from "@/lib/auth/api";
-import { normalizeProductBrand } from "@/lib/product-brand";
 import { prisma } from "@/lib/prisma";
 import { getUserAccountContext } from "@/lib/services/account-context-service";
 import {
@@ -10,11 +9,14 @@ import {
   readCanonicalBlingStatusFromAttributes
 } from "@/lib/services/bling-product-import-service";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
+import { parseProductListFilters } from "@/lib/product-list-filters";
 import {
-  buildProductListFilterOptions,
-  matchesProductListFilters,
-  parseProductListFilters
-} from "@/lib/product-list-filters";
+  countProductList,
+  findProductListPageIds,
+  loadProductListCatalogMetadata,
+  parseProductListPagination,
+  type ProductListQueryInput
+} from "@/lib/product-list-query";
 import { productCreateSchema } from "@/lib/validation";
 
 const productListSelect = {
@@ -22,19 +24,10 @@ const productListSelect = {
   name: true,
   sku: true,
   ean: true,
-  description: true,
   category: true,
   brand: true,
-  ncm: true,
   source: true,
   status: true,
-  enrichmentStatus: true,
-  syncStatus: true,
-  confidenceScore: true,
-  weight: true,
-  height: true,
-  width: true,
-  depth: true,
   attributes: true,
   blockedFields: true,
   updatedAt: true,
@@ -50,11 +43,6 @@ const productListSelect = {
     take: 1,
     orderBy: { position: "asc" },
     select: { url: true }
-  },
-  enrichmentDrafts: {
-    take: 1,
-    orderBy: { updatedAt: "desc" },
-    select: { id: true }
   },
   mappings: {
     take: 1,
@@ -73,35 +61,12 @@ const productListSelect = {
         }
       }
     }
-  },
-  marketplaceCategoryMappings: {
-    where: { provider: "MERCADO_LIVRE" },
-    take: 1,
-    orderBy: { updatedAt: "desc" },
-    select: {
-      provider: true,
-      status: true,
-      marketplaceCategoryId: true,
-      marketplaceCategoryName: true,
-      marketplaceCategoryPath: true,
-      confidenceScore: true,
-      requiredAttributes: true,
-      productAttributeValues: {
-        select: {
-          attributeId: true,
-          value: true,
-          status: true
-        }
-      }
-    }
   }
 } satisfies Prisma.ProductSelect;
 
 type ProductListRecord = Prisma.ProductGetPayload<{
   select: typeof productListSelect;
 }>;
-
-type SerializedProduct = ReturnType<typeof serializeProduct>;
 
 function getTestMetadata(blockedFields: unknown) {
   if (!blockedFields || typeof blockedFields !== "object" || Array.isArray(blockedFields)) {
@@ -136,196 +101,6 @@ function normalizeOptionalText(value: string | null | undefined) {
   return normalized ? normalized : null;
 }
 
-function skuStatusWhere(skuStatus: string | null): Prisma.ProductWhereInput {
-  if (skuStatus === "with") {
-    return {
-      AND: [
-        { sku: { not: null } },
-        { sku: { not: "" } },
-        { NOT: { sku: { startsWith: "BLING-" } } }
-      ]
-    };
-  }
-
-  if (skuStatus === "without") {
-    return {
-      OR: [
-        { sku: null },
-        { sku: "" },
-        { sku: { startsWith: "BLING-" } }
-      ]
-    };
-  }
-
-  return {};
-}
-
-function hasText(value: string | null | undefined) {
-  return Boolean(value?.trim());
-}
-
-function hasRealSku(value: string | null | undefined) {
-  const sku = value?.trim();
-  return Boolean(sku && !sku.toUpperCase().startsWith("BLING-"));
-}
-
-function toNumber(value: unknown) {
-  if (value === null || value === undefined) return 0;
-  const numeric = typeof value === "number" ? value : Number(value.toString());
-  return Number.isFinite(numeric) ? numeric : 0;
-}
-
-function getQualityScore(product: SerializedProduct) {
-  let score = 0;
-  if (product.name.trim()) score += 10;
-  if (hasRealSku(product.sku)) score += 15;
-  if (hasText(product.ean)) score += 15;
-  if (toNumber(product.price) > 0) score += 10;
-  if (product.stock > 0) score += 10;
-  if (toNumber(product.costPrice) > 0) score += 10;
-  if (hasText(product.imageUrl)) score += 10;
-  if (hasText(product.description)) score += 5;
-  if (hasText(product.brand)) score += 10;
-  if (hasText(product.category)) score += 5;
-  return Math.min(score, 100);
-}
-
-function isReadyProduct(product: SerializedProduct) {
-  return (
-    hasText(product.name) &&
-    hasRealSku(product.sku) &&
-    hasText(product.ean) &&
-    toNumber(product.price) > 0 &&
-    product.stock > 0 &&
-    toNumber(product.costPrice) > 0 &&
-    hasText(product.imageUrl) &&
-    hasText(product.description) &&
-    hasText(product.brand) &&
-    hasText(product.category)
-  );
-}
-
-function getQualityBand(score: number, product: SerializedProduct) {
-  if (score <= 30) return "critical";
-  if (score <= 60) return "needsReview";
-  if (score <= 80) return "good";
-  return isReadyProduct(product) ? "ready" : "good";
-}
-
-function matchesStateFilter(filter: string | null, present: boolean) {
-  if (!filter) return true;
-  if (filter === "with") return present;
-  if (filter === "without") return !present;
-  return true;
-}
-
-function hasRequiredAttributesSynced(value: unknown) {
-  if (!value) return false;
-  if (Array.isArray(value)) return value.length > 0;
-  if (typeof value === "object") return Object.keys(value).length > 0;
-  return false;
-}
-
-function requiredAttributeIds(value: unknown) {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((attribute) => {
-      const tags = typeof attribute === "object" && attribute !== null && "tags" in attribute
-        ? (attribute as { tags?: Record<string, unknown> }).tags
-        : null;
-      return tags?.required === true || tags?.catalog_required === true;
-    })
-    .map((attribute) => {
-      const id = typeof attribute === "object" && attribute !== null && "id" in attribute
-        ? (attribute as { id?: unknown }).id
-        : null;
-      return typeof id === "string" && id.trim() ? id.trim() : null;
-    })
-    .filter((id): id is string => Boolean(id));
-}
-
-function hasFilledRequiredAttributeValues(mapping: SerializedProduct["marketplaceCategories"][number] | undefined) {
-  const requiredIds = requiredAttributeIds(mapping?.requiredAttributes);
-  if (!requiredIds.length) return false;
-  const values = mapping?.attributeValues ?? [];
-  const confirmed = new Set(values.filter((value) => value.status === "CONFIRMED" && hasText(value.value)).map((value) => value.attributeId));
-  return requiredIds.every((id) => confirmed.has(id));
-}
-
-function hasDimensions(product: SerializedProduct) {
-  return Boolean(product.weight && product.height && product.width && product.depth);
-}
-
-function matchesMercadoLivreFilter(filter: string | null, product: SerializedProduct) {
-  if (!filter) return true;
-  const mapping = product.marketplaceCategories.find((item) => item.provider === "MERCADO_LIVRE");
-  const hasMapping = Boolean(mapping);
-  const hasOfficialId = hasText(mapping?.marketplaceCategoryId);
-  const hasAttributesSynced = hasRequiredAttributesSynced(mapping?.requiredAttributes);
-  const hasAttributes = hasFilledRequiredAttributeValues(mapping);
-  const readyForReview =
-    mapping?.status === "CONFIRMED" &&
-    hasOfficialId &&
-    hasAttributes &&
-    hasText(product.name) &&
-    toNumber(product.price) > 0 &&
-    product.stock > 0 &&
-    hasText(product.imageUrl) &&
-    hasText(product.ean) &&
-    hasText(product.brand) &&
-    hasText(product.description) &&
-    hasDimensions(product);
-
-  if (filter === "with") return hasMapping;
-  if (filter === "without") return !hasMapping;
-  if (filter === "suggested") return mapping?.status === "SUGGESTED";
-  if (filter === "confirmed") return mapping?.status === "CONFIRMED";
-  if (filter === "rejected") return mapping?.status === "REJECTED";
-  if (filter === "withOfficialId") return hasOfficialId;
-  if (filter === "withoutOfficialId") return !hasOfficialId;
-  if (filter === "attributesPending") return hasOfficialId && (!hasAttributesSynced || !hasAttributes);
-  if (filter === "readyForReview") return readyForReview;
-  return true;
-}
-
-function compareText(left: string | null | undefined, right: string | null | undefined) {
-  return (left ?? "").localeCompare(right ?? "", "pt-BR", { sensitivity: "base" });
-}
-
-function sortProducts(products: SerializedProduct[], sort: string | null) {
-  return [...products].sort((left, right) => {
-    const leftQuality = getQualityScore(left);
-    const rightQuality = getQualityScore(right);
-    const leftStock = left.stock;
-    const rightStock = right.stock;
-    const leftSku = hasRealSku(left.sku) ? 1 : 0;
-    const rightSku = hasRealSku(right.sku) ? 1 : 0;
-    const leftImage = hasText(left.imageUrl) ? 1 : 0;
-    const rightImage = hasText(right.imageUrl) ? 1 : 0;
-    const leftPrice = toNumber(left.price);
-    const rightPrice = toNumber(right.price);
-    const leftStockValue = leftPrice * leftStock;
-    const rightStockValue = rightPrice * rightStock;
-
-    if (sort === "quality_asc") return leftQuality - rightQuality || compareText(left.name, right.name);
-    if (sort === "stock_desc") return rightStock - leftStock || compareText(left.name, right.name);
-    if (sort === "without_sku") return leftSku - rightSku || rightQuality - leftQuality || compareText(left.name, right.name);
-    if (sort === "recent") return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
-    if (sort === "name_asc") return compareText(left.name, right.name);
-    if (sort === "stock_value_desc") return rightStockValue - leftStockValue || compareText(left.name, right.name);
-    if (sort === "price_desc") return rightPrice - leftPrice || compareText(left.name, right.name);
-    if (sort === "price_asc") return leftPrice - rightPrice || compareText(left.name, right.name);
-
-    return (
-      rightQuality - leftQuality ||
-      Number(rightStock > 0) - Number(leftStock > 0) ||
-      rightSku - leftSku ||
-      rightImage - leftImage ||
-      compareText(left.name, right.name)
-    );
-  });
-}
-
 function serializeProduct(product: ProductListRecord) {
   const metadata = getTestMetadata(product.blockedFields);
   const attributes = getProductAttributes(product.attributes);
@@ -335,7 +110,6 @@ function serializeProduct(product: ProductListRecord) {
     attributes,
     blingMapping?.connectionId
   );
-  const brand = normalizeProductBrand(product.brand);
   const blingAccountName =
     blingMapping?.connection.name ||
     blingMapping?.connection.externalCompanyName ||
@@ -348,10 +122,7 @@ function serializeProduct(product: ProductListRecord) {
     name: product.name,
     sku: product.sku,
     ean: product.ean,
-    description: product.description,
     category: product.category,
-    brand,
-    ncm: product.ncm,
     origin:
       metadata.origin
       ?? getStringAttribute(blingAttributes, "origin")
@@ -362,10 +133,7 @@ function serializeProduct(product: ProductListRecord) {
       ?? getStringAttribute(blingAttributes, "unit")
       ?? (typeof attributes.unit === "string" ? attributes.unit : null),
     imageUrl: product.images[0]?.url ?? null,
-    hasEnrichmentDraft: product.enrichmentDrafts.length > 0,
     status: product.status,
-    enrichmentStatus: product.enrichmentStatus,
-    syncStatus: product.syncStatus,
     source: product.source,
     externalId: blingMapping?.externalProductId ?? getStringAttribute(attributes, "externalId"),
     externalProductId: blingMapping?.externalProductId ?? getStringAttribute(attributes, "externalId"),
@@ -380,20 +148,6 @@ function serializeProduct(product: ProductListRecord) {
           status: blingMapping.connection.status
         }
       : null,
-    marketplaceCategories: product.marketplaceCategoryMappings.map((mapping) => ({
-      provider: mapping.provider,
-      status: mapping.status,
-      marketplaceCategoryId: mapping.marketplaceCategoryId,
-      marketplaceCategoryName: mapping.marketplaceCategoryName,
-      marketplaceCategoryPath: mapping.marketplaceCategoryPath,
-      confidenceScore: mapping.confidenceScore,
-      requiredAttributes: mapping.requiredAttributes,
-      attributeValues: mapping.productAttributeValues.map((value) => ({
-        attributeId: value.attributeId,
-        value: value.value,
-        status: value.status
-      }))
-    })),
     marketplaceStores: readBlingProductMarketplaceStores(
       attributes,
       blingMapping?.connectionId
@@ -402,12 +156,6 @@ function serializeProduct(product: ProductListRecord) {
       attributes,
       blingMapping?.connectionId
     ),
-    confidenceScore: product.confidenceScore,
-    weight: product.weight?.toString() ?? null,
-    height: product.height?.toString() ?? null,
-    width: product.width?.toString() ?? null,
-    depth: product.depth?.toString() ?? null,
-    attributes: product.attributes,
     displayValue: metadata.displayValue,
     salePriceDisplay: metadata.salePriceDisplay ?? currentPrice?.salePrice.toString() ?? null,
     costPrice: currentPrice?.costPrice.toString() ?? "0",
@@ -424,23 +172,7 @@ export async function GET(request: Request) {
   const auth = await requireApiAuth("products:read");
   if (!auth.ok) return auth.response;
   const url = new URL(request.url);
-  const page = Math.max(1, Number.parseInt(url.searchParams.get("page") ?? "1", 10) || 1);
-  const rawLimit = url.searchParams.get("limit");
-  const loadAll = rawLimit === null || rawLimit === "all";
-  const limit = loadAll ? null : Math.min(Math.max(10, Number.parseInt(rawLimit ?? "100", 10) || 100), 1000);
-  const query = url.searchParams.get("q")?.trim().toLowerCase() ?? "";
-  const status = url.searchParams.get("status");
-  const skuStatus = url.searchParams.get("skuStatus");
-  const stockStatus = url.searchParams.get("stockStatus");
-  const imageStatus = url.searchParams.get("imageStatus");
-  const descriptionStatus = url.searchParams.get("descriptionStatus");
-  const categoryStatus = url.searchParams.get("categoryStatus");
-  const gtinStatus = url.searchParams.get("gtinStatus");
-  const costStatus = url.searchParams.get("costStatus");
-  const qualityBand = url.searchParams.get("qualityBand");
-  const mercadoLivreCategoryStatus = url.searchParams.get("mercadoLivreCategoryStatus");
-  const source = url.searchParams.get("source");
-  const sort = url.searchParams.get("sort");
+  const requestedPagination = parseProductListPagination(url.searchParams);
   const productListFilters = parseProductListFilters(url.searchParams);
   const accountContext = await getUserAccountContext(auth.context);
   const selectedBlingConnectionId =
@@ -448,20 +180,41 @@ export async function GET(request: Request) {
       ? accountContext.connectionId
       : null;
 
-  const products = await prisma.product.findMany({
+  const queryInput: ProductListQueryInput = {
+    organizationId: auth.context.organizationId,
+    selectedBlingConnectionId,
+    filters: productListFilters,
+    query: url.searchParams.get("q")?.trim() ?? "",
+    status: url.searchParams.get("status"),
+    skuStatus: url.searchParams.get("skuStatus"),
+    stockStatus: url.searchParams.get("stockStatus"),
+    imageStatus: url.searchParams.get("imageStatus"),
+    descriptionStatus: url.searchParams.get("descriptionStatus"),
+    categoryStatus: url.searchParams.get("categoryStatus"),
+    gtinStatus: url.searchParams.get("gtinStatus"),
+    costStatus: url.searchParams.get("costStatus"),
+    qualityBand: url.searchParams.get("qualityBand"),
+    mercadoLivreCategoryStatus: url.searchParams.get("mercadoLivreCategoryStatus"),
+    source: url.searchParams.get("source"),
+    sort: url.searchParams.get("sort")
+  };
+  const scope = {
+    organizationId: auth.context.organizationId,
+    selectedBlingConnectionId
+  };
+  const [total, metadata] = await Promise.all([
+    countProductList(prisma, queryInput),
+    loadProductListCatalogMetadata(prisma, scope)
+  ]);
+  const totalPages = Math.max(1, Math.ceil(total / requestedPagination.limit));
+  const safePage = Math.min(requestedPagination.page, totalPages);
+  const pagination = { page: safePage, limit: requestedPagination.limit };
+  const productIds = await findProductListPageIds(prisma, queryInput, pagination);
+
+  const products = productIds.length ? await prisma.product.findMany({
     where: {
       organizationId: auth.context.organizationId,
-      ...skuStatusWhere(skuStatus),
-      ...(selectedBlingConnectionId
-        ? {
-            mappings: {
-              some: {
-                organizationId: auth.context.organizationId,
-                connectionId: selectedBlingConnectionId
-              }
-            }
-          }
-        : {})
+      id: { in: productIds }
     },
     select: {
       ...productListSelect,
@@ -482,10 +235,6 @@ export async function GET(request: Request) {
         ...productListSelect.images,
         where: { organizationId: auth.context.organizationId }
       },
-      enrichmentDrafts: {
-        ...productListSelect.enrichmentDrafts,
-        where: { organizationId: auth.context.organizationId }
-      },
       mappings: {
         ...productListSelect.mappings,
         where: {
@@ -494,63 +243,29 @@ export async function GET(request: Request) {
             ? { connectionId: selectedBlingConnectionId }
             : {})
         }
-      },
-      marketplaceCategoryMappings: {
-        ...productListSelect.marketplaceCategoryMappings,
-        where: {
-          organizationId: auth.context.organizationId,
-          provider: "MERCADO_LIVRE"
-        }
       }
     },
-    orderBy: { createdAt: "desc" }
+    take: requestedPagination.limit
+  }) : [];
+  const productsById = new Map(products.map((product) => [product.id, serializeProduct(product)]));
+  const data = productIds.flatMap((productId) => {
+    const product = productsById.get(productId);
+    return product ? [product] : [];
   });
-
-  const serialized = products.map(serializeProduct);
-  const filterOptions = buildProductListFilterOptions(serialized);
-  const summary = {
-    totalProducts: serialized.length,
-    importedFromBlingCount: serialized.filter((product) => product.blingAccount).length,
-    readyForTestCount: serialized.filter((product) => product.status === "READY_FOR_TEST").length,
-    unknownBlingStatusCount: serialized.filter((product) => product.blingStatus === "UNKNOWN").length
-  };
-  const filtered = serialized.filter((product) => {
-    const score = getQualityScore(product);
-    return (
-      matchesProductListFilters(product, productListFilters, query) &&
-      (!stockStatus || matchesStateFilter(stockStatus, product.stock > 0)) &&
-      (!imageStatus || matchesStateFilter(imageStatus, hasText(product.imageUrl))) &&
-      matchesStateFilter(descriptionStatus, hasText(product.description)) &&
-      matchesStateFilter(categoryStatus, hasText(product.category)) &&
-      (!gtinStatus || matchesStateFilter(gtinStatus, hasText(product.ean))) &&
-      matchesStateFilter(costStatus, toNumber(product.costPrice) > 0) &&
-      (!qualityBand || getQualityBand(score, product) === qualityBand) &&
-      matchesMercadoLivreFilter(mercadoLivreCategoryStatus, product) &&
-      (!status || product.enrichmentStatus === status) &&
-      (!source || product.source === source)
-    );
-  });
-  const sorted = sortProducts(filtered, sort);
-  const total = sorted.length;
-  const totalPages = limit ? Math.max(1, Math.ceil(total / limit)) : 1;
-  const safePage = limit ? Math.min(page, totalPages) : 1;
-  const start = limit ? (safePage - 1) * limit : 0;
-  const pageProducts = limit ? sorted.slice(start, start + limit) : sorted;
-  const data = pageProducts;
 
   return NextResponse.json({
     data,
     accountContext,
-    filterOptions,
+    filterOptions: metadata.filterOptions,
     appliedFilters: productListFilters,
-    summary,
+    summary: metadata.summary,
     pagination: {
       page: safePage,
-      limit: limit ?? "all",
+      limit: requestedPagination.limit,
       total,
       totalPages,
-      hasNextPage: Boolean(limit && safePage < totalPages),
-      hasPreviousPage: Boolean(limit && safePage > 1)
+      hasNextPage: safePage < totalPages,
+      hasPreviousPage: safePage > 1
     }
   });
 }

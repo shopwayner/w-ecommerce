@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BadgeCheck,
   Clipboard,
@@ -128,29 +128,56 @@ export function IAPage() {
   const [initialProductId, setInitialProductId] = useState<string | null>(null);
   const [loadingProducts, setLoadingProducts] = useState(true);
 
+  const loadProducts = useCallback(async (query = "", preserveProductId = "") => {
+    setLoadingProducts(true);
+    try {
+      const params = new URLSearchParams({ page: "1", limit: "100" });
+      if (query.trim()) params.set("q", query.trim());
+      const response = await fetch(`/api/products?${params.toString()}`);
+      const payload = (await response.json()) as { data?: ProductListItem[] };
+      const nextProducts = payload.data ?? [];
+      setProducts((current) => {
+        const preserved = current.find((product) => product.id === preserveProductId);
+        return preserved && !nextProducts.some((product) => product.id === preserved.id)
+          ? [preserved, ...nextProducts]
+          : nextProducts;
+      });
+    } finally {
+      setLoadingProducts(false);
+    }
+  }, []);
+
   useEffect(() => {
     async function load() {
-      setLoadingProducts(true);
-      try {
-        const [productsResponse, statusResponse] = await Promise.all([fetch("/api/products"), fetch("/api/ai/status")]);
-        const productsPayload = (await productsResponse.json()) as { data?: ProductListItem[] };
-        const statusPayload = (await statusResponse.json()) as { data?: AIStatus };
-        setProducts(productsPayload.data ?? []);
-        setStatus(statusPayload.data ?? null);
-      } finally {
-        setLoadingProducts(false);
-      }
+      const [, statusResponse] = await Promise.all([loadProducts(), fetch("/api/ai/status")]);
+      const statusPayload = (await statusResponse.json()) as { data?: AIStatus };
+      setStatus(statusPayload.data ?? null);
     }
 
     void load();
-  }, []);
+  }, [loadProducts]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const moduleParam = params.get("module");
     const productId = params.get("productId");
     if (moduleParam && modules.some((module) => module.id === moduleParam)) setActiveModule(moduleParam as AIModuleId);
-    if (productId) setInitialProductId(productId);
+    if (productId) {
+      setInitialProductId(productId);
+      void fetch(`/api/products/${encodeURIComponent(productId)}`)
+        .then(async (response) => {
+          if (!response.ok) return null;
+          const payload = (await response.json()) as { data?: ProductListItem };
+          return payload.data ?? null;
+        })
+        .then((product) => {
+          if (!product) return;
+          setProducts((current) => current.some((item) => item.id === product.id)
+            ? current
+            : [product, ...current]);
+        })
+        .catch(() => undefined);
+    }
   }, []);
 
   return (
@@ -204,6 +231,7 @@ export function IAPage() {
             setActiveModule(null);
             setInitialProductId(null);
           }}
+          onProductSearch={loadProducts}
           products={products}
           status={status}
         />
@@ -217,6 +245,7 @@ function AIModuleWorkspace({
   loadingProducts,
   moduleId,
   onClose,
+  onProductSearch,
   products,
   status
 }: {
@@ -224,6 +253,7 @@ function AIModuleWorkspace({
   loadingProducts: boolean;
   moduleId: AIModuleId;
   onClose: () => void;
+  onProductSearch: (query: string, preserveProductId: string) => Promise<void>;
   products: ProductListItem[];
   status: AIStatus | null;
 }) {
@@ -243,10 +273,27 @@ function AIModuleWorkspace({
   const [message, setMessage] = useState("");
   const [result, setResult] = useState<RunResult | null>(null);
   const [resultText, setResultText] = useState("");
+  const selectedProductIdRef = useRef(productId);
+  const searchInitializedRef = useRef(false);
 
   useEffect(() => {
     if (initialProductId) setProductId(initialProductId);
   }, [initialProductId]);
+
+  useEffect(() => {
+    selectedProductIdRef.current = productId;
+  }, [productId]);
+
+  useEffect(() => {
+    if (!searchInitializedRef.current) {
+      searchInitializedRef.current = true;
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      void onProductSearch(query, selectedProductIdRef.current);
+    }, 300);
+    return () => window.clearTimeout(timeout);
+  }, [onProductSearch, query]);
 
   useEffect(() => {
     function closeOnEscape(event: KeyboardEvent) {
