@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { Boxes, Eye, FileUp, RefreshCw, Search, Send } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
@@ -45,7 +45,16 @@ type InventorySummary = {
 
 type InventoryResponse = {
   data?: InventoryItem[];
+  criticalItems?: InventoryItem[];
   summary?: InventorySummary;
+  pagination?: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+    hasNextPage: boolean;
+    hasPreviousPage: boolean;
+  };
 };
 
 const pageSizeOptions = [50, 100, 200];
@@ -76,38 +85,72 @@ function placeholderNotice(action: string) {
 
 export function InventoryPage() {
   const [items, setItems] = useState<InventoryItem[]>([]);
+  const [criticalItems, setCriticalItems] = useState<InventoryItem[]>([]);
   const [summary, setSummary] = useState<InventorySummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const [totalResults, setTotalResults] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const requestIdRef = useRef(0);
 
   const loadInventory = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/inventory", { cache: "no-store" });
+      const params = new URLSearchParams({
+        page: String(currentPage),
+        limit: String(pageSize)
+      });
+      if (debouncedSearchQuery) params.set("q", debouncedSearchQuery);
+      const response = await fetch(`/api/inventory?${params.toString()}`, {
+        cache: "no-store"
+      });
       const payload = (await response.json()) as InventoryResponse & { error?: string };
+      if (requestId !== requestIdRef.current) return;
 
       if (!response.ok) {
         setItems([]);
+        setCriticalItems([]);
         setSummary(null);
+        setTotalResults(0);
+        setTotalPages(1);
         setError(payload.error ?? "Nao foi possivel carregar o estoque.");
         return;
       }
 
       setItems(payload.data ?? []);
+      setCriticalItems(payload.criticalItems ?? []);
       setSummary(payload.summary ?? null);
+      setTotalResults(payload.pagination?.total ?? 0);
+      setTotalPages(payload.pagination?.totalPages ?? 1);
+      if (payload.pagination && payload.pagination.page !== currentPage) {
+        setCurrentPage(payload.pagination.page);
+      }
     } catch {
+      if (requestId !== requestIdRef.current) return;
       setItems([]);
+      setCriticalItems([]);
       setSummary(null);
+      setTotalResults(0);
+      setTotalPages(1);
       setError("Nao foi possivel carregar o estoque.");
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
-  }, []);
+  }, [currentPage, debouncedSearchQuery, pageSize]);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      setDebouncedSearchQuery(searchQuery.trim());
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [searchQuery]);
 
   useEffect(() => {
     void loadInventory();
@@ -126,65 +169,21 @@ export function InventoryPage() {
     };
   }, [loadInventory]);
 
-  const computedSummary = useMemo<InventorySummary>(() => {
-    if (summary) return summary;
-    return items.reduce(
-      (acc, item) => {
-        acc.totalPhysical += item.physicalQuantity;
-        acc.totalReserved += item.reservedQuantity;
-        if (item.status === "LOW_STOCK") acc.lowStockCount += 1;
-        if (item.status === "RUPTURE") acc.ruptureCount += 1;
-        return acc;
-      },
-      {
-        totalPhysical: 0,
-        totalReserved: 0,
-        lowStockCount: 0,
-        ruptureCount: 0,
-        movementCount: 0,
-        totalItems: items.length
-      }
-    );
-  }, [items, summary]);
-
-  const filteredItems = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) return items;
-    return items.filter((item) =>
-      [item.productName, item.sku, item.ean, item.bling.name, item.bling.externalProductId]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase()
-        .includes(query)
-    );
-  }, [items, searchQuery]);
-
-  const criticalItems = useMemo(
-    () =>
-      items
-        .filter((item) => item.status === "RUPTURE" || item.status === "LOW_STOCK")
-        .sort((left, right) => left.availableQuantity - right.availableQuantity || left.productName.localeCompare(right.productName, "pt-BR"))
-        .slice(0, 8),
-    [items]
-  );
-
-  const totalPages = Math.max(1, Math.ceil(filteredItems.length / pageSize));
+  const computedSummary: InventorySummary = summary ?? {
+    totalPhysical: 0,
+    totalReserved: 0,
+    lowStockCount: 0,
+    ruptureCount: 0,
+    movementCount: 0,
+    totalItems: 0
+  };
 
   useEffect(() => {
     setCurrentPage((page) => Math.min(Math.max(page, 1), totalPages));
   }, [totalPages]);
 
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [pageSize, searchQuery]);
-
-  const paginatedItems = useMemo(() => {
-    const startIndex = (currentPage - 1) * pageSize;
-    return filteredItems.slice(startIndex, startIndex + pageSize);
-  }, [currentPage, filteredItems, pageSize]);
-
-  const pageStart = filteredItems.length ? (currentPage - 1) * pageSize + 1 : 0;
-  const pageEnd = Math.min(currentPage * pageSize, filteredItems.length);
+  const pageStart = totalResults ? (currentPage - 1) * pageSize + 1 : 0;
+  const pageEnd = Math.min(currentPage * pageSize, totalResults);
 
   return (
     <AppShell>
@@ -256,7 +255,10 @@ export function InventoryPage() {
               <input
                 aria-label="Buscar estoque por produto, SKU, EAN ou Bling"
                 className="h-10 w-full rounded-md border border-matrix-border bg-white/[0.03] py-2 pl-9 pr-3 text-sm outline-none placeholder:text-slate-600 focus:border-matrix-gold/55"
-                onChange={(event) => setSearchQuery(event.target.value)}
+                onChange={(event) => {
+                  setSearchQuery(event.target.value);
+                  setCurrentPage(1);
+                }}
                 placeholder="Buscar por produto, SKU, EAN ou Bling"
                 value={searchQuery}
               />
@@ -268,7 +270,10 @@ export function InventoryPage() {
               <select
                 aria-label="Saldos por pagina"
                 className="h-10 rounded-md border border-matrix-border bg-matrix-panel2/80 px-3 font-semibold text-matrix-fg outline-none"
-                onChange={(event) => setPageSize(Number(event.target.value))}
+                onChange={(event) => {
+                  setPageSize(Number(event.target.value));
+                  setCurrentPage(1);
+                }}
                 value={pageSize}
               >
                 {pageSizeOptions.map((option) => (
@@ -292,12 +297,12 @@ export function InventoryPage() {
             footer={
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-matrix-border px-3 py-2 text-xs text-matrix-muted">
                 <span>
-                  Mostrando {pageStart}-{pageEnd} de {formatNumber(filteredItems.length)} saldo(s)
+                  Mostrando {pageStart}-{pageEnd} de {formatNumber(totalResults)} saldo(s)
                 </span>
-                <span>{formatNumber(items.length)} saldo(s) no contexto atual</span>
+                <span>{formatNumber(computedSummary.totalItems)} saldo(s) no contexto atual</span>
               </div>
             }
-            rows={paginatedItems.map((item) => [
+            rows={items.map((item) => [
               <div key={`${item.id}-product`} className="flex min-w-[280px] items-center gap-3 whitespace-normal">
                 {item.imageUrl ? (
                   <Image
