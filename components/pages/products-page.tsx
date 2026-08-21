@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -21,7 +22,10 @@ import {
   X
 } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
-import { BlingFullProductSyncModal } from "@/components/bling-full-product-sync-modal";
+import type {
+  TopbarAccountContextView,
+  TopbarSessionView
+} from "@/components/topbar";
 import type {
   BlingProductReviewChanges,
   BlingProductUpdatePreview,
@@ -35,6 +39,7 @@ import {
 } from "@/lib/product-details-navigation";
 import {
   EMPTY_PRODUCT_LIST_FILTERS,
+  buildProductListRequestParams,
   getProductPaginationItems,
   parseProductListFilters,
   type ProductListFilterOptions,
@@ -52,6 +57,13 @@ import type {
   BlingFullProductSyncResult
 } from "@/lib/services/bling-full-product-sync-service";
 
+const BlingFullProductSyncModal = dynamic(
+  () => import("@/components/bling-full-product-sync-modal").then(
+    (module) => module.BlingFullProductSyncModal
+  ),
+  { ssr: false }
+);
+
 const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre-oval.png";
 const PRODUCT_TABLE_COLUMN_WIDTHS = [42, 370, 94, 110, 93, 100, 99, 111, 60, 86, 62] as const;
 
@@ -60,7 +72,7 @@ type ProductListItem = {
   name: string;
   sku: string | null;
   ean: string | null;
-  description: string | null;
+  description?: string | null;
   category: string | null;
   brand?: string | null;
   ncm?: string | null;
@@ -68,7 +80,7 @@ type ProductListItem = {
   unit: string | null;
   status: string;
   source?: string | null;
-  displayValue: string | null;
+  displayValue?: string | null;
   salePriceDisplay: string | null;
   costPriceDisplay?: string | null;
   imageUrl: string | null;
@@ -80,7 +92,7 @@ type ProductListItem = {
   depth?: string | null;
   condition?: string | null;
   attributes?: unknown;
-  hasEnrichmentDraft: boolean;
+  hasEnrichmentDraft?: boolean;
   externalProductId?: string | null;
   blingStatus?: string | null;
   marketplaceStores?: {
@@ -274,6 +286,24 @@ type ProductListPagination = {
   totalPages: number;
   hasNextPage: boolean;
   hasPreviousPage: boolean;
+};
+
+type ProductListInitialData = {
+  accountContext: ProductAccountContext;
+  appliedFilters: ProductListFilters;
+  data: ProductListItem[];
+  filterOptions: ProductListFilterOptions;
+  pagination: ProductListPagination;
+  summary: ProductListSummary;
+};
+
+type ProductsPageProps = {
+  initialAccountContext?: TopbarAccountContextView | null;
+  initialData?: ProductListInitialData | null;
+  initialRequestKey?: string | null;
+  initialReturnTo?: string;
+  initialSearchQuery?: string;
+  initialSession?: TopbarSessionView | null;
 };
 
 const emptySummary: ProductListSummary = {
@@ -618,15 +648,25 @@ function ProductFilterSelect({
   );
 }
 
-export function ProductsPage() {
+export function ProductsPage({
+  initialAccountContext = null,
+  initialData = null,
+  initialRequestKey = null,
+  initialReturnTo = "/products",
+  initialSearchQuery = "",
+  initialSession = null
+}: ProductsPageProps) {
   const router = useRouter();
+  const initialFilters = initialData?.appliedFilters ?? EMPTY_PRODUCT_LIST_FILTERS;
   const [open, setOpen] = useState(false);
   const [enrichmentProducts, setEnrichmentProducts] = useState<ProductListItem[] | null>(null);
   const [activeEnrichmentProductId, setActiveEnrichmentProductId] = useState<string | null>(null);
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(new Set());
-  const [products, setProducts] = useState<ProductListItem[]>([]);
-  const [accountContext, setAccountContext] = useState<ProductAccountContext | null>(null);
-  const [loadingProducts, setLoadingProducts] = useState(true);
+  const [products, setProducts] = useState<ProductListItem[]>(initialData?.data ?? []);
+  const [accountContext, setAccountContext] = useState<ProductAccountContext | null>(
+    initialData?.accountContext ?? null
+  );
+  const [loadingProducts, setLoadingProducts] = useState(!initialData);
   const [blingImportOpen, setBlingImportOpen] = useState(false);
   const [blingImportOperation, setBlingImportOperation] = useState<"IMPORT" | "SYNC">("IMPORT");
   const [blingImportBusy, setBlingImportBusy] = useState(false);
@@ -651,37 +691,55 @@ export function ProductsPage() {
   const blingImportCorrelationRef = useRef<string | null>(null);
   const blingPreviewPollAbortRef = useRef<AbortController | null>(null);
   const blingUpdateCompletionSequence = useRef(0);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
-  const [pendingFilters, setPendingFilters] = useState<ProductListFilters>({ ...EMPTY_PRODUCT_LIST_FILTERS });
-  const [appliedFilters, setAppliedFilters] = useState<ProductListFilters>({ ...EMPTY_PRODUCT_LIST_FILTERS });
-  const [filterOptions, setFilterOptions] = useState<ProductListFilterOptions>(emptyFilterOptions);
-  const [summary, setSummary] = useState<ProductListSummary>(emptySummary);
-  const [pagination, setPagination] = useState<ProductListPagination>(emptyPagination);
-  const [urlStateReady, setUrlStateReady] = useState(false);
+  const [searchQuery, setSearchQuery] = useState(initialSearchQuery);
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(initialSearchQuery);
+  const [pendingFilters, setPendingFilters] = useState<ProductListFilters>({ ...initialFilters });
+  const [appliedFilters, setAppliedFilters] = useState<ProductListFilters>({ ...initialFilters });
+  const [filterOptions, setFilterOptions] = useState<ProductListFilterOptions>(
+    initialData?.filterOptions ?? emptyFilterOptions
+  );
+  const [summary, setSummary] = useState<ProductListSummary>(initialData?.summary ?? emptySummary);
+  const [pagination, setPagination] = useState<ProductListPagination>(
+    initialData?.pagination ?? emptyPagination
+  );
+  const [urlStateReady, setUrlStateReady] = useState(Boolean(initialData));
   const [urlNavigationVersion, setUrlNavigationVersion] = useState(0);
-  const [productListReturnTo, setProductListReturnTo] = useState("/products");
+  const [productListReturnTo, setProductListReturnTo] = useState(initialReturnTo);
   const [isFilterPanelOpen, setIsFilterPanelOpen] = useState(true);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
-  const appliedFiltersRef = useRef<ProductListFilters>({ ...EMPTY_PRODUCT_LIST_FILTERS });
-  const pageSizeRef = useRef(20);
+  const [currentPage, setCurrentPage] = useState(initialData?.pagination.page ?? 1);
+  const [pageSize, setPageSize] = useState(
+    typeof initialData?.pagination.limit === "number" ? initialData.pagination.limit : 20
+  );
+  const appliedFiltersRef = useRef<ProductListFilters>({ ...initialFilters });
+  const pageSizeRef = useRef(
+    typeof initialData?.pagination.limit === "number" ? initialData.pagination.limit : 20
+  );
+  const currentDataRequestKeyRef = useRef<string | null>(
+    initialData ? initialRequestKey : null
+  );
   const handledUrlNavigationVersionRef = useRef(0);
   const scrollRestoredRef = useRef(false);
 
-  const loadProducts = useCallback(async () => {
+  const loadProducts = useCallback(async (force = false) => {
     if (!urlStateReady) return;
+    const params = buildProductListRequestParams({
+      filters: appliedFilters,
+      limit: pageSize,
+      page: currentPage,
+      query: debouncedSearchQuery
+    });
+    const requestKey = params.toString();
+    if (!force && currentDataRequestKeyRef.current === requestKey) {
+      setLoadingProducts(false);
+      return;
+    }
+
     setLoadingProducts(true);
     try {
-      const params = new URLSearchParams({ page: String(currentPage), limit: String(pageSize) });
-      if (debouncedSearchQuery.trim()) params.set("q", debouncedSearchQuery.trim());
-      for (const [key, value] of Object.entries(appliedFilters)) {
-        if (value !== "all") params.set(key, value);
-      }
-
       const response = await fetch(`/api/products?${params.toString()}`);
       if (!response.ok) {
         setProducts([]);
+        currentDataRequestKeyRef.current = requestKey;
         return;
       }
 
@@ -697,6 +755,12 @@ export function ProductsPage() {
       setFilterOptions(payload.filterOptions ?? emptyFilterOptions);
       setPagination(payload.pagination ?? emptyPagination);
       setSummary(payload.summary ?? emptySummary);
+      currentDataRequestKeyRef.current = buildProductListRequestParams({
+        filters: appliedFilters,
+        limit: pageSize,
+        page: payload.pagination?.page ?? currentPage,
+        query: debouncedSearchQuery
+      }).toString();
       if (payload.pagination?.page && payload.pagination.page !== currentPage) {
         setCurrentPage(payload.pagination.page);
       }
@@ -794,7 +858,7 @@ export function ProductsPage() {
 
   useEffect(() => {
     function reloadForAccountContext() {
-      void loadProducts();
+      void loadProducts(true);
     }
 
     window.addEventListener("w-account-context-updated", reloadForAccountContext);
@@ -1795,7 +1859,7 @@ export function ProductsPage() {
     if (operation === "SYNC") {
       window.dispatchEvent(new Event("w-notifications-updated"));
     }
-    await loadProducts();
+    await loadProducts(true);
   }
 
   async function startBlingOperation(operation: "IMPORT" | "SYNC") {
@@ -1881,7 +1945,11 @@ export function ProductsPage() {
   }
 
   return (
-    <AppShell denseDesktopShell>
+    <AppShell
+      denseDesktopShell
+      initialAccountContext={initialAccountContext}
+      initialSession={initialSession}
+    >
       <div
         className={`relative flex min-w-0 items-stretch ${
           blingUpdateOpen ? "max-w-full overflow-x-clip" : ""
@@ -2167,7 +2235,7 @@ export function ProductsPage() {
           activeProductId={activeEnrichmentProductId}
           onActiveProductChange={setActiveEnrichmentProductId}
           onClose={() => setEnrichmentProducts(null)}
-          onSaved={() => void loadProducts()}
+          onSaved={() => void loadProducts(true)}
           products={enrichmentProducts}
         />
       ) : null}

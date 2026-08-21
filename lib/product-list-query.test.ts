@@ -203,15 +203,20 @@ test("metadata runner preserves grouped labels, counts and truncation", async ()
 });
 
 test("products route loads only page IDs with take and no in-memory slice", async () => {
-  const source = await readFile(path.join(process.cwd(), "app/api/products/route.ts"), "utf8");
-  assert.match(source, /id: \{ in: productIds \}/);
-  assert.match(source, /take: requestedPagination\.limit/);
-  assert.match(source, /findProductListPageIds/);
-  assert.match(source, /countProductList/);
-  assert.doesNotMatch(source, /sorted\.slice|pageProducts|loadAll/);
-  assert.doesNotMatch(source, /description: true/);
-  assert.doesNotMatch(source, /enrichmentDrafts:/);
-  assert.doesNotMatch(source, /marketplaceCategoryMappings:/);
+  const routeSource = await readFile(path.join(process.cwd(), "app/api/products/route.ts"), "utf8");
+  const serviceSource = await readFile(
+    path.join(process.cwd(), "lib/services/product-list-service.ts"),
+    "utf8"
+  );
+  assert.match(routeSource, /loadProductListPage\(auth\.context, new URL\(request\.url\)\.searchParams\)/);
+  assert.match(serviceSource, /id: \{ in: productIds \}/);
+  assert.match(serviceSource, /take: requestedPagination\.limit/);
+  assert.match(serviceSource, /findProductListPageIds/);
+  assert.match(serviceSource, /countProductList/);
+  assert.doesNotMatch(serviceSource, /sorted\.slice|pageProducts|loadAll/);
+  assert.doesNotMatch(serviceSource, /description: true/);
+  assert.doesNotMatch(serviceSource, /enrichmentDrafts:/);
+  assert.doesNotMatch(serviceSource, /marketplaceCategoryMappings:/);
 });
 
 test("AI product selector no longer depends on an unbounded products response", async () => {

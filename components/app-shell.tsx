@@ -3,7 +3,11 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useState } from "react";
 import { Sidebar } from "@/components/sidebar";
-import { Topbar } from "@/components/topbar";
+import {
+  Topbar,
+  type TopbarAccountContextView,
+  type TopbarSessionView
+} from "@/components/topbar";
 import { cn } from "@/lib/utils";
 
 const sidebarStorageKey = "matrix-sidebar-collapsed";
@@ -11,9 +15,16 @@ const sidebarStorageKey = "matrix-sidebar-collapsed";
 type AppShellProps = {
   children: ReactNode;
   denseDesktopShell?: boolean;
+  initialAccountContext?: TopbarAccountContextView | null;
+  initialSession?: TopbarSessionView | null;
 };
 
-export function AppShell({ children, denseDesktopShell = false }: AppShellProps) {
+export function AppShell({
+  children,
+  denseDesktopShell = false,
+  initialAccountContext = null,
+  initialSession = null
+}: AppShellProps) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [hydrated, setHydrated] = useState(false);
@@ -58,6 +69,8 @@ export function AppShell({ children, denseDesktopShell = false }: AppShellProps)
       >
         <Topbar
           denseDesktopShell={denseDesktopShell}
+          initialAccountContext={initialAccountContext}
+          initialSession={initialSession}
           onMenuClick={openMobileSidebar}
           sidebarCollapsed={hydrated && sidebarCollapsed}
         />

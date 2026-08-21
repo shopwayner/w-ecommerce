@@ -13,7 +13,7 @@ import {
 } from "@/lib/bling-product-sync-report";
 import { cn } from "@/lib/utils";
 
-type SessionView = {
+export type TopbarSessionView = {
   user: { name: string | null; email: string; role: string };
   organization: { name: string };
 };
@@ -28,7 +28,7 @@ type AccountContextOption = {
   isDefault?: boolean;
 };
 
-type AccountContextView = {
+export type TopbarAccountContextView = {
   mode: "MATRIX" | "ERP_ACCOUNT";
   label: string;
   provider: "BLING" | null;
@@ -122,21 +122,29 @@ const marketplaceOptions = [
   { label: "Madeira Madeira", value: "madeira-madeira", href: "/marketplaces" }
 ];
 
-let cachedSession: SessionView | null = null;
+let cachedSession: TopbarSessionView | null = null;
 
 function contextKey(option: Pick<AccountContextOption, "mode" | "provider" | "connectionId">) {
   return option.mode === "ERP_ACCOUNT" ? `${option.provider}:${option.connectionId}` : "MATRIX";
 }
 
 type TopbarProps = {
+  initialAccountContext?: TopbarAccountContextView | null;
+  initialSession?: TopbarSessionView | null;
   onMenuClick: () => void;
   sidebarCollapsed: boolean;
   denseDesktopShell?: boolean;
 };
 
-function TopbarComponent({ onMenuClick, sidebarCollapsed, denseDesktopShell = false }: TopbarProps) {
-  const [session, setSession] = useState<SessionView | null>(cachedSession);
-  const [accountContext, setAccountContext] = useState<AccountContextView | null>(null);
+function TopbarComponent({
+  initialAccountContext = null,
+  initialSession = null,
+  onMenuClick,
+  sidebarCollapsed,
+  denseDesktopShell = false
+}: TopbarProps) {
+  const [session, setSession] = useState<TopbarSessionView | null>(initialSession ?? cachedSession);
+  const [accountContext, setAccountContext] = useState<TopbarAccountContextView | null>(initialAccountContext);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [changingContextKey, setChangingContextKey] = useState<string | null>(null);
   const [selectedMarketplace, setSelectedMarketplace] = useState("");
@@ -159,6 +167,10 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed, denseDesktopShell = fa
   const currentKey = accountContext ? contextKey(accountContext) : "MATRIX";
 
   useEffect(() => {
+    if (initialSession) {
+      cachedSession = initialSession;
+      return;
+    }
     if (cachedSession) return;
     let mounted = true;
 
@@ -176,7 +188,7 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed, denseDesktopShell = fa
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [initialSession]);
 
   useEffect(() => {
     let mounted = true;
@@ -192,7 +204,7 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed, denseDesktopShell = fa
         });
     };
 
-    loadAccountContext();
+    if (!initialAccountContext) loadAccountContext();
     window.addEventListener("w-account-context-updated", loadAccountContext);
     window.addEventListener("w-erps-active-account-updated", loadAccountContext);
     return () => {
@@ -200,7 +212,7 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed, denseDesktopShell = fa
       window.removeEventListener("w-account-context-updated", loadAccountContext);
       window.removeEventListener("w-erps-active-account-updated", loadAccountContext);
     };
-  }, []);
+  }, [initialAccountContext]);
 
   useEffect(() => {
     setAccountMenuOpen(false);
@@ -352,7 +364,7 @@ function TopbarComponent({ onMenuClick, sidebarCollapsed, denseDesktopShell = fa
     });
     setChangingContextKey(null);
     if (!response.ok) return;
-    setAccountContext((await response.json()) as AccountContextView);
+    setAccountContext((await response.json()) as TopbarAccountContextView);
     setAccountMenuOpen(false);
     window.dispatchEvent(new Event("w-account-context-updated"));
   }

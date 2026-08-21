@@ -80,6 +80,23 @@ export function parseProductListFilters(searchParams: URLSearchParams): ProductL
   };
 }
 
+export function buildProductListRequestParams(input: {
+  filters: ProductListFilters;
+  limit: number;
+  page: number;
+  query: string;
+}) {
+  const params = new URLSearchParams({
+    page: String(input.page),
+    limit: String(input.limit)
+  });
+  if (input.query.trim()) params.set("q", input.query.trim());
+  for (const [key, value] of Object.entries(input.filters)) {
+    if (value !== "all") params.set(key, value);
+  }
+  return params;
+}
+
 function hasText(value: string | null | undefined) {
   return Boolean(value?.trim());
 }
