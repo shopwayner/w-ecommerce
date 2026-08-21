@@ -49,11 +49,17 @@ test("return targets are fail-closed to the products listing", () => {
   assert.equal(normalizeProductReturnTo("/products#unsafe"), "/products");
 });
 
-test("name and image are semantic links while the view action keeps dedicated navigation", () => {
+test("name and image open as semantic links in a new tab while the view action keeps dedicated navigation", () => {
   assert.match(productsSource, /import Link from "next\/link"/);
   assert.match(productsSource, /function openProductDetails\(productId: string\)/);
   assert.equal((productsSource.match(/href=\{buildProductDetailsHref\(product\.id, productListReturnTo\)\}/g) ?? []).length, 2);
   assert.ok((productsSource.match(/prefetch=\{false\}/g) ?? []).length >= 2);
+  assert.equal(
+    (productsSource.match(
+      /href=\{buildProductDetailsHref\(product\.id, productListReturnTo\)\}[\s\S]{0,250}?rel="noopener noreferrer"[\s\S]{0,80}?target="_blank"/g
+    ) ?? []).length,
+    2
+  );
   assert.equal((productsSource.match(/onClick=\{\(\) => openProductDetails\(product\.id\)\}/g) ?? []).length, 1);
   assert.match(productsSource, /buildProductDetailsHref\(productId, returnTo\)/);
   assert.doesNotMatch(productsSource, /ProductDetailsModal|viewingProduct/);

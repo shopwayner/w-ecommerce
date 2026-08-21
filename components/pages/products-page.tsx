@@ -1809,6 +1809,8 @@ export function ProductsPage() {
                 href={buildProductDetailsHref(product.id, productListReturnTo)}
                 onClick={() => rememberProductListPosition(productListReturnTo)}
                 prefetch={false}
+                rel="noopener noreferrer"
+                target="_blank"
               >
                 <ProductListThumbnail
                   key={product.imageUrl ?? `${product.id}-without-image`}
@@ -1823,6 +1825,8 @@ export function ProductsPage() {
                     href={buildProductDetailsHref(product.id, productListReturnTo)}
                     onClick={() => rememberProductListPosition(productListReturnTo)}
                     prefetch={false}
+                    rel="noopener noreferrer"
+                    target="_blank"
                   >
                     {product.name}
                   </Link>
