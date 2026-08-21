@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -28,7 +28,7 @@ import type {
   BlingProductUpdateResult
 } from "@/components/bling-product-update-modal";
 import { ProductCopyButton } from "@/components/product-copy-button";
-import { Badge, Button, Card, DataTable, KpiCard, PageHeader } from "@/components/ui";
+import { Badge, Button, Card, KpiCard, PageHeader } from "@/components/ui";
 import {
   buildProductDetailsHref,
   productListScrollStorageKey
@@ -53,6 +53,7 @@ import type {
 } from "@/lib/services/bling-full-product-sync-service";
 
 const MERCADO_LIVRE_LOGO_SRC = "/marketplaces/mercado-livre-oval.png";
+const PRODUCT_TABLE_COLUMN_WIDTHS = [42, 370, 94, 110, 93, 100, 99, 111, 60, 86, 62] as const;
 
 type ProductListItem = {
   id: string;
@@ -322,7 +323,7 @@ function getBlingDisplayName(product: ProductListItem) {
   return product.blingAccount?.displayName ?? product.blingAccount?.blingAccountName ?? null;
 }
 
-function ProductStoresCell({ product }: { product: ProductListItem }) {
+const ProductStoresCell = memo(function ProductStoresCell({ product }: { product: ProductListItem }) {
   if (!product.marketplaceStores?.mercadoLivre) {
     return <span aria-hidden="true" className="block h-6 min-w-10" />;
   }
@@ -339,7 +340,7 @@ function ProductStoresCell({ product }: { product: ProductListItem }) {
       />
     </div>
   );
-}
+});
 
 function ProductCheckbox({
   checked,
@@ -372,7 +373,7 @@ function ProductCheckbox({
   );
 }
 
-function ProductListThumbnail({ alt, src }: { alt: string; src: string | null }) {
+const ProductListThumbnail = memo(function ProductListThumbnail({ alt, src }: { alt: string; src: string | null }) {
   const [failed, setFailed] = useState(false);
   if (!src || failed) {
     return <ImageIcon className="h-4 w-4 text-matrix-muted" />;
@@ -390,6 +391,201 @@ function ProductListThumbnail({ alt, src }: { alt: string; src: string | null })
       unoptimized={!isOptimizableProductImageUrl(src)}
       width={34}
     />
+  );
+});
+
+type ProductTableRowProps = {
+  checked: boolean;
+  onOpenDetails: (productId: string) => void;
+  onRememberListPosition: () => void;
+  onToggleSelection: (productId: string, checked: boolean) => void;
+  product: ProductListItem;
+  productListReturnTo: string;
+};
+
+const ProductTableRow = memo(function ProductTableRow({
+  checked,
+  onOpenDetails,
+  onRememberListPosition,
+  onToggleSelection,
+  product,
+  productListReturnTo
+}: ProductTableRowProps) {
+  return (
+    <tr className="hover:bg-matrix-goldSoft/18">
+      <td className="whitespace-nowrap px-3 py-2.5 text-matrix-fg">
+        <ProductCheckbox
+          checked={checked}
+          label={`Selecionar ${product.name}`}
+          onChange={(nextChecked) => onToggleSelection(product.id, nextChecked)}
+        />
+      </td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-matrix-fg">
+        <div className="flex min-w-0 items-center gap-2">
+          <Link
+            aria-label={`Ver ${product.name}`}
+            className="grid h-[34px] w-[34px] shrink-0 place-items-center overflow-hidden rounded-md border border-matrix-border bg-matrix-panel2/80 transition hover:border-matrix-gold/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold"
+            href={buildProductDetailsHref(product.id, productListReturnTo)}
+            onClick={onRememberListPosition}
+            prefetch={false}
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            <ProductListThumbnail
+              key={product.imageUrl ?? `${product.id}-without-image`}
+              alt={product.name}
+              src={product.imageUrl}
+            />
+          </Link>
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-1">
+              <Link
+                className="min-w-0 truncate text-left transition hover:text-matrix-goldDark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold"
+                href={buildProductDetailsHref(product.id, productListReturnTo)}
+                onClick={onRememberListPosition}
+                prefetch={false}
+                rel="noopener noreferrer"
+                target="_blank"
+              >
+                {product.name}
+              </Link>
+              <ProductCopyButton className="!h-4 !w-4 [&_svg]:!h-2.5 [&_svg]:!w-2.5" label="Copiar titulo" text={product.name} />
+            </div>
+            {getBlingCatalogStatusMessage(product.blingStatus) ? (
+              <p className="sr-only">{getBlingCatalogStatusMessage(product.blingStatus)}</p>
+            ) : null}
+          </div>
+        </div>
+      </td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-matrix-fg">
+        <div className="flex min-w-0 items-center gap-1">
+          <span className="min-w-0 truncate">{product.sku || "-"}</span>
+          <ProductCopyButton className="!h-4 !w-4 [&_svg]:!h-2.5 [&_svg]:!w-2.5" label="Copiar SKU" text={product.sku} />
+        </div>
+      </td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-matrix-fg">
+        <div className="flex min-w-0 items-center gap-1">
+          <span className="min-w-0 truncate">{product.ean ?? "-"}</span>
+          <ProductCopyButton className="!h-4 !w-4 [&_svg]:!h-2.5 [&_svg]:!w-2.5" label="Copiar EAN" text={product.ean} />
+        </div>
+      </td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-matrix-fg">{product.unit ?? "-"}</td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-matrix-fg">{product.category ?? "-"}</td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-matrix-fg">
+        {formatCurrencyDisplay(product.costPriceDisplay ?? product.displayValue) ?? "-"}
+      </td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-matrix-fg">
+        {formatCurrencyDisplay(product.salePriceDisplay) ?? "0,00"}
+      </td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-matrix-fg">
+        <ProductStoresCell product={product} />
+      </td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-matrix-fg">{product.stock}</td>
+      <td className="whitespace-nowrap px-3 py-2.5 text-matrix-fg">
+        <Button
+          aria-label={`Ver ${product.name}`}
+          className="h-8 min-h-8 w-8 px-0 py-0"
+          onClick={() => onOpenDetails(product.id)}
+          title="Ver produto"
+          variant="secondary"
+        >
+          <Eye className="h-4 w-4" />
+        </Button>
+      </td>
+    </tr>
+  );
+});
+
+function ProductTable({
+  allVisibleSelected,
+  emptyMessage,
+  onOpenDetails,
+  onRememberListPosition,
+  onToggleSelection,
+  onToggleVisibleSelection,
+  products,
+  productListReturnTo,
+  selectedProductIds,
+  someVisibleSelected
+}: {
+  allVisibleSelected: boolean;
+  emptyMessage: string;
+  onOpenDetails: (productId: string) => void;
+  onRememberListPosition: () => void;
+  onToggleSelection: (productId: string, checked: boolean) => void;
+  onToggleVisibleSelection: (checked: boolean) => void;
+  products: ProductListItem[];
+  productListReturnTo: string;
+  selectedProductIds: ReadonlySet<string>;
+  someVisibleSelected: boolean;
+}) {
+  return (
+    <div className="rounded-md border border-matrix-border bg-matrix-panel lg:flex lg:h-full lg:min-h-0 lg:flex-1 lg:flex-col lg:overflow-hidden">
+      <div className="matrix-scroll overflow-x-auto lg:h-0 lg:min-h-0 lg:flex-1 lg:overflow-auto lg:overscroll-contain lg:[&_thead]:sticky lg:[&_thead]:top-0 lg:[&_thead]:z-[1]">
+        <table className="h-auto min-w-full divide-y divide-matrix-border text-left text-sm">
+          <colgroup>
+            {PRODUCT_TABLE_COLUMN_WIDTHS.map((width) => (
+              <col key={width} style={{ width }} />
+            ))}
+          </colgroup>
+          <thead className="bg-matrix-panel2 text-xs uppercase text-matrix-muted">
+            <tr>
+              {[
+                <ProductCheckbox
+                  key="select-all"
+                  checked={allVisibleSelected}
+                  indeterminate={someVisibleSelected}
+                  label="Selecionar todos os produtos visiveis"
+                  onChange={onToggleVisibleSelection}
+                />,
+                "Produto",
+                "SKU",
+                "EAN",
+                "Unidade",
+                "Categoria",
+                "Custo",
+                "Preco venda",
+                "Lojas",
+                "Estoque",
+                "Acoes"
+              ].map((column, columnIndex) => (
+                <th
+                  key={PRODUCT_TABLE_COLUMN_WIDTHS[columnIndex]}
+                  className="whitespace-nowrap px-3 py-2.5 font-semibold"
+                  style={{
+                    maxWidth: PRODUCT_TABLE_COLUMN_WIDTHS[columnIndex],
+                    width: PRODUCT_TABLE_COLUMN_WIDTHS[columnIndex]
+                  }}
+                >
+                  {column}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-matrix-border bg-matrix-panel/70">
+            {products.length ? (
+              products.map((product) => (
+                <ProductTableRow
+                  key={product.id}
+                  checked={selectedProductIds.has(product.id)}
+                  onOpenDetails={onOpenDetails}
+                  onRememberListPosition={onRememberListPosition}
+                  onToggleSelection={onToggleSelection}
+                  product={product}
+                  productListReturnTo={productListReturnTo}
+                />
+              ))
+            ) : (
+              <tr>
+                <td className="px-3 py-8 text-center text-sm text-matrix-muted" colSpan={11}>
+                  {emptyMessage}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
@@ -719,7 +915,7 @@ export function ProductsPage() {
     writeUrlState(appliedFilters, 1, nextPageSize, searchQuery);
   }
 
-  function toggleProductSelection(productId: string, checked: boolean) {
+  const toggleProductSelection = useCallback((productId: string, checked: boolean) => {
     setSelectedProductIds((current) => {
       const next = new Set(current);
       if (checked) {
@@ -729,9 +925,9 @@ export function ProductsPage() {
       }
       return next;
     });
-  }
+  }, []);
 
-  function toggleVisibleSelection(checked: boolean) {
+  const toggleVisibleSelection = useCallback((checked: boolean) => {
     setSelectedProductIds((current) => {
       const next = new Set(current);
       for (const productId of visibleProductIds) {
@@ -743,7 +939,7 @@ export function ProductsPage() {
       }
       return next;
     });
-  }
+  }, [visibleProductIds]);
 
   function openEnrichment(productsToRegister: ProductListItem[]) {
     setEnrichmentProducts(productsToRegister);
@@ -1326,7 +1522,7 @@ export function ProductsPage() {
     );
   }
 
-  function rememberProductListPosition(returnTo: string) {
+  const rememberProductListPosition = useCallback((returnTo: string) => {
     const tableScroller = document.querySelector<HTMLElement>(
       '[data-testid="products-list-area"] .matrix-scroll'
     );
@@ -1341,13 +1537,17 @@ export function ProductsPage() {
     } catch {
       // Navigation must not depend on optional browser storage.
     }
-  }
+  }, []);
 
-  function openProductDetails(productId: string) {
+  const rememberCurrentProductListPosition = useCallback(() => {
+    rememberProductListPosition(productListReturnTo);
+  }, [productListReturnTo, rememberProductListPosition]);
+
+  const openProductDetails = useCallback((productId: string) => {
     const returnTo = `${window.location.pathname}${window.location.search}`;
     rememberProductListPosition(returnTo);
     router.push(buildProductDetailsHref(productId, returnTo));
-  }
+  }, [rememberProductListPosition, router]);
 
   async function loadBlingPreviewJob(
     connectionId: string,
@@ -1775,106 +1975,24 @@ export function ProductsPage() {
           </div>
         ) : null}
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-matrix-border bg-matrix-panel [&>div]:rounded-none [&>div]:border-0 [&_table]:w-full [&_table]:table-fixed [&_table]:min-w-[1030px] [&_th]:overflow-hidden [&_th]:px-2 [&_th]:py-1 [&_td]:overflow-hidden [&_td]:px-2 [&_td]:py-[5.5px] [&_thead]:text-[11px] [&_tbody]:text-[11px]" data-testid="products-table-shell">
-            <DataTable
-          constrainedHeight
-          columnWidths={[42, 370, 94, 110, 93, 100, 99, 111, 60, 86, 62]}
-          columns={[
-            <ProductCheckbox
-              key="select-all"
-              checked={allVisibleSelected}
-              indeterminate={someVisibleSelected}
-              label="Selecionar todos os produtos visiveis"
-              onChange={toggleVisibleSelection}
-            />,
-            "Produto",
-            "SKU",
-            "EAN",
-            "Unidade",
-            "Categoria",
-            "Custo",
-            "Preco venda",
-            "Lojas",
-            "Estoque",
-            "Acoes"
-          ]}
-          rows={paginatedProducts.map((product) => [
-            <ProductCheckbox
-              key={`${product.id}-select`}
-              checked={selectedProductIds.has(product.id)}
-              label={`Selecionar ${product.name}`}
-              onChange={(checked) => toggleProductSelection(product.id, checked)}
-            />,
-              <div key={`${product.id}-name`} className="flex min-w-0 items-center gap-2">
-              <Link
-                aria-label={`Ver ${product.name}`}
-                className="grid h-[34px] w-[34px] shrink-0 place-items-center overflow-hidden rounded-md border border-matrix-border bg-matrix-panel2/80 transition hover:border-matrix-gold/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold"
-                href={buildProductDetailsHref(product.id, productListReturnTo)}
-                onClick={() => rememberProductListPosition(productListReturnTo)}
-                prefetch={false}
-                rel="noopener noreferrer"
-                target="_blank"
-              >
-                <ProductListThumbnail
-                  key={product.imageUrl ?? `${product.id}-without-image`}
-                  alt={product.name}
-                  src={product.imageUrl}
-                />
-              </Link>
-              <div className="min-w-0">
-                <div className="flex min-w-0 items-center gap-1">
-                  <Link
-                    className="min-w-0 truncate text-left transition hover:text-matrix-goldDark focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold"
-                    href={buildProductDetailsHref(product.id, productListReturnTo)}
-                    onClick={() => rememberProductListPosition(productListReturnTo)}
-                    prefetch={false}
-                    rel="noopener noreferrer"
-                    target="_blank"
-                  >
-                    {product.name}
-                  </Link>
-                  <ProductCopyButton className="!h-4 !w-4 [&_svg]:!h-2.5 [&_svg]:!w-2.5" label="Copiar titulo" text={product.name} />
-                </div>
-                {getBlingCatalogStatusMessage(product.blingStatus) ? (
-                  <p className="sr-only">
-                    {getBlingCatalogStatusMessage(product.blingStatus)}
-                  </p>
-                ) : null}
-              </div>
-            </div>,
-            <div key={`${product.id}-sku`} className="flex min-w-0 items-center gap-1">
-              <span className="min-w-0 truncate">{product.sku || "-"}</span>
-              <ProductCopyButton className="!h-4 !w-4 [&_svg]:!h-2.5 [&_svg]:!w-2.5" label="Copiar SKU" text={product.sku} />
-            </div>,
-            <div key={`${product.id}-ean`} className="flex min-w-0 items-center gap-1">
-              <span className="min-w-0 truncate">{product.ean ?? "-"}</span>
-              <ProductCopyButton className="!h-4 !w-4 [&_svg]:!h-2.5 [&_svg]:!w-2.5" label="Copiar EAN" text={product.ean} />
-            </div>,
-            product.unit ?? "-",
-            product.category ?? "-",
-            formatCurrencyDisplay(product.costPriceDisplay ?? product.displayValue) ?? "-",
-            formatCurrencyDisplay(product.salePriceDisplay) ?? "0,00",
-            <ProductStoresCell key={`${product.id}-stores`} product={product} />,
-            product.stock,
-            <Button
-              key={`${product.id}-actions`}
-              aria-label={`Ver ${product.name}`}
-              className="h-8 min-h-8 w-8 px-0 py-0"
-              variant="secondary"
-              onClick={() => openProductDetails(product.id)}
-              title="Ver produto"
-            >
-              <Eye className="h-4 w-4" />
-            </Button>
-          ])}
-          emptyMessage={
-            loadingProducts
-              ? "Carregando produtos..."
-              : summary.totalProducts
-                ? "Nenhum produto corresponde aos filtros atuais."
-                : "Nenhum produto cadastrado ainda."
-          }
-          footer={<></>}
-          />
+            <ProductTable
+                allVisibleSelected={allVisibleSelected}
+                emptyMessage={
+                  loadingProducts
+                    ? "Carregando produtos..."
+                    : summary.totalProducts
+                      ? "Nenhum produto corresponde aos filtros atuais."
+                      : "Nenhum produto cadastrado ainda."
+                }
+                onOpenDetails={openProductDetails}
+                onRememberListPosition={rememberCurrentProductListPosition}
+                onToggleSelection={toggleProductSelection}
+                onToggleVisibleSelection={toggleVisibleSelection}
+                products={paginatedProducts}
+                productListReturnTo={productListReturnTo}
+                selectedProductIds={selectedProductIds}
+                someVisibleSelected={someVisibleSelected}
+            />
           <div className="grid shrink-0 gap-3 border-t border-matrix-border px-3 pb-7 pt-4 text-xs text-matrix-muted lg:grid-cols-[1fr_auto_1fr] lg:items-center">
             <span>Mostrando {pageStart} a {pageEnd} de {pagination.total} produtos</span>
             <div className="flex items-center justify-center gap-1.5">

@@ -51,7 +51,7 @@ test("return targets are fail-closed to the products listing", () => {
 
 test("name and image open as semantic links in a new tab while the view action keeps dedicated navigation", () => {
   assert.match(productsSource, /import Link from "next\/link"/);
-  assert.match(productsSource, /function openProductDetails\(productId: string\)/);
+  assert.match(productsSource, /const openProductDetails = useCallback\(\(productId: string\)/);
   assert.equal((productsSource.match(/href=\{buildProductDetailsHref\(product\.id, productListReturnTo\)\}/g) ?? []).length, 2);
   assert.ok((productsSource.match(/prefetch=\{false\}/g) ?? []).length >= 2);
   assert.equal(
@@ -60,13 +60,14 @@ test("name and image open as semantic links in a new tab while the view action k
     ) ?? []).length,
     2
   );
-  assert.equal((productsSource.match(/onClick=\{\(\) => openProductDetails\(product\.id\)\}/g) ?? []).length, 1);
+  assert.equal((productsSource.match(/onClick=\{\(\) => onOpenDetails\(product\.id\)\}/g) ?? []).length, 1);
+  assert.match(productsSource, /onOpenDetails=\{openProductDetails\}/);
   assert.match(productsSource, /buildProductDetailsHref\(productId, returnTo\)/);
   assert.doesNotMatch(productsSource, /ProductDetailsModal|viewingProduct/);
 });
 
 test("selection and copy controls remain independent from details navigation", () => {
-  assert.match(productsSource, /<ProductCheckbox[\s\S]*?onChange=\{\(checked\) => toggleProductSelection\(product\.id, checked\)\}/);
+  assert.match(productsSource, /<ProductCheckbox[\s\S]*?onChange=\{\(nextChecked\) => onToggleSelection\(product\.id, nextChecked\)\}/);
   assert.match(productsSource, /label="Copiar SKU" text=\{product\.sku\}/);
   assert.match(productsSource, /label="Copiar EAN" text=\{product\.ean\}/);
   assert.match(productsSource, /label="Copiar titulo" text=\{product\.name\}/);
