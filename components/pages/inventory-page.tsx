@@ -1,9 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Image from "next/image";
 import { Boxes, Eye, FileUp, RefreshCw, Search, Send } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { Badge, Button, Card, DataTable, EmptyState, KpiCard, PageHeader } from "@/components/ui";
+import { isOptimizableProductImageUrl } from "@/lib/product-image-optimization";
 
 type InventoryStatus = "OK" | "LOW_STOCK" | "RUPTURE";
 
@@ -298,8 +300,17 @@ export function InventoryPage() {
             rows={paginatedItems.map((item) => [
               <div key={`${item.id}-product`} className="flex min-w-[280px] items-center gap-3 whitespace-normal">
                 {item.imageUrl ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img alt="" className="h-10 w-10 rounded-md border border-matrix-border object-cover" src={item.imageUrl} />
+                  <Image
+                    alt=""
+                    className="h-10 w-10 rounded-md border border-matrix-border object-cover"
+                    decoding="async"
+                    height={40}
+                    loading="lazy"
+                    sizes="40px"
+                    src={item.imageUrl}
+                    unoptimized={!isOptimizableProductImageUrl(item.imageUrl)}
+                    width={40}
+                  />
                 ) : (
                   <div className="grid h-10 w-10 place-items-center rounded-md border border-matrix-border bg-matrix-panel2 text-xs text-matrix-muted">
                     sem img

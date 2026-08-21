@@ -47,6 +47,7 @@ import { ProductDescriptionEditor } from "@/components/product-description-edito
 import { INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES } from "@/lib/intelligent-product-preview";
 import { normalizeMercadoLivreReferenceImageUrl } from "@/lib/mercado-livre-reference-images";
 import { sanitizeProductDescription } from "@/lib/product-description";
+import { isOptimizableProductImageUrl } from "@/lib/product-image-optimization";
 import {
   applyProductTitleSuggestion,
   buildProductDetailsPatch,
@@ -734,7 +735,17 @@ const ProductGallery = memo(function ProductGallery({
               }}
             >
               <button aria-label={`Visualizar imagem ${index + 1}`} className={`block h-16 w-full overflow-hidden rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-matrix-gold ${editing ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"}`} onClick={() => onSelectImage(image.id)} type="button">
-                <Image alt={`Imagem ${index + 1} de ${productName}`} className="h-full w-full object-contain" decoding="async" height={72} loading="lazy" src={image.url} unoptimized width={72} />
+                <Image
+                  alt={`Imagem ${index + 1} de ${productName}`}
+                  className="h-full w-full object-contain"
+                  decoding="async"
+                  height={72}
+                  loading="lazy"
+                  sizes="72px"
+                  src={image.url}
+                  unoptimized={!isOptimizableProductImageUrl(image.url)}
+                  width={72}
+                />
               </button>
               {index === 0 ? <span className="absolute bottom-1 left-1 rounded bg-matrix-gold px-1.5 py-0.5 text-[9px] font-bold text-black">Principal</span> : null}
               {editing ? (

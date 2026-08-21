@@ -40,6 +40,7 @@ import {
   type ProductListFilterOptions,
   type ProductListFilters
 } from "@/lib/product-list-filters";
+import { isOptimizableProductImageUrl } from "@/lib/product-image-optimization";
 import {
   BLING_IMAGE_APPEND_SENDING_MESSAGE,
   confirmBlingImageAppend
@@ -384,8 +385,9 @@ function ProductListThumbnail({ alt, src }: { alt: string; src: string | null })
       height={34}
       loading="lazy"
       onError={() => setFailed(true)}
+      sizes="34px"
       src={src}
-      unoptimized
+      unoptimized={!isOptimizableProductImageUrl(src)}
       width={34}
     />
   );
