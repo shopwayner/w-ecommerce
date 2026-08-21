@@ -78,7 +78,8 @@ test("selection and copy controls remain independent from details navigation", (
 
 test("the dynamic product route renders one dedicated details page", () => {
   assert.match(routeSource, /<ProductDetailsPage/);
-  assert.match(routeSource, /query\.mode === "edit"/);
+  assert.match(routeSource, /initialMode="edit"/);
+  assert.doesNotMatch(routeSource, /query\.mode === "edit"/);
   assert.match(routeSource, /returnTo=\{returnTo\}/);
   assert.match(routeSource, /normalizeProductReturnTo\(/);
 });
@@ -117,8 +118,38 @@ test("cancel restores the product snapshot and back uses the preserved URL", () 
   const cancelSource = viewSource.slice(cancelStart, cancelEnd);
   assert.match(cancelSource, /formFromProduct\(currentProduct\)/);
   assert.match(cancelSource, /setImages\(nextImages\)/);
-  assert.match(cancelSource, /setEditing\(false\)/);
+  assert.match(cancelSource, /setEditing\(true\)/);
   assert.match(pageSource, /router\.replace\(backHref\)/);
+});
+
+test("editable products open directly in edit mode and stay editable after save", () => {
+  assert.match(routeSource, /initialMode="edit"/);
+  assert.match(viewSource, /useState\(initialEditing && canEditProduct\)/);
+  assert.doesNotMatch(viewSource, />Editar<\/Button>/);
+  assert.match(
+    viewSource,
+    /disabled=\{saving \|\| titleAiLoading \|\| descriptionAiLoading \|\| !hasPendingChanges \|\| !nameIsValid\}/
+  );
+  assert.match(viewSource, /Salvar alterações/);
+
+  const saveStart = viewSource.indexOf("async function confirmSave");
+  const saveEnd = viewSource.indexOf("return (", saveStart);
+  const saveSource = viewSource.slice(saveStart, saveEnd);
+  assert.match(saveSource, /setCurrentProduct\(nextProduct\)/);
+  assert.match(saveSource, /setDirtyFields\(new Set\(\)\)/);
+  assert.match(saveSource, /setBaselineImageKeys\(nextImages\.map\(imageStateKey\)\)/);
+  assert.match(saveSource, /setEditing\(true\)/);
+});
+
+test("save errors preserve the edited draft and allow another attempt", () => {
+  const saveStart = viewSource.indexOf("async function confirmSave");
+  const saveEnd = viewSource.indexOf("return (", saveStart);
+  const saveSource = viewSource.slice(saveStart, saveEnd);
+  const catchSource = saveSource.slice(saveSource.indexOf("} catch (saveError)"));
+  assert.match(catchSource, /setError\(/);
+  assert.match(catchSource, /setConfirmingSave\(false\)/);
+  assert.doesNotMatch(catchSource, /setForm|setDirtyFields|nameDraftRef\.current\s*=|descriptionDraftRef\.current\s*=/);
+  assert.match(saveSource, /if \(saveInFlight\.current\) return/);
 });
 
 test("OpenAI and Mercado Livre remain explicit lazy actions", () => {

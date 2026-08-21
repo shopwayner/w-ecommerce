@@ -48,8 +48,8 @@ test("the local editor and selected-products action remain explicitly separated"
   const detailsSource = readFileSync(path.join(process.cwd(), "components/product-details-view.tsx"), "utf8");
   const productsSource = readFileSync(path.join(process.cwd(), "components/pages/products-page.tsx"), "utf8");
 
-  assert.match(detailsSource, />Cancelar<\/Button>[\s\S]*?Salvar produto/);
-  assert.match(detailsSource, /Voltar para produtos[\s\S]*?>Editar<\/Button>/);
+  assert.match(detailsSource, />Cancelar<\/Button>[\s\S]*?Salvar alterações/);
+  assert.doesNotMatch(detailsSource, />Editar<\/Button>/);
   assert.doesNotMatch(detailsSource, /Atualizar produto no Bling/);
   assert.doesNotMatch(detailsSource, /\/bling\/full-sync/);
 

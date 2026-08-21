@@ -23,7 +23,6 @@ import {
   ChevronRight,
   ClipboardList,
   DollarSign,
-  Edit3,
   Factory,
   FileText,
   Folder,
@@ -1245,7 +1244,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
     setSelectedImageId(nextImages[0]?.id ?? null);
     resetTitleAiSession();
     resetDescriptionAiSession();
-    setEditing(false);
+    setEditing(true);
     setConfirmingSave(false);
     setError(null);
     setFeedback(null);
@@ -1339,7 +1338,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
       resetTitleAiSession();
       resetDescriptionAiSession();
       onProductUpdated(nextProduct);
-      setEditing(false);
+      setEditing(true);
       setConfirmingSave(false);
       setFeedback("Produto salvo no W Ecommerce.");
     } catch (saveError) {
@@ -1469,8 +1468,8 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
           <p className="text-xs text-matrix-muted">{editing ? "As mudancas permanecem locais ate a confirmacao do salvamento." : !canEditProduct ? "Seu usuario pode visualizar, mas nao editar produtos." : "Visualizacao do cadastro local do W Ecommerce."}</p>
           <div className="grid grid-cols-2 gap-2 sm:flex sm:justify-end">
             {editing ? (
-              <><Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">Cancelar</Button><Button disabled={saving || titleAiLoading || descriptionAiLoading || !hasPendingChanges || !nameIsValid} onClick={requestSave} type="button"><Save className="h-4 w-4" />{saving ? "Salvando produto..." : "Salvar produto"}</Button></>
-            ) : <><Button onClick={requestClose} type="button" variant="secondary"><ArrowLeft className="h-4 w-4" />Voltar para produtos</Button>{canEditProduct ? <Button onClick={beginEditing} type="button"><Edit3 className="h-4 w-4" />Editar</Button> : null}</>}
+              <><Button disabled={saving} onClick={cancelEdit} type="button" variant="secondary">Cancelar</Button><Button disabled={saving || titleAiLoading || descriptionAiLoading || !hasPendingChanges || !nameIsValid} onClick={requestSave} type="button"><Save className="h-4 w-4" />{saving ? "Salvando alterações..." : "Salvar alterações"}</Button></>
+            ) : <Button onClick={requestClose} type="button" variant="secondary"><ArrowLeft className="h-4 w-4" />Voltar para produtos</Button>}
           </div>
         </footer>
       </section>
@@ -1486,7 +1485,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
         />
       ) : null}
 
-          {confirmingSave ? <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4"><div className="w-full max-w-lg rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-glow"><div className="flex gap-3"><AlertTriangle className="h-5 w-5 shrink-0 text-matrix-goldDark" /><div><h3 className="text-lg font-bold">Salvar produto?</h3><p className="mt-2 text-sm leading-6 text-matrix-muted">As alteracoes serao gravadas somente no W Ecommerce. Para envia-las ao Bling, selecione o produto na lista e use Atualizar selecionados no Bling.</p></div></div><div className="mt-5 flex justify-end gap-2"><Button disabled={saving} onClick={() => setConfirmingSave(false)} type="button" variant="secondary">Voltar</Button><Button disabled={saving || titleAiLoading || descriptionAiLoading} onClick={() => void confirmSave()} type="button">{saving ? "Salvando produto..." : "Salvar produto"}</Button></div></div></div> : null}
+          {confirmingSave ? <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4"><div className="w-full max-w-lg rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-glow"><div className="flex gap-3"><AlertTriangle className="h-5 w-5 shrink-0 text-matrix-goldDark" /><div><h3 className="text-lg font-bold">Salvar alterações?</h3><p className="mt-2 text-sm leading-6 text-matrix-muted">As alteracoes serao gravadas somente no W Ecommerce. Para envia-las ao Bling, selecione o produto na lista e use Atualizar selecionados no Bling.</p></div></div><div className="mt-5 flex justify-end gap-2"><Button disabled={saving} onClick={() => setConfirmingSave(false)} type="button" variant="secondary">Voltar</Button><Button disabled={saving || titleAiLoading || descriptionAiLoading} onClick={() => void confirmSave()} type="button">{saving ? "Salvando alterações..." : "Salvar alterações"}</Button></div></div></div> : null}
 
       {confirmingDiscard ? <div className="fixed inset-0 z-[80] grid place-items-center bg-black/70 p-4"><div className="w-full max-w-md rounded-xl border border-matrix-gold/35 bg-matrix-panel p-5 shadow-glow"><h3 className="text-lg font-bold">Descartar alteracoes?</h3><p className="mt-2 text-sm leading-6 text-matrix-muted">A ordem e as fotos removidas serao restauradas na visualizacao e nada sera salvo.</p><div className="mt-5 flex justify-end gap-2"><Button onClick={() => setConfirmingDiscard(false)} type="button" variant="secondary">Continuar editando</Button><Button onClick={onBack} type="button"><Trash2 className="h-4 w-4" />Descartar</Button></div></div></div> : null}
     </div>

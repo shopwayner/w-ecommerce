@@ -15,7 +15,7 @@ export default async function ProductPage({
 
   return (
     <ProductDetailsPage
-      initialMode={query.mode === "edit" ? "edit" : "view"}
+      initialMode="edit"
       productId={id}
       returnTo={returnTo}
     />

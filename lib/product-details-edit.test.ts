@@ -121,6 +121,16 @@ test("compares decimal fields by value and does not rewrite equivalent formattin
   assert.deepEqual(buildProductDetailsPatch(baseline, { ...baseline, costPrice: "15.31" }), { payload: {} });
 });
 
+test("returning a changed price to its original value clears the effective patch", () => {
+  const baseline = createProductDetailsEditForm(completeSource);
+  assert.deepEqual(buildProductDetailsPatch(baseline, { ...baseline, salePrice: "50" }), {
+    payload: { salePriceDisplay: "50" }
+  });
+  assert.deepEqual(buildProductDetailsPatch(baseline, { ...baseline, salePrice: baseline.salePrice }), {
+    payload: {}
+  });
+});
+
 test("distinguishes an empty price from an explicit zero", () => {
   const baseline = createProductDetailsEditForm(completeSource);
   assert.deepEqual(buildProductDetailsPatch(baseline, { ...baseline, costPrice: "" }), {
