@@ -35,6 +35,13 @@ test("inventory table and supporting panels skip unrelated parent renders", () =
   );
 });
 
+test("inventory table contains paint invalidation during page scroll", () => {
+  assert.match(
+    inventorySource,
+    /className="matrix-scroll overflow-x-auto rounded-md border border-matrix-border bg-matrix-panel \[contain:paint\]"/
+  );
+});
+
 test("callbacks passed to the inventory table have stable references", () => {
   assert.match(
     inventorySource,

@@ -304,7 +304,7 @@ const InventoryTable = memo(function InventoryTable({
   const pageEnd = Math.min(currentPage * pageSize, totalResults);
 
   return (
-    <div className="matrix-scroll overflow-x-auto rounded-md border border-matrix-border bg-matrix-panel">
+    <div className="matrix-scroll overflow-x-auto rounded-md border border-matrix-border bg-matrix-panel [contain:paint]">
       <table className="min-w-full divide-y divide-matrix-border text-left text-sm">
         <thead className="bg-matrix-panel2 text-xs uppercase text-matrix-muted">
           <tr>
