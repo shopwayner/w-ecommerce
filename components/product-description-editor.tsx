@@ -29,19 +29,23 @@ function selectionBelongsToEditor(editor: HTMLElement, range: Range) {
   return editor.contains(range.startContainer) && editor.contains(range.endContainer);
 }
 
-export const ProductDescriptionEditor = memo(function ProductDescriptionEditor({
-  disabled,
-  expanded,
-  initialValue,
-  onDraftChange,
-  resetKey
-}: {
+export type ProductDescriptionEditorProps = {
   disabled: boolean;
   expanded: boolean;
+  focusOnMount?: boolean;
   initialValue: string;
   onDraftChange: (value: string) => void;
   resetKey: number;
-}) {
+};
+
+export const ProductDescriptionEditor = memo(function ProductDescriptionEditor({
+  disabled,
+  expanded,
+  focusOnMount = false,
+  initialValue,
+  onDraftChange,
+  resetKey
+}: ProductDescriptionEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const savedRangeRef = useRef<Range | null>(null);
   const draftRef = useRef(sanitizeProductDescription(initialValue));
@@ -60,6 +64,12 @@ export const ProductDescriptionEditor = memo(function ProductDescriptionEditor({
     }
     setActiveFormats({ bold: false, italic: false, underline: false });
   }, [initialValue, resetKey]);
+
+  useEffect(() => {
+    if (!focusOnMount || disabled) return;
+    const frame = requestAnimationFrame(() => editorRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [disabled, focusOnMount]);
 
   const saveSelection = useCallback(() => {
     const editor = editorRef.current;

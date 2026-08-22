@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 import type { TenantContext } from "@/lib/auth/server";
 import { hasSystemPermission } from "@/lib/auth/system-superuser";
 import { normalizeProductBrand } from "@/lib/product-brand";
+import { sanitizeProductDescription } from "@/lib/product-description";
 import { prisma } from "@/lib/prisma";
 import { getUserAccountContext } from "@/lib/services/account-context-service";
 import {
@@ -133,7 +134,9 @@ export function serializeProductDetails(product: ProductDetailsRecord) {
         ? metadata.unit
         : getStringAttribute(blingAttributes, "unit")
           ?? (typeof attributes.unit === "string" ? attributes.unit : null),
-    description: product.description,
+    description: product.description === null
+      ? null
+      : sanitizeProductDescription(product.description),
     imageUrl: product.images[0]?.url ?? null,
     images: product.images.map((image) => ({
       id: image.id,

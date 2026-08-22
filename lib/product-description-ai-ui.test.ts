@@ -10,6 +10,10 @@ const editorSource = readFileSync(
   new URL("../components/product-description-editor.tsx", import.meta.url),
   "utf8"
 );
+const deferredEditorSource = readFileSync(
+  new URL("../components/deferred-product-description-editor.tsx", import.meta.url),
+  "utf8"
+);
 const envExample = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
 
 function sourceBlock(startMarker: string, endMarker: string) {
@@ -33,8 +37,9 @@ test("Description exposes a compact accessible AI trigger beside its heading", (
 });
 
 test("published rich editor remains the only Description editor", () => {
-  assert.match(viewSource, /import \{ ProductDescriptionEditor \}/);
-  assert.equal(viewSource.match(/const ProductDescriptionEditor/g)?.length ?? 0, 0);
+  assert.match(viewSource, /import \{ DeferredProductDescriptionEditor \}/);
+  assert.match(deferredEditorSource, /import\("@\/components\/product-description-editor"\)/);
+  assert.doesNotMatch(viewSource, /from "@\/components\/product-description-editor"/);
   assert.match(editorSource, /command: "bold"/);
   assert.match(editorSource, /command: "italic"/);
   assert.match(editorSource, /command: "underline"/);
@@ -74,8 +79,8 @@ test("unsaved non-empty Description requires confirmation before replacement", (
     "const generateDescription = useCallback",
     "const reorderImage = useCallback"
   );
-  assert.match(generation, /const currentDescription = sanitizeProductDescription\(descriptionDraftRef\.current\)/);
-  assert.match(generation, /const savedDescription = sanitizeProductDescription\(baselineForm\.description\)/);
+  assert.match(generation, /const currentDescription = descriptionDraftRef\.current\.trim\(\)/);
+  assert.match(generation, /const savedDescription = baselineForm\.description\.trim\(\)/);
   assert.match(generation, /currentDescription &&\s*currentDescription !== savedDescription &&\s*!window\.confirm/);
   assert.match(generation, /alterações não salvas/);
 });

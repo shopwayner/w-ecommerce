@@ -43,10 +43,9 @@ import {
   X
 } from "lucide-react";
 import { Button } from "@/components/ui";
-import { ProductDescriptionEditor } from "@/components/product-description-editor";
+import { DeferredProductDescriptionEditor } from "@/components/deferred-product-description-editor";
 import { INTELLIGENT_PRODUCT_PREVIEW_MAX_IMAGES } from "@/lib/intelligent-product-preview";
 import { normalizeMercadoLivreReferenceImageUrl } from "@/lib/mercado-livre-reference-images";
-import { sanitizeProductDescription } from "@/lib/product-description";
 import { isOptimizableProductImageUrl } from "@/lib/product-image-optimization";
 import {
   applyProductTitleSuggestion,
@@ -365,7 +364,7 @@ function formFromProduct(product: ProductDetailsProduct): ProductDetailsEditForm
     itemsPerBox: product.itemsPerBox,
     dimensionUnit: product.dimensionUnit,
     packagingGtin: product.packagingGtin,
-    description: sanitizeProductDescription(product.description)
+    description: product.description ?? ""
   });
 }
 
@@ -888,7 +887,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
 
   const statusText = statusLabels[currentProduct.status] ?? displayText(currentProduct.status);
   const originText = displayText(currentProduct.origin ?? currentProduct.source ?? (getBlingName(currentProduct) ? "BLING" : null));
-  const description = sanitizeProductDescription(currentProduct.description);
+  const description = currentProduct.description ?? "";
   const dimensionUnit = dimensionUnitAbbreviation(currentProduct.dimensionUnit);
 
   const detailValues = useMemo<Record<ProductDetailsFieldId, string | number | null | undefined>>(() => ({
@@ -1040,8 +1039,8 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
 
   const generateDescription = useCallback(async () => {
     if (descriptionAiRequest.current) return;
-    const currentDescription = sanitizeProductDescription(descriptionDraftRef.current);
-    const savedDescription = sanitizeProductDescription(baselineForm.description);
+    const currentDescription = descriptionDraftRef.current.trim();
+    const savedDescription = baselineForm.description.trim();
     if (
       currentDescription &&
       currentDescription !== savedDescription &&
@@ -1089,6 +1088,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
           descriptionAiErrorMessage(payload.code, payload.retryAfterSeconds)
         );
       }
+      const { sanitizeProductDescription } = await import("@/lib/product-description");
       const nextDescription = sanitizeProductDescription(payload.html);
       if (!nextDescription || nextDescription.length > 12_000) {
         throw new Error("A IA não retornou uma descrição válida.");
@@ -1445,7 +1445,7 @@ export function ProductDetailsView<T extends ProductDetailsProduct>({
             </div>
             {editing ? (
               <>
-                <ProductDescriptionEditor
+                <DeferredProductDescriptionEditor
                   disabled={saving || descriptionAiLoading}
                   expanded={isDescriptionExpanded}
                   initialValue={form.description}

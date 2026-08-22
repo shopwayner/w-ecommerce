@@ -249,7 +249,7 @@ test("expanding the description does not reset the draft or move the cursor", ()
 test("Expandir and Recolher remain available in view and edit modes", () => {
   assert.match(detailsSource, /aria-expanded=\{isDescriptionExpanded\}/);
   assert.match(detailsSource, /setIsDescriptionExpanded/);
-  assert.match(detailsSource, /<ProductDescriptionEditor[\s\S]*expanded=\{isDescriptionExpanded\}/);
+  assert.match(detailsSource, /<DeferredProductDescriptionEditor[\s\S]*expanded=\{isDescriptionExpanded\}/);
   assert.match(detailsSource, /isDescriptionExpanded \? "h-\[70vh\] min-h-80"/);
 });
 
