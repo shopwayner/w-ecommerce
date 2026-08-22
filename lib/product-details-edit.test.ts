@@ -368,8 +368,14 @@ test("the detail response supplies edit capability without a duplicate session r
     new URL("../app/api/products/[id]/route.ts", import.meta.url),
     "utf8"
   );
+  const serviceSource = readFileSync(
+    new URL("./services/product-details-service.ts", import.meta.url),
+    "utf8"
+  );
 
   assert.doesNotMatch(detailsSource, /fetch\("\/api\/auth\/session"\)/);
-  assert.match(pageSource, /payload\.permissions\?\.canEdit === true/);
-  assert.match(routeSource, /hasSystemPermission\(auth\.context, "products:write"\)/);
+  assert.doesNotMatch(pageSource, /fetch\(/);
+  assert.match(pageSource, /canEditProduct=\{canEditProduct\}/);
+  assert.match(routeSource, /loadProductDetails\(auth\.context, id\)/);
+  assert.match(serviceSource, /hasSystemPermission\(authContext, "products:write"\)/);
 });

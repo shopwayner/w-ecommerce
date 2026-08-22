@@ -442,7 +442,7 @@ test("SKU 6711: SYNC completa o mesmo Product sem criar Product ou mapping", asy
 
 test("SKU 6711: API de detalhes retorna todos os campos sincronizados", () => {
   const source = readFileSync(
-    path.join(process.cwd(), "app/api/products/[id]/route.ts"),
+    path.join(process.cwd(), "lib/services/product-details-service.ts"),
     "utf8"
   );
   for (const field of [

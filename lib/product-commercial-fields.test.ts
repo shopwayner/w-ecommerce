@@ -64,6 +64,10 @@ test("the product API reads and writes every field without accepting organizatio
     path.join(process.cwd(), "app/api/products/[id]/route.ts"),
     "utf8"
   );
+  const detailService = readFileSync(
+    path.join(process.cwd(), "lib/services/product-details-service.ts"),
+    "utf8"
+  );
   const fields = [
     "format",
     "productType",
@@ -76,7 +80,7 @@ test("the product API reads and writes every field without accepting organizatio
     "packagingGtin"
   ];
   for (const field of fields) {
-    assert.match(route, new RegExp(`${field}: product\\.${field}`));
+    assert.match(detailService, new RegExp(`${field}: product\\.${field}`));
   }
   for (const field of fields.filter((field) => field !== "expirationDate")) {
     assert.match(route, new RegExp(`productData\\.${field} = parsed\\.data\\.${field}`));

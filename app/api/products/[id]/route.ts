@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { requireApiAuth } from "@/lib/auth/api";
-import { hasSystemPermission } from "@/lib/auth/system-superuser";
 import { parseDecimalPrice } from "@/lib/decimal-price";
 import { normalizeProductBrand } from "@/lib/product-brand";
 import {
@@ -15,9 +14,9 @@ import {
 import { prisma } from "@/lib/prisma";
 import { getUserAccountContext } from "@/lib/services/account-context-service";
 import {
-  readBlingProductConnectionAttributes,
-  readCanonicalBlingStatusFromAttributes
-} from "@/lib/services/bling-product-import-service";
+  findProductDetails,
+  loadProductDetails
+} from "@/lib/services/product-details-service";
 import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { normalizeProductDescriptionForStorage } from "@/lib/product-description";
 import { productUpdateSchema } from "@/lib/validation";
@@ -32,17 +31,6 @@ function getMetadata(blockedFields: unknown) {
   return blockedFields && typeof blockedFields === "object" && !Array.isArray(blockedFields)
     ? (blockedFields as Record<string, unknown>)
     : {};
-}
-
-function getAttributes(attributes: unknown) {
-  return attributes && typeof attributes === "object" && !Array.isArray(attributes)
-    ? (attributes as Record<string, unknown>)
-    : {};
-}
-
-function getStringAttribute(attributes: Record<string, unknown>, key: string) {
-  const value = attributes[key];
-  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function parseBrazilianDecimal(value: string | null | undefined, field: string) {
@@ -60,170 +48,6 @@ function parseBrazilianDecimal(value: string | null | undefined, field: string) 
   return { numberValue, displayValue: numberValue.toFixed(2) };
 }
 
-function formatProductResponse(product: Awaited<ReturnType<typeof loadProductForResponse>>) {
-  const metadata = getMetadata(product.blockedFields);
-  const attributes = getAttributes(product.attributes);
-  const inventoryStock = product.inventory.reduce((total, item) => total + item.physicalQuantity - item.reservedQuantity, 0);
-  const stockOverride = typeof metadata.stockOverride === "number" ? metadata.stockOverride : null;
-  const currentPrice = product.prices[0];
-  const blingMapping = product.mappings[0];
-  const blingAttributes = readBlingProductConnectionAttributes(
-    attributes,
-    blingMapping?.connectionId
-  );
-  const brand = normalizeProductBrand(product.brand);
-  const blingAccountName =
-    blingMapping?.connection.name ||
-    blingMapping?.connection.externalCompanyName ||
-    blingMapping?.connection.externalCompanyDocument ||
-    blingMapping?.connection.externalAccountId ||
-    null;
-
-  return {
-    id: product.id,
-    name: product.name,
-    sku: product.sku,
-    ean: product.ean,
-    category: product.category,
-    brand,
-    ncm: product.ncm,
-    origin:
-      typeof metadata.origin === "string"
-        ? metadata.origin
-        : getStringAttribute(blingAttributes, "origin") ?? product.source,
-    unit:
-      typeof metadata.unit === "string"
-        ? metadata.unit
-        : getStringAttribute(blingAttributes, "unit")
-          ?? (typeof attributes.unit === "string" ? attributes.unit : null),
-    description: product.description,
-    imageUrl: product.images[0]?.url ?? null,
-    images: product.images.map((image) => ({
-      id: image.id,
-      url: image.url,
-      position: image.position
-    })),
-    hasEnrichmentDraft: product.enrichmentDrafts.length > 0,
-    status: product.status,
-    enrichmentStatus: product.enrichmentStatus,
-    syncStatus: product.syncStatus,
-    source: product.source,
-    externalId: blingMapping?.externalProductId ?? getStringAttribute(attributes, "externalId"),
-    externalProductId: blingMapping?.externalProductId ?? getStringAttribute(attributes, "externalId"),
-    blingAccount: blingMapping
-      ? {
-          blingAccountId: blingMapping.connectionId,
-          blingAccountName,
-          displayName: blingAccountName,
-          blingAccountShortId: blingMapping.connectionId.slice(-8),
-          isActiveDefault: blingMapping.connection.isDefault,
-          externalProductId: blingMapping.externalProductId,
-          status: blingMapping.connection.status
-        }
-      : null,
-    blingStatus: readCanonicalBlingStatusFromAttributes(
-      attributes,
-      blingMapping?.connectionId
-    ),
-    marketplaceCategories: product.marketplaceCategoryMappings.map((mapping) => ({
-      provider: mapping.provider,
-      status: mapping.status,
-      marketplaceCategoryId: mapping.marketplaceCategoryId,
-      marketplaceCategoryName: mapping.marketplaceCategoryName,
-      marketplaceCategoryPath: mapping.marketplaceCategoryPath,
-      confidenceScore: mapping.confidenceScore,
-      requiredAttributes: mapping.requiredAttributes,
-      attributeValues: mapping.productAttributeValues.map((value) => ({
-        attributeId: value.attributeId,
-        value: value.value,
-        status: value.status
-      }))
-    })),
-    confidenceScore: product.confidenceScore,
-    weight: product.weight?.toString() ?? null,
-    grossWeight: product.grossWeight?.toString() ?? null,
-    height: product.height?.toString() ?? null,
-    width: product.width?.toString() ?? null,
-    depth: product.depth?.toString() ?? null,
-    dimensionUnit: product.dimensionUnit,
-    condition: product.condition,
-    format: product.format,
-    productType: product.productType,
-    commercialStatus: product.commercialStatus,
-    productionType: product.productionType,
-    expirationDate: product.expirationDate?.toISOString().slice(0, 10) ?? null,
-    freeShipping: product.freeShipping,
-    volumes: product.volumes,
-    itemsPerBox: product.itemsPerBox?.toString() ?? null,
-    packagingGtin: product.packagingGtin,
-    attributes: product.attributes,
-    displayValue: typeof metadata.displayValue === "string" ? metadata.displayValue : null,
-    salePriceDisplay: typeof metadata.salePriceDisplay === "string" ? metadata.salePriceDisplay : currentPrice?.salePrice.toString() ?? null,
-    costPrice: currentPrice?.costPrice.toString() ?? "0",
-    costPriceDisplay: currentPrice?.costPrice.toString() ?? null,
-    price: currentPrice?.salePrice.toString() ?? "0",
-    stock: product.inventory.length ? inventoryStock : stockOverride ?? inventoryStock,
-    updatedAt: product.updatedAt
-  };
-}
-
-function loadProductForResponse(
-  productId: string,
-  organizationId: string,
-  blingConnectionId: string | null
-) {
-  return prisma.product.findFirstOrThrow({
-    where: { id: productId, organizationId },
-    include: {
-      prices: {
-        where: { organizationId },
-        take: 1,
-        orderBy: { createdAt: "desc" }
-      },
-      inventory: {
-        where: {
-          organizationId,
-          ...(blingConnectionId ? { connectionId: blingConnectionId } : {})
-        }
-      },
-      images: {
-        where: { organizationId },
-        orderBy: [{ position: "asc" }, { id: "asc" }]
-      },
-      enrichmentDrafts: {
-        where: { organizationId },
-        take: 1,
-        orderBy: { updatedAt: "desc" }
-      },
-      mappings: {
-        where: {
-          organizationId,
-          ...(blingConnectionId ? { connectionId: blingConnectionId } : {})
-        },
-        take: 1,
-        orderBy: { updatedAt: "desc" },
-        include: {
-          connection: true
-        }
-      },
-      marketplaceCategoryMappings: {
-        where: { organizationId, provider: "MERCADO_LIVRE" },
-        take: 1,
-        orderBy: { updatedAt: "desc" },
-        include: {
-          productAttributeValues: {
-            select: {
-              attributeId: true,
-              value: true,
-              status: true
-            }
-          }
-        }
-      }
-    }
-  });
-}
-
 function toOptionalJson(value: Record<string, unknown> | null | undefined) {
   if (value === undefined) return undefined;
   if (value === null) return Prisma.JsonNull;
@@ -233,77 +57,15 @@ function toOptionalJson(value: Record<string, unknown> | null | undefined) {
 export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const auth = await requireApiAuth("products:read");
   if (!auth.ok) return auth.response;
-  const accountContext = await getUserAccountContext(auth.context);
-  const blingConnectionId =
-    accountContext.mode === "ERP_ACCOUNT" && accountContext.provider === "BLING"
-      ? accountContext.connectionId
-      : null;
 
   const { id } = await params;
-  const product = await prisma.product.findFirst({
-    where: { id, organizationId: auth.context.organizationId },
-    include: {
-      prices: {
-        where: { organizationId: auth.context.organizationId },
-        take: 1,
-        orderBy: { createdAt: "desc" }
-      },
-      inventory: {
-        where: {
-          organizationId: auth.context.organizationId,
-          ...(blingConnectionId ? { connectionId: blingConnectionId } : {})
-        }
-      },
-      images: {
-        where: { organizationId: auth.context.organizationId },
-        orderBy: [{ position: "asc" }, { id: "asc" }]
-      },
-      enrichmentDrafts: {
-        where: { organizationId: auth.context.organizationId },
-        take: 1,
-        orderBy: { updatedAt: "desc" }
-      },
-      mappings: {
-        where: {
-          organizationId: auth.context.organizationId,
-          ...(blingConnectionId ? { connectionId: blingConnectionId } : {})
-        },
-        take: 1,
-        orderBy: { updatedAt: "desc" },
-        include: {
-          connection: true
-        }
-      },
-      marketplaceCategoryMappings: {
-        where: {
-          organizationId: auth.context.organizationId,
-          provider: "MERCADO_LIVRE"
-        },
-        take: 1,
-        orderBy: { updatedAt: "desc" },
-        include: {
-          productAttributeValues: {
-            select: {
-              attributeId: true,
-              value: true,
-              status: true
-            }
-          }
-        }
-      }
-    }
-  });
+  const result = await loadProductDetails(auth.context, id);
 
-  if (!product) {
+  if (!result) {
     return NextResponse.json({ error: "Produto nao encontrado." }, { status: 404 });
   }
 
-  return NextResponse.json({
-    data: formatProductResponse(product),
-    permissions: {
-      canEdit: hasSystemPermission(auth.context, "products:write")
-    }
-  });
+  return NextResponse.json({ data: result.data, permissions: result.permissions });
 }
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -559,10 +321,13 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     return NextResponse.json({ error: "Nao foi possivel salvar o produto." }, { status: 500 });
   }
 
-  const updatedProduct = await loadProductForResponse(
-    existing.id,
-    auth.context.organizationId,
+  const updatedProduct = await findProductDetails({
+    productId: existing.id,
+    organizationId: auth.context.organizationId,
     blingConnectionId
-  );
-  return NextResponse.json({ data: formatProductResponse(updatedProduct), status: "updated" });
+  });
+  if (!updatedProduct) {
+    return NextResponse.json({ error: "Produto nao encontrado." }, { status: 404 });
+  }
+  return NextResponse.json({ data: updatedProduct, status: "updated" });
 }

@@ -267,6 +267,10 @@ test("product detail API returns brand and the dedicated view renders the Brand 
     path.join(process.cwd(), "app/api/products/[id]/route.ts"),
     "utf8"
   );
+  const detailServiceSource = readFileSync(
+    path.join(process.cwd(), "lib/services/product-details-service.ts"),
+    "utf8"
+  );
   const viewSource = readFileSync(
     path.join(process.cwd(), "components/product-details-view.tsx"),
     "utf8"
@@ -275,8 +279,8 @@ test("product detail API returns brand and the dedicated view renders the Brand 
     path.join(process.cwd(), "lib/product-details-edit.ts"),
     "utf8"
   );
-  assert.match(routeSource, /const brand = normalizeProductBrand\(product\.brand\)/);
-  assert.match(routeSource, /\n\s+brand,/);
+  assert.match(detailServiceSource, /const brand = normalizeProductBrand\(product\.brand\)/);
+  assert.match(detailServiceSource, /\n\s+brand,/);
   assert.match(routeSource, /requireApiAuth\("products:read"\)/);
   assert.match(fieldsSource, /\{\s*id:\s*"brand",\s*label:\s*"Marca"[\s\S]+placeholder:\s*"Sem marca"/);
   assert.match(viewSource, /brand:\s*currentProduct\.brand/);

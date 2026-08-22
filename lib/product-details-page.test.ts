@@ -27,6 +27,10 @@ const apiSource = readFileSync(
   path.join(process.cwd(), "app/api/products/[id]/route.ts"),
   "utf8"
 );
+const serviceSource = readFileSync(
+  path.join(process.cwd(), "lib/services/product-details-service.ts"),
+  "utf8"
+);
 
 test("product details links preserve the exact products-list URL", () => {
   const returnTo = "/products?q=capacete&page=2&limit=50";
@@ -81,25 +85,34 @@ test("the dynamic product route renders one dedicated details page", () => {
   assert.match(routeSource, /<ProductDetailsPage/);
   assert.match(routeSource, /initialMode="edit"/);
   assert.doesNotMatch(routeSource, /query\.mode === "edit"/);
+  assert.match(routeSource, /requirePermission\("products:read"\)/);
+  assert.match(routeSource, /loadProductDetails\(authContext, id\)/);
+  assert.match(routeSource, /initialProduct=\{toProductDetailsInitialProduct\(result\.data\)\}/);
   assert.match(routeSource, /returnTo=\{returnTo\}/);
   assert.match(routeSource, /normalizeProductReturnTo\(/);
 });
 
-test("the details page performs one local detail request and passes server permission", () => {
-  assert.equal((pageSource.match(/fetch\(/g) ?? []).length, 1);
-  assert.match(pageSource, /fetch\(`\/api\/products\/\$\{encodeURIComponent\(productId\)\}`/);
-  assert.match(pageSource, /payload\.permissions\?\.canEdit === true/);
+test("the details page hydrates server data without a duplicate local detail request", () => {
+  assert.equal((pageSource.match(/fetch\(/g) ?? []).length, 0);
+  assert.doesNotMatch(pageSource, /\/api\/products\//);
+  assert.match(pageSource, /useState\(initialProduct\)/);
+  assert.match(pageSource, /canEditProduct=\{canEditProduct\}/);
+  assert.match(pageSource, /initialAccountContext=\{initialAccountContext\}/);
+  assert.match(pageSource, /initialSession=\{initialSession\}/);
   assert.match(pageSource, /<ProductDetailsView/);
 });
 
 test("the dedicated product page uses the full width available inside the app shell", () => {
   assert.match(viewSource, /className="w-full min-w-0 max-w-none"/);
   assert.doesNotMatch(viewSource, /mx-auto min-w-0 w-full max-w-\[1540px\]/);
-  assert.match(pageSource, /w-full min-w-0 max-w-none place-items-center/);
+  assert.match(pageSource, /<AppShell/);
+  assert.match(pageSource, /<ProductDetailsView/);
 });
 
-test("tenant isolation remains enforced by the existing detail API", () => {
-  assert.match(apiSource, /where:\s*\{\s*id,\s*organizationId:\s*auth\.context\.organizationId\s*\}/);
+test("tenant isolation remains enforced by the shared detail service", () => {
+  assert.match(apiSource, /loadProductDetails\(auth\.context, id\)/);
+  assert.match(serviceSource, /id:\s*input\.productId,\s*organizationId:\s*input\.organizationId/);
+  assert.match(serviceSource, /where:\s*\{\s*organizationId\s*\}/);
   assert.match(apiSource, /Produto nao encontrado/);
   assert.match(apiSource, /status:\s*404/);
 });

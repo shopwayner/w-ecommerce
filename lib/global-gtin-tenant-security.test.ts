@@ -128,9 +128,11 @@ test("ID stubs validate resource ownership before returning their placeholder re
 
   const productDetails = source("app/api/products/[id]/route.ts");
   const productRead = functionBody(productDetails, "GET");
-  assert.match(productRead, /where:\s*\{\s*id,\s*organizationId:\s*auth\.context\.organizationId\s*\}/);
-  assert.match(productRead, /images:/);
-  assert.match(productRead, /mappings:/);
+  const productDetailsService = source("lib/services/product-details-service.ts");
+  assert.match(productRead, /loadProductDetails\(auth\.context, id\)/);
+  assert.match(productDetailsService, /id:\s*input\.productId,\s*organizationId:\s*input\.organizationId/);
+  assert.match(productDetailsService, /images:/);
+  assert.match(productDetailsService, /mappings:/);
 
   const connectionRoute = source("app/api/integrations/[id]/route.ts");
   assert.match(connectionRoute, /where:\s*\{\s*id,\s*organizationId:\s*auth\.context\.organizationId,\s*status: \{ not: "DISABLED" \}\s*\}/);
