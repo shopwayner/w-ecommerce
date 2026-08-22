@@ -142,7 +142,10 @@ test("inventory frontend requests remote pages and no longer paginates in memory
   assert.match(source, /new URLSearchParams\(\{[\s\S]*page: String\(currentPage\)[\s\S]*limit: String\(pageSize\)/);
   assert.match(source, /params\.set\("q", debouncedSearchQuery\)/);
   assert.match(source, /setTotalResults\(payload\.pagination\?\.total/);
-  assert.match(source, /rows=\{items\.map/);
+  assert.match(
+    source,
+    /items\.map\(\(item\) => \(\s*<InventoryTableRow\s+item=\{item\}\s+key=\{item\.id\}/
+  );
   assert.doesNotMatch(source, /filteredItems/);
   assert.doesNotMatch(source, /paginatedItems/);
   assert.doesNotMatch(source, /\.slice\(startIndex/);
