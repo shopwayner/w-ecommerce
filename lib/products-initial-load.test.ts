@@ -46,8 +46,9 @@ test("hydration reuses embedded products instead of issuing the initial API requ
 });
 
 test("topbar consumes server session and account context without duplicate hydration fetches", () => {
-  assert.match(appShellSource, /initialAccountContext=\{initialAccountContext\}/);
-  assert.match(appShellSource, /initialSession=\{initialSession\}/);
+  assert.match(appShellSource, /initialAccountContext=\{resolvedAccountContext\}/);
+  assert.match(appShellSource, /initialSession=\{resolvedSession\}/);
+  assert.match(appShellSource, /useAppShellBootstrap\(\)/);
   assert.match(topbarSource, /if \(initialSession\) \{/);
   assert.match(topbarSource, /if \(!initialAccountContext\) loadAccountContext\(\);/);
   assert.match(topbarSource, /fetch\("\/api\/auth\/session"\)/);

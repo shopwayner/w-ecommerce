@@ -22,6 +22,12 @@ export type SafeNotification = {
   };
 };
 
+export async function getUnreadNotificationCount(organizationId: string) {
+  return prisma.notification.count({
+    where: { organizationId, status: "UNREAD" }
+  });
+}
+
 const sensitiveAssignmentPattern =
   /(access[_-]?token|refresh[_-]?token|client[_-]?secret|authorization|cookie|password|senha|database_url|app_encryption_key)\s*[:=]\s*[^,\s]+/gi;
 

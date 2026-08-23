@@ -2,6 +2,7 @@
 
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useState } from "react";
+import { useAppShellBootstrap } from "@/components/app-shell-bootstrap-provider";
 import { Sidebar } from "@/components/sidebar";
 import {
   Topbar,
@@ -25,6 +26,9 @@ export function AppShell({
   initialAccountContext = null,
   initialSession = null
 }: AppShellProps) {
+  const bootstrap = useAppShellBootstrap();
+  const resolvedAccountContext = initialAccountContext ?? bootstrap?.accountContext ?? null;
+  const resolvedSession = initialSession ?? bootstrap?.session ?? null;
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [hydrated, setHydrated] = useState(false);
@@ -57,6 +61,7 @@ export function AppShell({
     <div className="min-h-screen bg-matrix-bg text-matrix-fg">
       <Sidebar
         collapsed={sidebarCollapsed}
+        initialPlanInfo={bootstrap?.planInfo ?? null}
         mobileOpen={mobileSidebarOpen}
         onCloseMobile={closeMobileSidebar}
         onToggleCollapsed={toggleSidebarCollapsed}
@@ -69,8 +74,9 @@ export function AppShell({
       >
         <Topbar
           denseDesktopShell={denseDesktopShell}
-          initialAccountContext={initialAccountContext}
-          initialSession={initialSession}
+          initialAccountContext={resolvedAccountContext}
+          initialSession={resolvedSession}
+          onAccountContextChange={bootstrap?.setAccountContext}
           onMenuClick={openMobileSidebar}
           sidebarCollapsed={hydrated && sidebarCollapsed}
         />

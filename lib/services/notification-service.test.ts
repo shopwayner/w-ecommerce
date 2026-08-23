@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { prisma } from "@/lib/prisma";
 import {
+  getUnreadNotificationCount,
   getBlingSyncReportPage,
   listNotifications
 } from "./notification-service";
@@ -99,6 +100,25 @@ test("notificacao SYNC e limitada, resumida e referencia o job correto", async (
     assert.equal(item.action?.jobId, "job-1");
     assert.equal(item.action?.preview.groups[0].items.length, 3);
     assert.equal("report" in (item.action ?? {}), false);
+  });
+});
+
+test("resumo de notificacoes consulta somente a contagem do tenant", async () => {
+  let receivedWhere: unknown = null;
+  await withPrismaMocks({
+    notification: {
+      count: async ({ where }: { where: unknown }) => {
+        receivedWhere = where;
+        return 4;
+      }
+    },
+    erpSyncJob: {}
+  }, async () => {
+    assert.equal(await getUnreadNotificationCount("organization-1"), 4);
+    assert.deepEqual(receivedWhere, {
+      organizationId: "organization-1",
+      status: "UNREAD"
+    });
   });
 });
 

@@ -4,11 +4,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ChevronDown, ChevronLeft, ChevronRight, Menu, PanelLeftClose } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
+import type { AppShellPlanInfo } from "@/components/app-shell-bootstrap-provider";
 import { navigationItems, type NavigationGroup } from "@/lib/navigation";
 import { cn } from "@/lib/utils";
 
 type SidebarProps = {
   collapsed: boolean;
+  initialPlanInfo?: AppShellPlanInfo | null;
   mobileOpen: boolean;
   onCloseMobile: () => void;
   onToggleCollapsed: () => void;
@@ -36,7 +38,7 @@ function formatDate(value: string | null) {
   return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(value));
 }
 
-function SidebarComponent({ collapsed, mobileOpen, onCloseMobile, onToggleCollapsed }: SidebarProps) {
+function SidebarComponent({ collapsed, initialPlanInfo = null, mobileOpen, onCloseMobile, onToggleCollapsed }: SidebarProps) {
   const pathname = usePathname();
   const [pendingHref, setPendingHref] = useState<string | null>(null);
   const currentPath = pendingHref ?? pathname;
@@ -45,7 +47,17 @@ function SidebarComponent({ collapsed, mobileOpen, onCloseMobile, onToggleCollap
     [currentPath]
   );
   const [openGroups, setOpenGroups] = useState<string[]>(activeGroups);
-  const [planInfo, setPlanInfo] = useState<PlanInfo>(cachedPlanInfo ?? { planLabel: "Plano Empresarial", currentPeriodEnd: null });
+  const serverPlanInfo = useMemo(
+    () =>
+      initialPlanInfo
+        ? {
+            planLabel: planLabels[initialPlanInfo.planCode ?? ""] ?? "Plano Empresarial",
+            currentPeriodEnd: initialPlanInfo.currentPeriodEnd
+          }
+        : null,
+    [initialPlanInfo]
+  );
+  const [planInfo, setPlanInfo] = useState<PlanInfo>(serverPlanInfo ?? cachedPlanInfo ?? { planLabel: "Plano Empresarial", currentPeriodEnd: null });
 
   useEffect(() => {
     setPendingHref(null);
@@ -56,6 +68,11 @@ function SidebarComponent({ collapsed, mobileOpen, onCloseMobile, onToggleCollap
   }, [activeGroups]);
 
   useEffect(() => {
+    if (serverPlanInfo) {
+      cachedPlanInfo = serverPlanInfo;
+      setPlanInfo(serverPlanInfo);
+      return;
+    }
     if (cachedPlanInfo) return;
     fetch("/api/settings")
       .then((response) => (response.ok ? response.json() : null))
@@ -68,7 +85,7 @@ function SidebarComponent({ collapsed, mobileOpen, onCloseMobile, onToggleCollap
         setPlanInfo(cachedPlanInfo);
       })
       .catch(() => undefined);
-  }, []);
+  }, [serverPlanInfo]);
 
   function toggleGroup(label: string) {
     setOpenGroups((current) => (current.includes(label) ? current.filter((item) => item !== label) : [...current, label]));
