@@ -47,6 +47,7 @@ type ListingStatusFilter = (typeof listingStatuses)[number];
 type ListingFilterStatus = (typeof listingStatusFilters)[number];
 type ListingTypeFilter = (typeof listingTypeFilters)[number];
 type StockFilter = (typeof stockFilters)[number];
+type NativeListingTypeId = "gold_pro" | "gold_special";
 
 type MercadoLivreItemSearchPayload = {
   results?: unknown[];
@@ -385,13 +386,22 @@ function normalizeMercadoLivreId(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function sellerItemsPath(input: { sellerId: string; offset: number; limit: number; status?: ListingStatusFilter }) {
+export function buildMercadoLivreSellerItemsPath(input: {
+  sellerId: string;
+  offset: number;
+  limit: number;
+  status?: ListingStatusFilter;
+  listingTypeId?: NativeListingTypeId;
+}) {
   const params = new URLSearchParams();
   params.set("limit", String(input.limit));
   params.set("offset", String(input.offset));
   if (input.status) params.set("status", input.status);
+  if (input.listingTypeId) params.set("listing_type_id", input.listingTypeId);
   return `/users/${encodeURIComponent(input.sellerId)}/items/search?${params.toString()}`;
 }
+
+const sellerItemsPath = buildMercadoLivreSellerItemsPath;
 
 function sellerExactSkuPath(input: { sellerId: string; field: "sku" | "seller_sku"; value: string }) {
   const params = new URLSearchParams();
@@ -1744,18 +1754,73 @@ function nativeStatusFilter(value: ListingFilterStatus): ListingStatusFilter | u
   return listingStatuses.includes(value as ListingStatusFilter) ? (value as ListingStatusFilter) : undefined;
 }
 
+export function nativeListingTypeFilter(value: ListingTypeFilter): NativeListingTypeId | undefined {
+  if (value === "premium") return "gold_pro";
+  if (value === "classico") return "gold_special";
+  return undefined;
+}
+
+export function canUseMercadoLivreNativePage(input: {
+  searchTerm: string;
+  status: ListingFilterStatus;
+  listingType: ListingTypeFilter;
+  stock: StockFilter;
+}) {
+  const statusForSearch = nativeStatusFilter(input.status);
+  const listingTypeForSearch = nativeListingTypeFilter(input.listingType);
+  return (
+    !input.searchTerm &&
+    input.stock === "all" &&
+    (input.status === "all" || Boolean(statusForSearch)) &&
+    (input.listingType === "all" || Boolean(listingTypeForSearch))
+  );
+}
+
+export function mercadoLivreNativeListingTypePageIsComplete(input: {
+  results: unknown[];
+  total: number | null;
+  offset: number;
+  limit: number;
+}) {
+  if (input.total === null || input.total < 0) return false;
+  const ids = input.results.map(normalizeMercadoLivreId).filter((id): id is string => Boolean(id));
+  const expectedCount = Math.min(input.limit, Math.max(0, input.total - input.offset));
+  return ids.length === input.results.length && new Set(ids).size === ids.length && ids.length === expectedCount;
+}
+
 function listingMatchesStatusFilter(listing: MercadoLivreClientListing, filter: ListingFilterStatus) {
   if (filter === "all") return true;
   if (filter === "error") return listing.status === "under_review" || listing.status === "inactive";
   return listing.status === filter;
 }
 
-function listingMatchesTypeFilter(listing: MercadoLivreClientListing, filter: ListingTypeFilter) {
+export function listingMatchesTypeFilter(
+  listing: Pick<MercadoLivreClientListing, "listingTypeId">,
+  filter: ListingTypeFilter
+) {
   if (filter === "all") return true;
   const listingTypeId = listing.listingTypeId?.toLowerCase() ?? "";
   if (filter === "premium") return listingTypeId === "gold_pro";
   if (filter === "classico") return listingTypeId === "gold_special";
   return listingTypeId !== "gold_pro" && listingTypeId !== "gold_special";
+}
+
+export function mercadoLivreNativeListingTypeDetailsAreComplete(input: {
+  itemIds: string[];
+  listings: Array<Pick<MercadoLivreClientListing, "externalId" | "listingTypeId">>;
+  listingType: ListingTypeFilter;
+}) {
+  const expectedIds = new Set(input.itemIds.map((id) => id.toUpperCase()));
+  if (expectedIds.size !== input.itemIds.length || input.listings.length !== expectedIds.size) return false;
+  const confirmedIds = new Set<string>();
+  for (const listing of input.listings) {
+    const externalId = listing.externalId.toUpperCase();
+    if (confirmedIds.has(externalId) || !expectedIds.has(externalId) || !listingMatchesTypeFilter(listing, input.listingType)) {
+      return false;
+    }
+    confirmedIds.add(externalId);
+  }
+  return confirmedIds.size === expectedIds.size;
 }
 
 function listingMatchesStockFilter(listing: MercadoLivreClientListing, filter: StockFilter) {
@@ -2072,8 +2137,8 @@ export class MercadoLivreClientListingsService {
         ? (input.stock as StockFilter)
         : "all";
     const statusForSearch = nativeStatusFilter(status);
-    const canUseNativeMercadoLivrePage =
-      !searchTerm && listingType === "all" && stock === "all" && (status === "all" || Boolean(statusForSearch));
+    const listingTypeForSearch = nativeListingTypeFilter(listingType);
+    const canUseNativeMercadoLivrePage = canUseMercadoLivreNativePage({ searchTerm, status, listingType, stock });
 
     const { connection, accessToken: initialAccessToken } = await mercadoLivreClientOAuthService.getAccessTokenForActiveConnection(input.authContext.organizationId);
     const sellerId = normalizeMercadoLivreId(connection.sellerId ?? connection.externalAccountId);
@@ -2114,61 +2179,101 @@ export class MercadoLivreClientListingsService {
       }
     }
 
-    if (exactSearchResolved) {
-      // Exact candidates are already confirmed against the current seller and need only final enrichment.
-    } else if (canUseNativeMercadoLivrePage) {
+    let nativePageCompleted = exactSearchResolved;
+    if (!exactSearchResolved && canUseNativeMercadoLivrePage) {
       const response = await fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
         organizationId: input.authContext.organizationId,
         connectionId: connection.id,
         accessToken,
-        path: sellerItemsPath({ sellerId, offset: requestedOffset, limit: requestedLimit, status: statusForSearch })
+        path: sellerItemsPath({
+          sellerId,
+          offset: requestedOffset,
+          limit: requestedLimit,
+          status: statusForSearch,
+          listingTypeId: listingTypeForSearch
+        })
       });
       accessToken = response.accessToken;
+      const rawResults = response.ok ? response.data.results ?? [] : [];
+      const responseTotal = response.ok && typeof response.data.paging?.total === "number" ? response.data.paging.total : null;
+      const nativeListingTypeResponseComplete =
+        !listingTypeForSearch ||
+        (response.ok &&
+          mercadoLivreNativeListingTypePageIsComplete({
+            results: rawResults,
+            total: responseTotal,
+            offset: requestedOffset,
+            limit: requestedLimit
+          }));
       endpointDiagnostics.push({
         endpoint: response.endpoint,
         status: response.status,
         listingStatus: statusForSearch,
+        listingTypeId: listingTypeForSearch,
         requestId: response.requestId,
         correlationId: response.correlationId,
-        returnedIds: response.ok ? response.data.results?.length ?? 0 : 0,
-        total: response.ok ? response.data.paging?.total ?? null : null,
+        returnedIds: rawResults.length,
+        total: responseTotal,
         offset: requestedOffset,
         limit: requestedLimit,
-        filterMode: "native_status_before_pagination",
+        filterMode: listingTypeForSearch ? "native_listing_type_before_pagination" : "native_status_before_pagination",
+        complete: nativeListingTypeResponseComplete,
         errorCode: response.ok ? null : response.error.error,
         errorMessage: response.ok ? null : response.error.message
       });
 
       if (!response.ok) {
         warnings.push(`Mercado Livre retornou HTTP ${response.status} ao buscar anuncios filtrados.`);
-      } else {
-        sourceTotalAvailable = typeof response.data.paging?.total === "number" ? response.data.paging.total : null;
-        filteredTotalAvailable = sourceTotalAvailable;
       }
+      if (listingTypeForSearch && !nativeListingTypeResponseComplete) {
+        warnings.push("O filtro nativo de tipo retornou dados inconclusivos. A busca completa foi preservada.");
+      } else {
+        if (response.ok) {
+          sourceTotalAvailable = responseTotal;
+          filteredTotalAvailable = responseTotal;
+        }
 
-      const itemIds = response.ok
-        ? (response.data.results ?? [])
-            .map((id) => normalizeMercadoLivreId(id))
-            .filter((id): id is string => Boolean(id))
-            .slice(0, requestedLimit)
-        : [];
-      foundItemIds = itemIds.length;
-      matchedItemIds = itemIds.length;
+        const itemIds = response.ok
+          ? rawResults
+              .map((id) => normalizeMercadoLivreId(id))
+              .filter((id): id is string => Boolean(id))
+              .slice(0, requestedLimit)
+          : [];
+        foundItemIds = itemIds.length;
+        matchedItemIds = itemIds.length;
 
-      const detailResult = await fetchListingDetailsReadOnly({
-        organizationId: input.authContext.organizationId,
-        connectionId: connection.id,
-        accessToken,
-        itemIds,
-        syncedAt,
-        warnings,
-        endpointDiagnostics
-      });
-      accessToken = detailResult.accessToken;
-      pageListings = uniqueListingsByMercadoLivreId(detailResult.listings).filter((listing) =>
-        listingMatchesFilters(listing, { query: searchTerm, status, listingType, stock })
-      );
-    } else {
+        const detailResult = await fetchListingDetailsReadOnly({
+          organizationId: input.authContext.organizationId,
+          connectionId: connection.id,
+          accessToken,
+          itemIds,
+          syncedAt,
+          warnings,
+          endpointDiagnostics
+        });
+        accessToken = detailResult.accessToken;
+        const uniqueDetails = uniqueListingsByMercadoLivreId(detailResult.listings);
+        const nativeListingTypeDetailsComplete =
+          !listingTypeForSearch ||
+          mercadoLivreNativeListingTypeDetailsAreComplete({ itemIds, listings: uniqueDetails, listingType });
+
+        if (listingTypeForSearch && !nativeListingTypeDetailsComplete) {
+          warnings.push("Os detalhes do filtro nativo de tipo ficaram inconclusivos. A busca completa foi preservada.");
+        } else {
+          pageListings = uniqueDetails.filter((listing) =>
+            listingMatchesFilters(listing, { query: searchTerm, status, listingType, stock })
+          );
+          nativePageCompleted = true;
+        }
+      }
+    }
+
+    if (!nativePageCompleted) {
+      sourceTotalAvailable = null;
+      foundItemIds = 0;
+      matchedItemIds = 0;
+      pageListings = [];
+      filteredTotalAvailable = null;
       let sourceOffset = 0;
       const matchedListings: MercadoLivreClientListing[] = [];
 
