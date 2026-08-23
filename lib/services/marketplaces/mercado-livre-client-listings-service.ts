@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { MarketplaceCategoryProvider, MarketplaceProvider } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
+import { isValidGtin, normalizeGtin } from "@/lib/services/internal-gtin-catalog-service";
 import { mercadoLivreClientOAuthService } from "@/lib/services/marketplaces/mercado-livre-client-oauth-service";
 import {
   buildPersistedSellerShippingCost,
@@ -25,6 +25,7 @@ const defaultLimit = 50;
 const maxLimit = 100;
 const globalSearchMaxListings = 500;
 const detailsChunkSize = 20;
+const exactSearchCandidateLimit = detailsChunkSize;
 const feeEstimateConcurrency = 6;
 const feeEstimateTimeoutMs = 5000;
 const shippingEstimateTimeoutMs = 5000;
@@ -112,6 +113,7 @@ type MercadoLivreVariation = {
 
 type MercadoLivreItemBody = {
   id?: string;
+  seller_id?: number | string;
   title?: string;
   price?: number;
   currency_id?: string;
@@ -388,6 +390,14 @@ function sellerItemsPath(input: { sellerId: string; offset: number; limit: numbe
   params.set("limit", String(input.limit));
   params.set("offset", String(input.offset));
   if (input.status) params.set("status", input.status);
+  return `/users/${encodeURIComponent(input.sellerId)}/items/search?${params.toString()}`;
+}
+
+function sellerExactSkuPath(input: { sellerId: string; field: "sku" | "seller_sku"; value: string }) {
+  const params = new URLSearchParams();
+  params.set("limit", String(maxLimit));
+  params.set("offset", "0");
+  params.set(input.field, input.value);
   return `/users/${encodeURIComponent(input.sellerId)}/items/search?${params.toString()}`;
 }
 
@@ -1432,6 +1442,297 @@ function normalizeListingSearchTerm(value: string) {
   return value.trim().toLowerCase();
 }
 
+export type MercadoLivreExactSearchClassification =
+  | { kind: "MLB_ID_EXATO"; value: string }
+  | { kind: "SKU_EXATO"; value: string }
+  | { kind: "GTIN_EXATO"; value: string }
+  | { kind: "BUSCA_GERAL"; value: string };
+
+export function classifyMercadoLivreExactSearchTerm(value: string): MercadoLivreExactSearchClassification {
+  const trimmed = value.trim();
+  const normalizedSearchTerm = normalizeListingSearchTerm(trimmed);
+  const upper = trimmed.toUpperCase();
+
+  if (/^MLB\d{6,}$/.test(upper)) {
+    return { kind: "MLB_ID_EXATO", value: upper };
+  }
+  if (upper.startsWith("MLB")) {
+    return { kind: "BUSCA_GERAL", value: normalizedSearchTerm };
+  }
+
+  const normalizedGtin = normalizeGtin(trimmed);
+  if (/^[\d\s().-]+$/.test(trimmed) && normalizedGtin && isValidGtin(normalizedGtin)) {
+    return { kind: "GTIN_EXATO", value: normalizedGtin };
+  }
+
+  if (/^(?=.{1,64}$)(?=.*\d)[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(trimmed)) {
+    return { kind: "SKU_EXATO", value: normalizedSearchTerm };
+  }
+
+  return { kind: "BUSCA_GERAL", value: normalizedSearchTerm };
+}
+
+export function buildMercadoLivreExactSearchCandidateWhere(input: {
+  organizationId: string;
+  sellerId: string;
+  classification: Extract<MercadoLivreExactSearchClassification, { kind: "SKU_EXATO" | "GTIN_EXATO" }>;
+}): Prisma.MercadoLivreListingCacheWhereInput {
+  return {
+    organizationId: input.organizationId,
+    connection: {
+      is: {
+        organizationId: input.organizationId,
+        externalUserId: input.sellerId
+      }
+    },
+    ...(input.classification.kind === "SKU_EXATO"
+      ? { sku: { equals: input.classification.value, mode: "insensitive" } }
+      : { gtin: input.classification.value })
+  };
+}
+
+export function mercadoLivreExactConfirmationMatches(input: {
+  classification: Exclude<MercadoLivreExactSearchClassification, { kind: "BUSCA_GERAL" }>;
+  expectedSellerId: string;
+  externalId: string | null;
+  sellerId: string | null;
+  sku: string | null;
+  gtin: string | null;
+}) {
+  if (!input.externalId || !input.sellerId || input.sellerId !== input.expectedSellerId) return false;
+  if (input.classification.kind === "MLB_ID_EXATO") {
+    return input.externalId.toUpperCase() === input.classification.value;
+  }
+  if (input.classification.kind === "GTIN_EXATO") {
+    return normalizeGtin(input.gtin) === input.classification.value;
+  }
+  return normalizeListingSearchTerm(input.sku ?? "") === input.classification.value;
+}
+
+type MercadoLivreExactSearchAttempt = {
+  outcome: "not_applicable" | "fallback" | "resolved";
+  accessToken: string;
+  candidateCount: number;
+  listings: MercadoLivreClientListing[];
+};
+
+async function tryMercadoLivreExactSearch(input: {
+  organizationId: string;
+  connectionId: string;
+  sellerId: string;
+  accessToken: string;
+  query: string;
+  syncedAt: Date;
+  endpointDiagnostics: Array<Record<string, unknown>>;
+}): Promise<MercadoLivreExactSearchAttempt> {
+  const classification = classifyMercadoLivreExactSearchTerm(input.query);
+  if (classification.kind === "BUSCA_GERAL") {
+    return { outcome: "not_applicable", accessToken: input.accessToken, candidateCount: 0, listings: [] };
+  }
+
+  if (classification.kind === "MLB_ID_EXATO") {
+    let response: MercadoLivreFetchResult<MercadoLivreItemBody>;
+    try {
+      response = await fetchMercadoLivreJson<MercadoLivreItemBody>({
+        organizationId: input.organizationId,
+        connectionId: input.connectionId,
+        accessToken: input.accessToken,
+        path: `/items/${encodeURIComponent(classification.value)}`
+      });
+    } catch {
+      return { outcome: "fallback", accessToken: input.accessToken, candidateCount: 1, listings: [] };
+    }
+
+    input.endpointDiagnostics.push({
+      endpoint: response.endpoint,
+      status: response.status,
+      requestId: response.requestId,
+      correlationId: response.correlationId,
+      filterMode: "exact_identifier_fast_path",
+      identifierType: classification.kind,
+      returnedItems: response.ok ? 1 : 0,
+      errorCode: response.ok ? null : response.error.error,
+      errorMessage: response.ok ? null : response.error.message
+    });
+
+    if (!response.ok) {
+      return {
+        outcome: response.status === 404 ? "resolved" : "fallback",
+        accessToken: response.accessToken,
+        candidateCount: 1,
+        listings: []
+      };
+    }
+
+    const listing = normalizeListing(response.data, input.syncedAt);
+    const returnedSellerId = normalizeMercadoLivreId(response.data.seller_id);
+    if (!returnedSellerId) {
+      return { outcome: "fallback", accessToken: response.accessToken, candidateCount: 1, listings: [] };
+    }
+    if (returnedSellerId !== input.sellerId) {
+      return { outcome: "resolved", accessToken: response.accessToken, candidateCount: 1, listings: [] };
+    }
+    if (
+      !listing ||
+      !mercadoLivreExactConfirmationMatches({
+        classification,
+        expectedSellerId: input.sellerId,
+        externalId: listing.externalId,
+        sellerId: returnedSellerId,
+        sku: listing.sku,
+        gtin: listing.gtin
+      })
+    ) {
+      return { outcome: "fallback", accessToken: response.accessToken, candidateCount: 1, listings: [] };
+    }
+
+    return { outcome: "resolved", accessToken: response.accessToken, candidateCount: 1, listings: [listing] };
+  }
+
+  let candidates: Array<{ externalItemId: string }>;
+  try {
+    candidates = await prisma.mercadoLivreListingCache.findMany({
+      where: buildMercadoLivreExactSearchCandidateWhere({
+        organizationId: input.organizationId,
+        sellerId: input.sellerId,
+        classification
+      }),
+      select: { externalItemId: true },
+      orderBy: [{ lastSyncedAt: "desc" }, { externalItemId: "asc" }],
+      take: exactSearchCandidateLimit + 1
+    });
+  } catch {
+    return { outcome: "fallback", accessToken: input.accessToken, candidateCount: 0, listings: [] };
+  }
+
+  let candidateAccessToken = input.accessToken;
+  let candidateIds = Array.from(
+    new Set(
+      candidates
+        .map((candidate) => normalizeMercadoLivreId(candidate.externalItemId)?.toUpperCase() ?? null)
+        .filter((id): id is string => Boolean(id))
+    )
+  );
+
+  if (!candidateIds.length && classification.kind === "SKU_EXATO") {
+    const officialCandidateIds = new Set<string>();
+    let accessToken = input.accessToken;
+
+    for (const field of ["sku", "seller_sku"] as const) {
+      let response: MercadoLivreFetchResult<MercadoLivreItemSearchPayload>;
+      try {
+        response = await fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
+          organizationId: input.organizationId,
+          connectionId: input.connectionId,
+          accessToken,
+          path: sellerExactSkuPath({ sellerId: input.sellerId, field, value: input.query.trim() })
+        });
+      } catch {
+        return { outcome: "fallback", accessToken, candidateCount: 0, listings: [] };
+      }
+      accessToken = response.accessToken;
+      const returnedIds = response.ok ? response.data.results?.length ?? 0 : 0;
+      const total = response.ok && typeof response.data.paging?.total === "number" ? response.data.paging.total : null;
+      input.endpointDiagnostics.push({
+        endpoint: response.endpoint,
+        status: response.status,
+        requestId: response.requestId,
+        correlationId: response.correlationId,
+        filterMode: "exact_identifier_candidate_lookup",
+        identifierType: classification.kind,
+        identifierField: field,
+        returnedIds,
+        total,
+        errorCode: response.ok ? null : response.error.error,
+        errorMessage: response.ok ? null : response.error.message
+      });
+
+      if (!response.ok || (total !== null && total > returnedIds)) {
+        return { outcome: "fallback", accessToken, candidateCount: officialCandidateIds.size, listings: [] };
+      }
+
+      for (const itemId of response.data.results ?? []) {
+        const normalizedItemId = normalizeMercadoLivreId(itemId)?.toUpperCase() ?? null;
+        if (normalizedItemId) officialCandidateIds.add(normalizedItemId);
+      }
+    }
+
+    candidateIds = Array.from(officialCandidateIds);
+    candidateAccessToken = accessToken;
+  }
+
+  if (!candidateIds.length || candidateIds.length > exactSearchCandidateLimit) {
+    return { outcome: "fallback", accessToken: candidateAccessToken, candidateCount: candidateIds.length, listings: [] };
+  }
+
+  let response: MercadoLivreFetchResult<MercadoLivreMultiGetEntry[]>;
+  try {
+    response = await fetchMercadoLivreJson<MercadoLivreMultiGetEntry[]>({
+      organizationId: input.organizationId,
+      connectionId: input.connectionId,
+      accessToken: candidateAccessToken,
+      path: `/items?ids=${candidateIds.map(encodeURIComponent).join(",")}`
+    });
+  } catch {
+    return { outcome: "fallback", accessToken: candidateAccessToken, candidateCount: candidateIds.length, listings: [] };
+  }
+
+  input.endpointDiagnostics.push({
+    endpoint: response.endpoint,
+    status: response.status,
+    requestId: response.requestId,
+    correlationId: response.correlationId,
+    filterMode: "exact_identifier_fast_path",
+    identifierType: classification.kind,
+    candidateCount: candidateIds.length,
+    returnedItems: response.ok ? response.data.length : 0,
+    errorCode: response.ok ? null : response.error.error,
+    errorMessage: response.ok ? null : response.error.message
+  });
+
+  if (!response.ok) {
+    return { outcome: "fallback", accessToken: response.accessToken, candidateCount: candidateIds.length, listings: [] };
+  }
+
+  const expectedIds = new Set(candidateIds);
+  const confirmedListings = new Map<string, MercadoLivreClientListing>();
+  for (const entry of response.data) {
+    if (entry.code !== undefined && entry.code !== 200) {
+      return { outcome: "fallback", accessToken: response.accessToken, candidateCount: candidateIds.length, listings: [] };
+    }
+    const externalId = normalizeMercadoLivreId(entry.body?.id)?.toUpperCase() ?? null;
+    const returnedSellerId = normalizeMercadoLivreId(entry.body?.seller_id);
+    const listing = entry.body ? normalizeListing(entry.body, input.syncedAt) : null;
+    if (!externalId || !expectedIds.has(externalId) || !listing) {
+      return { outcome: "fallback", accessToken: response.accessToken, candidateCount: candidateIds.length, listings: [] };
+    }
+    if (
+      !mercadoLivreExactConfirmationMatches({
+        classification,
+        expectedSellerId: input.sellerId,
+        externalId,
+        sellerId: returnedSellerId,
+        sku: listing.sku,
+        gtin: listing.gtin
+      })
+    ) {
+      return { outcome: "fallback", accessToken: response.accessToken, candidateCount: candidateIds.length, listings: [] };
+    }
+    confirmedListings.set(externalId, listing);
+  }
+
+  if (confirmedListings.size !== candidateIds.length) {
+    return { outcome: "fallback", accessToken: response.accessToken, candidateCount: candidateIds.length, listings: [] };
+  }
+
+  return {
+    outcome: "resolved",
+    accessToken: response.accessToken,
+    candidateCount: candidateIds.length,
+    listings: Array.from(confirmedListings.values())
+  };
+}
+
 function listingMatchesSearchTerm(listing: MercadoLivreClientListing, searchTerm: string) {
   if (!searchTerm) return true;
   const fields = [listing.externalId, listing.itemId, listing.sku, listing.gtin, listing.sellerSku, listing.title];
@@ -1775,7 +2076,7 @@ export class MercadoLivreClientListingsService {
       !searchTerm && listingType === "all" && stock === "all" && (status === "all" || Boolean(statusForSearch));
 
     const { connection, accessToken: initialAccessToken } = await mercadoLivreClientOAuthService.getAccessTokenForActiveConnection(input.authContext.organizationId);
-    const sellerId = connection.sellerId ?? connection.externalAccountId;
+    const sellerId = normalizeMercadoLivreId(connection.sellerId ?? connection.externalAccountId);
     if (!sellerId) throw new Error("Conta Mercado Livre conectada sem seller identificado. Reconecte a conta.");
 
     let accessToken = initialAccessToken;
@@ -1787,8 +2088,35 @@ export class MercadoLivreClientListingsService {
     let matchedItemIds = 0;
     let pageListings: MercadoLivreClientListing[] = [];
     let filteredTotalAvailable: number | null = null;
+    let exactSearchResolved = false;
 
-    if (canUseNativeMercadoLivrePage) {
+    if (searchTerm) {
+      const exactSearch = await tryMercadoLivreExactSearch({
+        organizationId: input.authContext.organizationId,
+        connectionId: connection.id,
+        sellerId,
+        accessToken,
+        query: input.query ?? "",
+        syncedAt,
+        endpointDiagnostics
+      });
+      accessToken = exactSearch.accessToken;
+
+      if (exactSearch.outcome === "resolved") {
+        exactSearchResolved = true;
+        const matchedListings = uniqueListingsByMercadoLivreId(exactSearch.listings).filter((listing) =>
+          listingMatchesFilters(listing, { query: searchTerm, status, listingType, stock })
+        );
+        foundItemIds = exactSearch.candidateCount;
+        matchedItemIds = matchedListings.length;
+        filteredTotalAvailable = matchedListings.length;
+        pageListings = matchedListings.slice(requestedOffset, requestedOffset + requestedLimit);
+      }
+    }
+
+    if (exactSearchResolved) {
+      // Exact candidates are already confirmed against the current seller and need only final enrichment.
+    } else if (canUseNativeMercadoLivrePage) {
       const response = await fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
         organizationId: input.authContext.organizationId,
         connectionId: connection.id,
