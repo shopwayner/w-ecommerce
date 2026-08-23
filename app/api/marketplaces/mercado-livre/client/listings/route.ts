@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
 import { mercadoLivreClientListingsService } from "@/lib/services/marketplaces/mercado-livre-client-listings-service";
+import { isMercadoLivreCoreRequestError } from "@/lib/services/marketplaces/mercado-livre-core-request";
 
 const statusFilters = new Set(["all", "active", "paused", "closed", "under_review", "error"]);
 const listingTypeFilters = new Set(["all", "premium", "classico", "other"]);
@@ -48,10 +49,30 @@ export async function GET(request: NextRequest) {
       stock: hasFilters ? normalizedStock : "all",
       offset: numberParam(searchParams.get("offset"), 0),
       limit: listingLimitParam(searchParams.get("limit"), 50),
-      maxListings: numberParam(searchParams.get("maxListings"), 500)
+      maxListings: numberParam(searchParams.get("maxListings"), 500),
+      signal: request.signal
     });
     return NextResponse.json(result);
   } catch (error) {
+    if (isMercadoLivreCoreRequestError(error)) {
+      const responseByKind = {
+        aborted: { status: 499, message: "Consulta ao Mercado Livre cancelada." },
+        timeout: { status: 504, message: "A consulta ao Mercado Livre excedeu o tempo esperado. Tente novamente." },
+        unauthorized: { status: 401, message: "A conexao com o Mercado Livre expirou. Reconecte a integracao e tente novamente." },
+        forbidden: { status: 403, message: "O Mercado Livre recusou o acesso a esta consulta." },
+        not_found: { status: 404, message: "O anuncio consultado nao foi encontrado no Mercado Livre." },
+        rate_limited: { status: 429, message: "O Mercado Livre limitou temporariamente as consultas. Aguarde e tente novamente." },
+        external_5xx: { status: 502, message: "O Mercado Livre esta temporariamente indisponivel. Tente novamente." },
+        network_failure: { status: 502, message: "Nao foi possivel concluir a consulta ao Mercado Livre agora." },
+        invalid_response: { status: 502, message: "O Mercado Livre retornou uma resposta invalida para esta consulta." },
+        http_error: { status: 502, message: "Nao foi possivel concluir a consulta ao Mercado Livre agora." }
+      } as const;
+      const mapped = responseByKind[error.kind];
+      return NextResponse.json(
+        { error: mapped.message, code: `ML_CORE_${error.kind.toUpperCase()}`, externalWrite: false },
+        { status: mapped.status }
+      );
+    }
     const message = error instanceof Error ? error.message : "Nao foi possivel carregar anuncios Mercado Livre.";
     const status = message.includes("Conecte") || message.includes("Reconecte") ? 409 : 400;
     return NextResponse.json({ error: message, externalWrite: false }, { status });

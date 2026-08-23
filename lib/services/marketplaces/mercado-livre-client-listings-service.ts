@@ -19,6 +19,13 @@ import {
   type MercadoLivreSellerShippingCostQuery
 } from "@/lib/services/marketplaces/mercado-livre-shipping-cost";
 import { sanitizeLogPayload } from "@/lib/utils";
+import {
+  classifyMercadoLivreCoreHttpStatus,
+  isMercadoLivreCoreRequestError,
+  MercadoLivreCoreRequestError,
+  requestMercadoLivreCore,
+  type MercadoLivreCoreRequestFailureKind
+} from "@/lib/services/marketplaces/mercado-livre-core-request";
 
 const apiBaseUrl = "https://api.mercadolibre.com";
 const defaultLimit = 50;
@@ -206,6 +213,7 @@ type SanitizedMercadoLivreError = {
   message: string | null;
   error: string | null;
   status: number | null;
+  kind: MercadoLivreCoreRequestFailureKind;
 };
 
 type MercadoLivreFetchResult<T> =
@@ -217,6 +225,10 @@ type MercadoLivreFetchResult<T> =
       requestId: string | null;
       correlationId: string | null;
       accessToken: string;
+      attempts: number;
+      retryCount: number;
+      durationMs: number;
+      failureKind: null;
     }
   | {
       ok: false;
@@ -226,6 +238,10 @@ type MercadoLivreFetchResult<T> =
       requestId: string | null;
       correlationId: string | null;
       accessToken: string;
+      attempts: number;
+      retryCount: number;
+      durationMs: number;
+      failureKind: MercadoLivreCoreRequestFailureKind;
     };
 
 export type MercadoLivreClientListing = {
@@ -356,16 +372,17 @@ function truncate(value: string | null | undefined, maxLength = 180) {
   return value.slice(0, maxLength);
 }
 
-function sanitizeMercadoLivreErrorBody(textBody: string): SanitizedMercadoLivreError {
+function sanitizeMercadoLivreErrorBody(textBody: string, status: number): SanitizedMercadoLivreError {
   try {
     const payload = JSON.parse(textBody) as { message?: unknown; error?: unknown; status?: unknown };
     return {
       message: typeof payload.message === "string" ? truncate(payload.message, 180) : null,
       error: typeof payload.error === "string" ? truncate(payload.error, 80) : null,
-      status: typeof payload.status === "number" ? payload.status : null
+      status: typeof payload.status === "number" ? payload.status : null,
+      kind: classifyMercadoLivreCoreHttpStatus(status)
     };
   } catch {
-    return { message: null, error: null, status: null };
+    return { message: null, error: null, status: null, kind: classifyMercadoLivreCoreHttpStatus(status) };
   }
 }
 
@@ -1394,50 +1411,142 @@ async function fetchMercadoLivreJson<T>(input: {
   accessToken: string;
   path: string;
   retryOnUnauthorized?: boolean;
+  retryTransient?: boolean;
+  signal?: AbortSignal;
+  throwHttpFailures?: boolean;
 }): Promise<MercadoLivreFetchResult<T>> {
-  let accessToken = input.accessToken;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const response = await fetch(`${apiBaseUrl}${input.path}`, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json"
-      }
+  const endpoint = endpointLabel(input.path);
+  try {
+    const result = await requestMercadoLivreCore({
+      url: `${apiBaseUrl}${input.path}`,
+      endpoint,
+      accessToken: input.accessToken,
+      signal: input.signal,
+      retryTransient: input.retryTransient,
+      retryOnUnauthorized: input.retryOnUnauthorized,
+      refreshAccessToken:
+        input.retryOnUnauthorized === false
+          ? undefined
+          : async () => {
+              const refreshed = await mercadoLivreClientOAuthService.refreshConnectionToken({
+                organizationId: input.organizationId,
+                connectionId: input.connectionId
+              });
+              return refreshed.accessToken;
+            }
     });
-    const safeHeaders = safeMercadoLivreHeaders(response);
+    const safeHeaders = safeMercadoLivreHeaders(result.response);
+    const common = {
+      status: result.response.status,
+      endpoint,
+      requestId: safeHeaders.requestId,
+      correlationId: safeHeaders.correlationId,
+      accessToken: result.accessToken,
+      attempts: result.attempts,
+      retryCount: result.retryCount,
+      durationMs: result.durationMs
+    };
 
-    if (response.status === 401 && attempt === 0 && input.retryOnUnauthorized !== false) {
-      const refreshed = await mercadoLivreClientOAuthService.refreshConnectionToken({
-        organizationId: input.organizationId,
-        connectionId: input.connectionId
-      });
-      accessToken = refreshed.accessToken;
-      continue;
+    if (result.response.ok && result.retryCount > 0) {
+      console.info(
+        "mercado_livre_core_request_recovered",
+        sanitizeLogPayload({
+          endpoint,
+          status: result.response.status,
+          attempts: result.attempts,
+          retryCount: result.retryCount,
+          durationMs: result.durationMs,
+          retryReasons: result.retryReasons,
+          requestId: safeHeaders.requestId,
+          correlationId: safeHeaders.correlationId
+        })
+      );
     }
 
-    if (!response.ok) {
+    if (!result.response.ok) {
+      const error = sanitizeMercadoLivreErrorBody(result.body, result.response.status);
+      if (
+        input.throwHttpFailures === true &&
+        (error.kind === "unauthorized" ||
+          error.kind === "forbidden" ||
+          error.kind === "rate_limited" ||
+          error.kind === "external_5xx")
+      ) {
+        throw new MercadoLivreCoreRequestError({
+          kind: error.kind,
+          status: result.response.status,
+          endpoint,
+          attempts: result.attempts,
+          retryCount: result.retryCount,
+          durationMs: result.durationMs
+        });
+      }
+      console.warn(
+        "mercado_livre_core_request_failed",
+        sanitizeLogPayload({
+          endpoint,
+          errorKind: error.kind,
+          status: result.response.status,
+          attempts: result.attempts,
+          retryCount: result.retryCount,
+          durationMs: result.durationMs,
+          requestId: safeHeaders.requestId,
+          correlationId: safeHeaders.correlationId
+        })
+      );
       return {
         ok: false,
-        status: response.status,
-        endpoint: endpointLabel(input.path),
-        error: sanitizeMercadoLivreErrorBody(await response.text()),
-        requestId: safeHeaders.requestId,
-        correlationId: safeHeaders.correlationId,
-        accessToken
+        ...common,
+        error,
+        failureKind: error.kind
       };
+    }
+
+    let data: T;
+    try {
+      data = JSON.parse(result.body) as T;
+    } catch {
+      throw new MercadoLivreCoreRequestError({
+        kind: "invalid_response",
+        status: result.response.status,
+        endpoint,
+        attempts: result.attempts,
+        retryCount: result.retryCount,
+        durationMs: result.durationMs
+      });
     }
 
     return {
       ok: true,
-      status: response.status,
-      endpoint: endpointLabel(input.path),
-      data: (await response.json()) as T,
-      requestId: safeHeaders.requestId,
-      correlationId: safeHeaders.correlationId,
-      accessToken
+      ...common,
+      data,
+      failureKind: null
     };
+  } catch (error) {
+    if (isMercadoLivreCoreRequestError(error) && error.kind !== "aborted") {
+      console.warn(
+        "mercado_livre_core_request_failed",
+        sanitizeLogPayload({
+          endpoint: error.endpoint,
+          errorKind: error.kind,
+          status: error.status,
+          attempts: error.attempts,
+          retryCount: error.retryCount,
+          durationMs: error.durationMs
+        })
+      );
+    }
+    throw error;
   }
+}
 
-  throw new Error("Falha ao renovar token Mercado Livre.");
+function coreResponseDiagnostics(response: MercadoLivreFetchResult<unknown>) {
+  return {
+    attempts: response.attempts,
+    retryCount: response.retryCount,
+    durationMs: response.durationMs,
+    failureKind: response.failureKind
+  };
 }
 
 function chunk<T>(items: T[], size: number) {
@@ -1534,6 +1643,8 @@ async function tryMercadoLivreExactSearch(input: {
   query: string;
   syncedAt: Date;
   endpointDiagnostics: Array<Record<string, unknown>>;
+  signal?: AbortSignal;
+  retryTransient?: boolean;
 }): Promise<MercadoLivreExactSearchAttempt> {
   const classification = classifyMercadoLivreExactSearchTerm(input.query);
   if (classification.kind === "BUSCA_GERAL") {
@@ -1547,9 +1658,13 @@ async function tryMercadoLivreExactSearch(input: {
         organizationId: input.organizationId,
         connectionId: input.connectionId,
         accessToken: input.accessToken,
-        path: `/items/${encodeURIComponent(classification.value)}`
+        path: `/items/${encodeURIComponent(classification.value)}`,
+        signal: input.signal,
+        retryTransient: input.retryTransient,
+        throwHttpFailures: true
       });
-    } catch {
+    } catch (error) {
+      if (isMercadoLivreCoreRequestError(error)) throw error;
       return { outcome: "fallback", accessToken: input.accessToken, candidateCount: 1, listings: [] };
     }
 
@@ -1562,7 +1677,8 @@ async function tryMercadoLivreExactSearch(input: {
       identifierType: classification.kind,
       returnedItems: response.ok ? 1 : 0,
       errorCode: response.ok ? null : response.error.error,
-      errorMessage: response.ok ? null : response.error.message
+      errorMessage: response.ok ? null : response.error.message,
+      ...coreResponseDiagnostics(response)
     });
 
     if (!response.ok) {
@@ -1635,9 +1751,13 @@ async function tryMercadoLivreExactSearch(input: {
           organizationId: input.organizationId,
           connectionId: input.connectionId,
           accessToken,
-          path: sellerExactSkuPath({ sellerId: input.sellerId, field, value: input.query.trim() })
+          path: sellerExactSkuPath({ sellerId: input.sellerId, field, value: input.query.trim() }),
+          signal: input.signal,
+          retryTransient: input.retryTransient,
+          throwHttpFailures: true
         });
-      } catch {
+      } catch (error) {
+        if (isMercadoLivreCoreRequestError(error)) throw error;
         return { outcome: "fallback", accessToken, candidateCount: 0, listings: [] };
       }
       accessToken = response.accessToken;
@@ -1654,7 +1774,8 @@ async function tryMercadoLivreExactSearch(input: {
         returnedIds,
         total,
         errorCode: response.ok ? null : response.error.error,
-        errorMessage: response.ok ? null : response.error.message
+        errorMessage: response.ok ? null : response.error.message,
+        ...coreResponseDiagnostics(response)
       });
 
       if (!response.ok || (total !== null && total > returnedIds)) {
@@ -1681,9 +1802,13 @@ async function tryMercadoLivreExactSearch(input: {
       organizationId: input.organizationId,
       connectionId: input.connectionId,
       accessToken: candidateAccessToken,
-      path: `/items?ids=${candidateIds.map(encodeURIComponent).join(",")}`
+      path: `/items?ids=${candidateIds.map(encodeURIComponent).join(",")}`,
+      signal: input.signal,
+      retryTransient: input.retryTransient,
+      throwHttpFailures: true
     });
-  } catch {
+  } catch (error) {
+    if (isMercadoLivreCoreRequestError(error)) throw error;
     return { outcome: "fallback", accessToken: candidateAccessToken, candidateCount: candidateIds.length, listings: [] };
   }
 
@@ -1697,7 +1822,8 @@ async function tryMercadoLivreExactSearch(input: {
     candidateCount: candidateIds.length,
     returnedItems: response.ok ? response.data.length : 0,
     errorCode: response.ok ? null : response.error.error,
-    errorMessage: response.ok ? null : response.error.message
+    errorMessage: response.ok ? null : response.error.message,
+    ...coreResponseDiagnostics(response)
   });
 
   if (!response.ok) {
@@ -1852,7 +1978,7 @@ function uniqueListingsByMercadoLivreId(listings: MercadoLivreClientListing[]) {
   return Array.from(byId.values());
 }
 
-async function fetchListingDetailsReadOnly(input: {
+export async function fetchListingDetailsReadOnly(input: {
   organizationId: string;
   connectionId: string;
   accessToken: string;
@@ -1861,18 +1987,48 @@ async function fetchListingDetailsReadOnly(input: {
   warnings: string[];
   endpointDiagnostics: Array<Record<string, unknown>>;
   retryOnUnauthorized?: boolean;
+  retryTransient?: boolean;
+  signal?: AbortSignal;
+  requestJson?: (
+    request: Parameters<typeof fetchMercadoLivreJson>[0]
+  ) => Promise<MercadoLivreFetchResult<MercadoLivreMultiGetEntry[]>>;
 }) {
   let accessToken = input.accessToken;
   const listings: MercadoLivreClientListing[] = [];
+  const chunks = chunk(input.itemIds, detailsChunkSize);
+  let successfulBatches = 0;
+  let failedBatches = 0;
+  let firstFailure: unknown = null;
+  const requestJson = input.requestJson ?? fetchMercadoLivreJson;
 
-  for (const ids of chunk(input.itemIds, detailsChunkSize)) {
-    const response = await fetchMercadoLivreJson<MercadoLivreMultiGetEntry[]>({
-      organizationId: input.organizationId,
-      connectionId: input.connectionId,
-      accessToken,
-      path: `/items?ids=${ids.map(encodeURIComponent).join(",")}`,
-      retryOnUnauthorized: input.retryOnUnauthorized
-    });
+  for (const ids of chunks) {
+    let response: MercadoLivreFetchResult<MercadoLivreMultiGetEntry[]>;
+    try {
+      response = await requestJson({
+        organizationId: input.organizationId,
+        connectionId: input.connectionId,
+        accessToken,
+        path: `/items?ids=${ids.map(encodeURIComponent).join(",")}`,
+        retryOnUnauthorized: input.retryOnUnauthorized,
+        retryTransient: input.retryTransient,
+        signal: input.signal
+      });
+    } catch (error) {
+      if (isMercadoLivreCoreRequestError(error) && error.kind === "aborted") throw error;
+      failedBatches += 1;
+      firstFailure ??= error;
+      input.endpointDiagnostics.push({
+        endpoint: `/items?...`,
+        status: isMercadoLivreCoreRequestError(error) ? error.status : 0,
+        returnedItems: 0,
+        attempts: isMercadoLivreCoreRequestError(error) ? error.attempts : 1,
+        retryCount: isMercadoLivreCoreRequestError(error) ? error.retryCount : 0,
+        durationMs: isMercadoLivreCoreRequestError(error) ? error.durationMs : null,
+        failureKind: isMercadoLivreCoreRequestError(error) ? error.kind : "network_failure",
+        partialBatch: true
+      });
+      continue;
+    }
     accessToken = response.accessToken;
     input.endpointDiagnostics.push({
       endpoint: response.endpoint,
@@ -1881,13 +2037,23 @@ async function fetchListingDetailsReadOnly(input: {
       correlationId: response.correlationId,
       returnedItems: response.ok ? response.data.length : 0,
       errorCode: response.ok ? null : response.error.error,
-      errorMessage: response.ok ? null : response.error.message
+      errorMessage: response.ok ? null : response.error.message,
+      ...coreResponseDiagnostics(response)
     });
 
     if (!response.ok) {
-      input.warnings.push(`Mercado Livre retornou HTTP ${response.status} ao buscar detalhes dos anuncios.`);
+      failedBatches += 1;
+      firstFailure ??= new MercadoLivreCoreRequestError({
+        kind: response.failureKind,
+        status: response.status,
+        endpoint: response.endpoint,
+        attempts: response.attempts,
+        retryCount: response.retryCount,
+        durationMs: response.durationMs
+      });
       continue;
     }
+    successfulBatches += 1;
 
     for (const entry of response.data) {
       if (entry.code && entry.code !== 200) {
@@ -1899,7 +2065,31 @@ async function fetchListingDetailsReadOnly(input: {
     }
   }
 
-  return { accessToken, listings };
+  if (chunks.length > 0 && successfulBatches === 0) {
+    if (isMercadoLivreCoreRequestError(firstFailure)) throw firstFailure;
+    throw new MercadoLivreCoreRequestError({
+      kind: "network_failure",
+      endpoint: "/items?...",
+      attempts: 1,
+      retryCount: 0,
+      durationMs: 0
+    });
+  }
+
+  if (failedBatches > 0) {
+    input.warnings.push(
+      `A consulta de detalhes do Mercado Livre ficou parcial: ${successfulBatches} de ${chunks.length} lotes concluidos.`
+    );
+  }
+
+  return {
+    accessToken,
+    listings,
+    complete: failedBatches === 0,
+    successfulBatches,
+    failedBatches,
+    totalBatches: chunks.length
+  };
 }
 
 function jsonRecord(value: unknown) {
@@ -2119,6 +2309,7 @@ export class MercadoLivreClientListingsService {
     limit?: number;
     offset?: number;
     maxListings?: number;
+    signal?: AbortSignal;
   }) {
     const requestedLimit = Math.max(1, Math.min(input.limit ?? defaultLimit, maxLimit));
     const requestedOffset = Math.max(0, input.offset ?? 0);
@@ -2154,6 +2345,7 @@ export class MercadoLivreClientListingsService {
     let pageListings: MercadoLivreClientListing[] = [];
     let filteredTotalAvailable: number | null = null;
     let exactSearchResolved = false;
+    let coreComplete = true;
 
     if (searchTerm) {
       const exactSearch = await tryMercadoLivreExactSearch({
@@ -2163,7 +2355,9 @@ export class MercadoLivreClientListingsService {
         accessToken,
         query: input.query ?? "",
         syncedAt,
-        endpointDiagnostics
+        endpointDiagnostics,
+        signal: input.signal,
+        retryTransient: true
       });
       accessToken = exactSearch.accessToken;
 
@@ -2191,7 +2385,10 @@ export class MercadoLivreClientListingsService {
           limit: requestedLimit,
           status: statusForSearch,
           listingTypeId: listingTypeForSearch
-        })
+        }),
+        signal: input.signal,
+        retryTransient: true,
+        throwHttpFailures: true
       });
       accessToken = response.accessToken;
       const rawResults = response.ok ? response.data.results ?? [] : [];
@@ -2219,7 +2416,8 @@ export class MercadoLivreClientListingsService {
         filterMode: listingTypeForSearch ? "native_listing_type_before_pagination" : "native_status_before_pagination",
         complete: nativeListingTypeResponseComplete,
         errorCode: response.ok ? null : response.error.error,
-        errorMessage: response.ok ? null : response.error.message
+        errorMessage: response.ok ? null : response.error.message,
+        ...coreResponseDiagnostics(response)
       });
 
       if (!response.ok) {
@@ -2249,15 +2447,23 @@ export class MercadoLivreClientListingsService {
           itemIds,
           syncedAt,
           warnings,
-          endpointDiagnostics
+          endpointDiagnostics,
+          signal: input.signal,
+          retryTransient: true
         });
         accessToken = detailResult.accessToken;
         const uniqueDetails = uniqueListingsByMercadoLivreId(detailResult.listings);
+        coreComplete = detailResult.complete;
         const nativeListingTypeDetailsComplete =
           !listingTypeForSearch ||
           mercadoLivreNativeListingTypeDetailsAreComplete({ itemIds, listings: uniqueDetails, listingType });
 
-        if (listingTypeForSearch && !nativeListingTypeDetailsComplete) {
+        if (!detailResult.complete) {
+          pageListings = uniqueDetails.filter((listing) =>
+            listingMatchesFilters(listing, { query: searchTerm, status, listingType, stock })
+          );
+          nativePageCompleted = true;
+        } else if (listingTypeForSearch && !nativeListingTypeDetailsComplete) {
           warnings.push("Os detalhes do filtro nativo de tipo ficaram inconclusivos. A busca completa foi preservada.");
         } else {
           pageListings = uniqueDetails.filter((listing) =>
@@ -2283,7 +2489,10 @@ export class MercadoLivreClientListingsService {
           organizationId: input.authContext.organizationId,
           connectionId: connection.id,
           accessToken,
-          path: sellerItemsPath({ sellerId, offset: sourceOffset, limit, status: statusForSearch })
+          path: sellerItemsPath({ sellerId, offset: sourceOffset, limit, status: statusForSearch }),
+          signal: input.signal,
+          retryTransient: true,
+          throwHttpFailures: true
         });
         accessToken = response.accessToken;
         const returnedIds = response.ok ? response.data.results?.length ?? 0 : 0;
@@ -2299,7 +2508,8 @@ export class MercadoLivreClientListingsService {
           limit,
           filterMode: "filtered_before_pagination",
           errorCode: response.ok ? null : response.error.error,
-          errorMessage: response.ok ? null : response.error.message
+          errorMessage: response.ok ? null : response.error.message,
+          ...coreResponseDiagnostics(response)
         });
 
         if (!response.ok) {
@@ -2323,9 +2533,12 @@ export class MercadoLivreClientListingsService {
           itemIds,
           syncedAt,
           warnings,
-          endpointDiagnostics
+          endpointDiagnostics,
+          signal: input.signal,
+          retryTransient: true
         });
         accessToken = detailResult.accessToken;
+        if (!detailResult.complete) coreComplete = false;
 
         matchedListings.push(
           ...uniqueListingsByMercadoLivreId(detailResult.listings).filter((listing) =>
@@ -2374,6 +2587,8 @@ export class MercadoLivreClientListingsService {
       lastSyncedAt: connection.lastSyncAt?.toISOString() ?? null,
       warnings,
       endpointDiagnostics,
+      coreComplete,
+      partial: !coreComplete,
       search: {
         mode: "filtered_before_pagination",
         query: input.query ?? "",
@@ -2434,7 +2649,8 @@ export class MercadoLivreClientListingsService {
         limit,
         searchMode: "global_identifier",
         errorCode: response.ok ? null : response.error.error,
-        errorMessage: response.ok ? null : response.error.message
+        errorMessage: response.ok ? null : response.error.message,
+        ...coreResponseDiagnostics(response)
       });
 
       if (!response.ok) {
@@ -2581,7 +2797,8 @@ export class MercadoLivreClientListingsService {
           offset,
           limit,
           errorCode: response.ok ? null : response.error.error,
-          errorMessage: response.ok ? null : response.error.message
+          errorMessage: response.ok ? null : response.error.message,
+          ...coreResponseDiagnostics(response)
         });
 
         if (!response.ok) {
@@ -2792,7 +3009,8 @@ export class MercadoLivreClientListingsService {
       offset: requestedOffset,
       limit: requestedLimit,
       errorCode: response.ok ? null : response.error.error,
-      errorMessage: response.ok ? null : response.error.message
+      errorMessage: response.ok ? null : response.error.message,
+      ...coreResponseDiagnostics(response)
     });
 
     if (!response.ok) {
