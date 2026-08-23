@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ChevronDown, ChevronLeft, ChevronRight, Menu, PanelLeftClose } from "lucide-react";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState, type ComponentProps } from "react";
 import type { AppShellPlanInfo } from "@/components/app-shell-bootstrap-provider";
 import { navigationItems, type NavigationGroup } from "@/lib/navigation";
 import { cn } from "@/lib/utils";
@@ -36,6 +36,25 @@ function isGroupActive(group: NavigationGroup, pathname: string) {
 function formatDate(value: string | null) {
   if (!value) return "--/--/----";
   return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(value));
+}
+
+function IntentPrefetchLink({ onFocus, onMouseEnter, ...props }: Omit<ComponentProps<typeof Link>, "prefetch">) {
+  const [prefetchEnabled, setPrefetchEnabled] = useState(false);
+
+  return (
+    <Link
+      {...props}
+      prefetch={prefetchEnabled ? null : false}
+      onMouseEnter={(event) => {
+        setPrefetchEnabled(true);
+        onMouseEnter?.(event);
+      }}
+      onFocus={(event) => {
+        setPrefetchEnabled(true);
+        onFocus?.(event);
+      }}
+    />
+  );
 }
 
 function SidebarComponent({ collapsed, initialPlanInfo = null, mobileOpen, onCloseMobile, onToggleCollapsed }: SidebarProps) {
@@ -147,10 +166,9 @@ function SidebarComponent({ collapsed, initialPlanInfo = null, mobileOpen, onClo
                       {item.children.map((child) => {
                         const childActive = currentPath === child.href || (child.href !== "/" && currentPath.startsWith(`${child.href}/`));
                         return (
-                          <Link
+                          <IntentPrefetchLink
                             key={child.href}
                             href={child.href}
-                            prefetch
                             onClick={() => {
                               setPendingHref(child.href);
                               onCloseMobile();
@@ -161,7 +179,7 @@ function SidebarComponent({ collapsed, initialPlanInfo = null, mobileOpen, onClo
                             )}
                           >
                             {child.label}
-                          </Link>
+                          </IntentPrefetchLink>
                         );
                       })}
                     </div>
@@ -172,10 +190,9 @@ function SidebarComponent({ collapsed, initialPlanInfo = null, mobileOpen, onClo
 
             const active = currentPath === item.href || (item.href !== "/" && currentPath.startsWith(`${item.href}/`));
             return (
-              <Link
+              <IntentPrefetchLink
                 key={item.href}
                 href={item.href}
-                prefetch
                 onClick={() => {
                   setPendingHref(item.href);
                   onCloseMobile();
@@ -189,7 +206,7 @@ function SidebarComponent({ collapsed, initialPlanInfo = null, mobileOpen, onClo
               >
                 <Icon className="h-4 w-4 shrink-0" />
                 <span className={cn("truncate", collapsed && "lg:hidden")}>{item.label}</span>
-              </Link>
+              </IntentPrefetchLink>
             );
           })}
         </nav>
