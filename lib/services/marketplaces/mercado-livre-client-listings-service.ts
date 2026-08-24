@@ -61,8 +61,10 @@ type ListingFilterStatus = (typeof listingStatusFilters)[number];
 type ListingTypeFilter = (typeof listingTypeFilters)[number];
 type StockFilter = (typeof stockFilters)[number];
 type NativeListingTypeId = "gold_pro" | "gold_special";
+type MercadoLivreSellerSearchStatus = ListingStatusFilter | "pending";
 
 type MercadoLivreItemSearchPayload = {
+  seller_id?: unknown;
   query?: unknown;
   results?: unknown[];
   paging?: {
@@ -414,7 +416,7 @@ export function buildMercadoLivreSellerItemsPath(input: {
   sellerId: string;
   offset: number;
   limit: number;
-  status?: ListingStatusFilter;
+  status?: MercadoLivreSellerSearchStatus;
   listingTypeId?: NativeListingTypeId;
   query?: string;
 }) {
@@ -1998,6 +2000,112 @@ export function canUseMercadoLivreNativeTextPage(input: {
   );
 }
 
+export function canUseMercadoLivrePendingReviewCandidates(input: {
+  searchTerm: string;
+  status: ListingFilterStatus;
+  listingType: ListingTypeFilter;
+  stock: StockFilter;
+}) {
+  return (
+    !input.searchTerm &&
+    input.status === "under_review" &&
+    input.listingType === "all" &&
+    input.stock === "all"
+  );
+}
+
+export function validateMercadoLivrePendingReviewPage(input: {
+  payload: MercadoLivreItemSearchPayload;
+  expectedSellerId: string;
+  expectedOffset: number;
+  expectedLimit: number;
+  expectedTotal: number | null;
+  seenIds?: ReadonlySet<string>;
+}) {
+  const sellerId = normalizeMercadoLivreId(input.payload.seller_id);
+  const paging = input.payload.paging;
+  const total = paging?.total;
+  const offset = paging?.offset;
+  const limit = paging?.limit;
+
+  if (sellerId !== input.expectedSellerId) return { ok: false as const, reason: "SELLER_MISMATCH" as const };
+  if (!Number.isInteger(total) || (total ?? -1) < 0) return { ok: false as const, reason: "INVALID_TOTAL" as const };
+  if (offset !== input.expectedOffset || limit !== input.expectedLimit) {
+    return { ok: false as const, reason: "PAGING_MISMATCH" as const };
+  }
+  if (input.expectedTotal !== null && total !== input.expectedTotal) {
+    return { ok: false as const, reason: "TOTAL_MISMATCH" as const };
+  }
+
+  const results = input.payload.results ?? [];
+  const ids = results.map(normalizeMercadoLivreId);
+  if (ids.some((id) => !id || !/^ML[A-Z]\d+$/i.test(id))) {
+    return { ok: false as const, reason: "INVALID_ID" as const };
+  }
+
+  const normalizedIds = ids.map((id) => id!.toUpperCase());
+  const expectedCount = Math.min(input.expectedLimit, Math.max(0, total! - input.expectedOffset));
+  if (normalizedIds.length !== expectedCount) {
+    return { ok: false as const, reason: "INCOMPLETE_PAGE" as const };
+  }
+  if (new Set(normalizedIds).size !== normalizedIds.length) {
+    return { ok: false as const, reason: "DUPLICATE_ID" as const };
+  }
+  if (normalizedIds.some((id) => input.seenIds?.has(id))) {
+    return { ok: false as const, reason: "DUPLICATE_ID" as const };
+  }
+
+  return { ok: true as const, ids: normalizedIds, total: total! };
+}
+
+function listingHasPendingModerationEvidence(listing: MercadoLivreClientListing) {
+  if (listing.status === "under_review") return true;
+  if (listing.status !== "active" && listing.status !== "paused") return false;
+  if (listing.quality.statusDetail || listing.quality.subStatus.length || listing.quality.warnings.length) return true;
+  return listing.quality.tags.some((tag) =>
+    /moderation|poor_quality|picture_(?:download|downloading)|pending/i.test(tag)
+  );
+}
+
+export function mercadoLivrePendingReviewDetailsAreComplete(input: {
+  itemIds: string[];
+  listings: MercadoLivreClientListing[];
+}) {
+  const expectedIds = new Set(input.itemIds.map((id) => id.toUpperCase()));
+  if (expectedIds.size !== input.itemIds.length || input.listings.length !== expectedIds.size) return false;
+  const confirmedIds = new Set<string>();
+  for (const listing of input.listings) {
+    const externalId = listing.externalId.toUpperCase();
+    if (
+      confirmedIds.has(externalId) ||
+      !expectedIds.has(externalId) ||
+      !listingHasPendingModerationEvidence(listing)
+    ) {
+      return false;
+    }
+    confirmedIds.add(externalId);
+  }
+  return confirmedIds.size === expectedIds.size;
+}
+
+export function selectMercadoLivreUnderReviewPage<T extends Pick<MercadoLivreClientListing, "externalId" | "status">>(input: {
+  listings: T[];
+  offset: number;
+  limit: number;
+}) {
+  const byId = new Map<string, T>();
+  for (const listing of input.listings) {
+    if (listing.status === "under_review" && !byId.has(listing.externalId.toUpperCase())) {
+      byId.set(listing.externalId.toUpperCase(), listing);
+    }
+  }
+  const matches = Array.from(byId.values());
+  return {
+    listings: matches.slice(input.offset, input.offset + input.limit),
+    total: matches.length
+  };
+}
+
 export function mercadoLivreNativeListingTypePageIsComplete(input: {
   results: unknown[];
   total: number | null;
@@ -2132,6 +2240,7 @@ export async function fetchListingDetailsReadOnly(input: {
   retryTransient?: boolean;
   signal?: AbortSignal;
   stage?: MercadoLivreOperationStage;
+  expectedSellerId?: string;
   requestJson?: (
     request: Parameters<typeof fetchMercadoLivreJson>[0]
   ) => Promise<MercadoLivreFetchResult<MercadoLivreMultiGetEntry[]>>;
@@ -2142,6 +2251,7 @@ export async function fetchListingDetailsReadOnly(input: {
   let successfulBatches = 0;
   let failedBatches = 0;
   let firstFailure: unknown = null;
+  let sellerMismatchFound = false;
   const requestJson = input.requestJson ?? fetchMercadoLivreJson;
   const operation = getMercadoLivreOperationForSignal(input.signal);
   const stage = input.stage ?? "details";
@@ -2208,9 +2318,20 @@ export async function fetchListingDetailsReadOnly(input: {
         input.warnings.push(`Um anuncio Mercado Livre retornou codigo ${entry.code} no detalhe.`);
         continue;
       }
+      if (
+        input.expectedSellerId &&
+        normalizeMercadoLivreId(entry.body?.seller_id) !== input.expectedSellerId
+      ) {
+        sellerMismatchFound = true;
+        continue;
+      }
       const normalized = entry.body ? normalizeListing(entry.body, input.syncedAt) : null;
       if (normalized) listings.push(normalized);
     }
+  }
+
+  if (sellerMismatchFound) {
+    input.warnings.push("A consulta de detalhes retornou anuncio de outro vendedor e foi descartada.");
   }
 
   if (chunks.length > 0 && successfulBatches === 0) {
@@ -2490,6 +2611,12 @@ export class MercadoLivreClientListingsService {
       listingType,
       stock
     });
+    const canUsePendingReviewCandidates = canUseMercadoLivrePendingReviewCandidates({
+      searchTerm,
+      status,
+      listingType,
+      stock
+    });
 
     const { connection, accessToken: initialAccessToken } = await runStage("oauth", () =>
       mercadoLivreClientOAuthService.getAccessTokenForActiveConnection(input.authContext.organizationId, { signal })
@@ -2538,6 +2665,138 @@ export class MercadoLivreClientListingsService {
     }
 
     let nativePageCompleted = exactSearchResolved;
+    if (!exactSearchResolved && canUsePendingReviewCandidates) {
+      const pendingIds: string[] = [];
+      const seenPendingIds = new Set<string>();
+      let pendingOffset = 0;
+      let pendingTotal: number | null = null;
+      let pendingIntegrityFailure: string | null = null;
+
+      try {
+        while (pendingTotal === null || pendingOffset < pendingTotal) {
+          input.operation?.assertCanStart("ids");
+          const response = await runStage("ids", () => fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
+            organizationId: input.authContext.organizationId,
+            connectionId: connection.id,
+            accessToken,
+            path: sellerItemsPath({ sellerId, offset: pendingOffset, limit: maxLimit, status: "pending" }),
+            signal,
+            stage: "ids",
+            retryTransient: true,
+            throwHttpFailures: true
+          }));
+          accessToken = response.accessToken;
+
+          if (!response.ok) {
+            pendingIntegrityFailure = "HTTP_FAILURE";
+            endpointDiagnostics.push({
+              endpoint: response.endpoint,
+              status: response.status,
+              listingStatus: "pending",
+              filterMode: "pending_candidates_before_pagination",
+              complete: false,
+              integrityFailure: pendingIntegrityFailure,
+              ...coreResponseDiagnostics(response)
+            });
+            break;
+          }
+
+          const validation = validateMercadoLivrePendingReviewPage({
+            payload: response.data,
+            expectedSellerId: sellerId,
+            expectedOffset: pendingOffset,
+            expectedLimit: maxLimit,
+            expectedTotal: pendingTotal,
+            seenIds: seenPendingIds
+          });
+          endpointDiagnostics.push({
+            endpoint: response.endpoint,
+            status: response.status,
+            listingStatus: "pending",
+            requestId: response.requestId,
+            correlationId: response.correlationId,
+            returnedIds: response.data.results?.length ?? 0,
+            total: response.data.paging?.total ?? null,
+            offset: pendingOffset,
+            limit: maxLimit,
+            filterMode: "pending_candidates_before_pagination",
+            complete: validation.ok,
+            integrityFailure: validation.ok ? null : validation.reason,
+            ...coreResponseDiagnostics(response)
+          });
+
+          if (!validation.ok) {
+            pendingIntegrityFailure = validation.reason;
+            break;
+          }
+
+          pendingTotal = validation.total;
+          for (const id of validation.ids) {
+            seenPendingIds.add(id);
+            pendingIds.push(id);
+          }
+          pendingOffset += validation.ids.length;
+        }
+
+        if (!pendingIntegrityFailure && pendingTotal !== pendingIds.length) {
+          pendingIntegrityFailure = "TOTAL_MISMATCH";
+        }
+
+        if (!pendingIntegrityFailure) {
+          const detailResult = await runStage("details", () => fetchListingDetailsReadOnly({
+            organizationId: input.authContext.organizationId,
+            connectionId: connection.id,
+            accessToken,
+            itemIds: pendingIds,
+            syncedAt,
+            warnings,
+            endpointDiagnostics,
+            signal,
+            stage: "details",
+            retryTransient: true,
+            expectedSellerId: sellerId
+          }));
+          accessToken = detailResult.accessToken;
+          const uniqueDetails = uniqueListingsByMercadoLivreId(detailResult.listings);
+          const detailsComplete =
+            detailResult.complete &&
+            mercadoLivrePendingReviewDetailsAreComplete({ itemIds: pendingIds, listings: uniqueDetails });
+
+          if (detailsComplete) {
+            const selected = selectMercadoLivreUnderReviewPage({
+              listings: uniqueDetails,
+              offset: requestedOffset,
+              limit: requestedLimit
+            });
+            sourceTotalAvailable = pendingTotal;
+            foundItemIds = pendingIds.length;
+            matchedItemIds = selected.total;
+            filteredTotalAvailable = selected.total;
+            pageListings = selected.listings;
+            nativePageCompleted = true;
+          } else {
+            pendingIntegrityFailure = "INCOMPLETE_DETAILS";
+          }
+        }
+      } catch (error) {
+        if (isMercadoLivreOperationError(error)) throw error;
+        if (isMercadoLivreCoreRequestError(error) && error.kind === "aborted") throw error;
+        if (!isMercadoLivreCoreRequestError(error)) throw error;
+        pendingIntegrityFailure = "EXTERNAL_REQUEST_FAILED";
+      }
+
+      if (!nativePageCompleted && pendingIntegrityFailure) {
+        warnings.push("O filtro otimizado de anuncios em revisao ficou inconclusivo. A busca completa foi preservada.");
+        endpointDiagnostics.push({
+          endpoint: "/users/.../items/search?status=pending",
+          status: 0,
+          listingStatus: "pending",
+          filterMode: "pending_candidates_before_pagination",
+          complete: false,
+          integrityFailure: pendingIntegrityFailure
+        });
+      }
+    }
     if (!exactSearchResolved && (canUseNativeMercadoLivrePage || canUseNativeMercadoLivreTextPage)) {
       const nativeSearchStage: MercadoLivreOperationStage = canUseNativeMercadoLivreTextPage ? "search" : "ids";
       const response = await runStage(nativeSearchStage, () => fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
