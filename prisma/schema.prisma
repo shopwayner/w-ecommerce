@@ -137,6 +137,19 @@ enum JobStatus {
   CANCELED
 }
 
+enum MercadoLivreListingProjectionStateStatus {
+  NEVER_SYNCED
+  SYNCING
+  COMPLETE
+  ERROR
+}
+
+enum MercadoLivreListingProjectionGenerationStatus {
+  BUILDING
+  COMPLETE
+  ERROR
+}
+
 enum ProductCondition {
   UNSPECIFIED
   NEW
@@ -217,6 +230,7 @@ model Organization {
   erpConnections           ERPConnection[]
   mercadoLivreConnections  MercadoLivreConnection[]
   mercadoLivreListingCaches MercadoLivreListingCache[]
+  mercadoLivreListingProjectionStates MercadoLivreListingProjectionState[]
   mercadoLivreReferenceImports MercadoLivreReferenceImport[]
   productEnrichmentHistories ProductEnrichmentHistory[]
   marketplaceConnections   MarketplaceConnection[]
@@ -434,6 +448,96 @@ model MercadoLivreListingCache {
   @@index([lastSyncedAt])
 }
 
+model MercadoLivreListingProjectionState {
+  id                      String                                    @id @default(cuid())
+  organizationId          String
+  marketplaceConnectionId String
+  sellerId                String
+  status                  MercadoLivreListingProjectionStateStatus @default(NEVER_SYNCED)
+  activeGenerationId      String?                                   @unique(map: "ml_proj_state_active_generation_key")
+  lastAttemptStartedAt    DateTime?
+  lastAttemptFinishedAt   DateTime?
+  lastSuccessfulSyncAt    DateTime?
+  lastErrorCode           String?                                   @db.VarChar(80)
+  lastErrorSummary        String?                                   @db.VarChar(240)
+  createdAt               DateTime                                  @default(now())
+  updatedAt               DateTime                                  @updatedAt
+  organization            Organization                              @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  marketplaceConnection   MarketplaceConnection                     @relation(fields: [marketplaceConnectionId, organizationId], references: [id, organizationId], onDelete: Cascade)
+  activeGeneration        MercadoLivreListingProjectionGeneration?  @relation("MercadoLivreListingProjectionActiveGeneration", fields: [activeGenerationId], references: [id], onDelete: SetNull)
+  generations             MercadoLivreListingProjectionGeneration[] @relation("MercadoLivreListingProjectionStateGenerations")
+
+  @@unique([organizationId, marketplaceConnectionId, sellerId], map: "ml_proj_state_tenant_connection_seller_key")
+  @@unique([id, organizationId, marketplaceConnectionId, sellerId], map: "ml_proj_state_owner_key")
+  @@index([marketplaceConnectionId], map: "ml_proj_state_connection_idx")
+  @@index([status], map: "ml_proj_state_status_idx")
+  @@index([lastSuccessfulSyncAt], map: "ml_proj_state_last_success_idx")
+}
+
+model MercadoLivreListingProjectionGeneration {
+  id                      String                                        @id @default(cuid())
+  projectionStateId       String
+  organizationId          String
+  marketplaceConnectionId String
+  sellerId                String
+  status                  MercadoLivreListingProjectionGenerationStatus @default(BUILDING)
+  expectedTotal           Int?
+  storedTotal             Int                                           @default(0)
+  startedAt               DateTime                                      @default(now())
+  completedAt             DateTime?
+  failedAt                DateTime?
+  errorCode               String?                                       @db.VarChar(80)
+  errorSummary            String?                                       @db.VarChar(240)
+  createdAt               DateTime                                      @default(now())
+  updatedAt               DateTime                                      @updatedAt
+  projectionState         MercadoLivreListingProjectionState            @relation("MercadoLivreListingProjectionStateGenerations", fields: [projectionStateId, organizationId, marketplaceConnectionId, sellerId], references: [id, organizationId, marketplaceConnectionId, sellerId], onDelete: Cascade)
+  activeForState          MercadoLivreListingProjectionState?           @relation("MercadoLivreListingProjectionActiveGeneration")
+  listings                MercadoLivreListingProjection[]
+
+  @@unique([id, organizationId, marketplaceConnectionId, sellerId], map: "ml_proj_generation_owner_key")
+  @@index([projectionStateId, status], map: "ml_proj_generation_state_status_idx")
+  @@index([organizationId, marketplaceConnectionId, sellerId, status], map: "ml_proj_generation_tenant_status_idx")
+  @@index([startedAt], map: "ml_proj_generation_started_idx")
+}
+
+model MercadoLivreListingProjection {
+  id                      String                                   @id @default(cuid())
+  organizationId          String
+  marketplaceConnectionId String
+  sellerId                String
+  generationId            String
+  mlbId                   String
+  title                   String
+  sku                     String?
+  gtin                    String?
+  status                  String
+  /// Sanitized Mercado Livre `sub_status` values only; never the full listing payload.
+  subStatus               Json?
+  health                  Decimal?                                 @db.Decimal(5, 4)
+  listingTypeId           String
+  availableQuantity       Int?
+  price                   Decimal?                                 @db.Decimal(12, 2)
+  currencyId              String?
+  thumbnail               String?
+  categoryId              String?
+  permalink               String?
+  dateCreated             DateTime?
+  remoteUpdatedAt         DateTime?
+  syncedAt                DateTime                                 @default(now())
+  createdAt               DateTime                                 @default(now())
+  updatedAt               DateTime                                 @updatedAt
+  generation              MercadoLivreListingProjectionGeneration @relation(fields: [generationId, organizationId, marketplaceConnectionId, sellerId], references: [id, organizationId, marketplaceConnectionId, sellerId], onDelete: Cascade)
+
+  @@unique([generationId, mlbId], map: "ml_proj_generation_mlb_key")
+  @@index([organizationId, marketplaceConnectionId, sellerId, generationId], map: "ml_proj_tenant_generation_idx")
+  @@index([generationId, status], map: "ml_proj_generation_status_idx")
+  @@index([generationId, listingTypeId], map: "ml_proj_generation_type_idx")
+  @@index([generationId, availableQuantity], map: "ml_proj_generation_stock_idx")
+  @@index([generationId, sku], map: "ml_proj_generation_sku_idx")
+  @@index([generationId, gtin], map: "ml_proj_generation_gtin_idx")
+  @@index([generationId, remoteUpdatedAt], map: "ml_proj_generation_remote_updated_idx")
+}
+
 model MarketplaceConnection {
   id                    String              @id @default(cuid())
   organizationId        String
@@ -465,8 +569,10 @@ model MarketplaceConnection {
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @updatedAt
   organization          Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  mercadoLivreListingProjectionStates MercadoLivreListingProjectionState[]
 
   @@unique([organizationId, provider])
+  @@unique([id, organizationId], map: "marketplace_connection_tenant_owner_key")
   @@index([organizationId])
   @@index([provider])
   @@index([status])
