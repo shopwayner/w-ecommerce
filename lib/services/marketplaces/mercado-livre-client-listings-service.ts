@@ -26,6 +26,12 @@ import {
   requestMercadoLivreCore,
   type MercadoLivreCoreRequestFailureKind
 } from "@/lib/services/marketplaces/mercado-livre-core-request";
+import {
+  getMercadoLivreOperationForSignal,
+  isMercadoLivreOperationError,
+  type MercadoLivreOperationStage,
+  type MercadoLivreReadOperation
+} from "@/lib/services/marketplaces/mercado-livre-operation-deadline";
 
 const apiBaseUrl = "https://api.mercadolibre.com";
 const defaultLimit = 50;
@@ -951,6 +957,21 @@ function normalizeListingFeeEstimate(payload: unknown, input: { listingTypeId: s
   };
 }
 
+function linkedRequestController(signal: AbortSignal | undefined, timeoutMs: number) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", abortFromParent, { once: true });
+  if (signal?.aborted) abortFromParent();
+  const timer = setTimeout(() => controller.abort(new DOMException("Timed out", "TimeoutError")), timeoutMs);
+  return {
+    signal: controller.signal,
+    dispose() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abortFromParent);
+    }
+  };
+}
+
 async function getListingFeeEstimate(input: {
   accessToken: string;
   siteId: string;
@@ -958,7 +979,9 @@ async function getListingFeeEstimate(input: {
   listingTypeId: string | null;
   price: number | null;
   currencyId: string | null;
+  operation?: MercadoLivreReadOperation;
 }) {
+  input.operation?.assertCanStart("fees");
   if (!input.categoryId || !input.listingTypeId || input.price === null || input.price <= 0) {
     return feeEstimateUnavailable("Dados insuficientes para consultar tarifa.");
   }
@@ -973,8 +996,7 @@ async function getListingFeeEstimate(input: {
   const cached = feeEstimateCache.get(cacheKey);
   if (cached) return cached;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), feeEstimateTimeoutMs);
+  const requestController = linkedRequestController(input.operation?.signal, feeEstimateTimeoutMs);
 
   try {
     const path = listingPricesPath({
@@ -989,7 +1011,7 @@ async function getListingFeeEstimate(input: {
         Authorization: `Bearer ${input.accessToken}`,
         Accept: "application/json"
       },
-      signal: controller.signal
+      signal: requestController.signal
     });
 
     if (!response.ok) {
@@ -1004,12 +1026,17 @@ async function getListingFeeEstimate(input: {
     });
     feeEstimateCache.set(cacheKey, estimate);
     return estimate;
-  } catch {
+  } catch (error) {
+    if (input.operation?.signal.aborted) throw input.operation.abortError("fees");
+    if (isMercadoLivreOperationError(error)) throw error;
+    if (requestController.signal.reason instanceof DOMException && requestController.signal.reason.name === "TimeoutError") {
+      input.operation?.recordTimeout();
+    }
     const unavailable = feeEstimateUnavailable();
     feeEstimateCache.set(cacheKey, unavailable);
     return unavailable;
   } finally {
-    clearTimeout(timeout);
+    requestController.dispose();
   }
 }
 
@@ -1067,7 +1094,9 @@ async function getListingShippingCostEstimate(input: {
   accessToken: string;
   query: MercadoLivreSellerShippingCostQuery;
   persistedEstimate?: ListingShippingCostEstimate;
+  operation?: MercadoLivreReadOperation;
 }) {
+  input.operation?.assertCanStart("shipping");
   const query = input.query;
   const cacheKey = sellerShippingCostCacheKey(query);
   const cached = shippingEstimateCache.get(cacheKey);
@@ -1077,23 +1106,37 @@ async function getListingShippingCostEstimate(input: {
     const path = sellerShippingCostPath(query);
     const retryResult = await requestSellerShippingCostWithRetry({
       fallbackCurrencyId: query.currencyId,
+      signal: input.operation?.signal,
+      canRetry: (delayMs) => {
+        input.operation?.assertCanStart("shipping", delayMs + shippingEstimateTimeoutMs);
+        input.operation?.recordRetry();
+        return true;
+      },
       request: async () => {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), shippingEstimateTimeoutMs);
+        input.operation?.assertCanStart("shipping");
+        const requestController = linkedRequestController(input.operation?.signal, shippingEstimateTimeoutMs);
         try {
-          const response = await fetch(`${apiBaseUrl}${path}`, {
-            headers: {
-              Authorization: `Bearer ${input.accessToken}`,
-              Accept: "application/json"
-            },
-            signal: controller.signal
-          });
+          let response: Response;
+          try {
+            response = await fetch(`${apiBaseUrl}${path}`, {
+              headers: {
+                Authorization: `Bearer ${input.accessToken}`,
+                Accept: "application/json"
+              },
+              signal: requestController.signal
+            });
+          } catch (error) {
+            if (requestController.signal.reason instanceof DOMException && requestController.signal.reason.name === "TimeoutError") {
+              input.operation?.recordTimeout();
+            }
+            throw error;
+          }
           if (!response.ok) {
             return { ok: false as const, status: response.status, retryAfter: response.headers.get("retry-after") };
           }
           return { ok: true as const, payload: await response.json() };
         } finally {
-          clearTimeout(timeout);
+          requestController.dispose();
         }
       }
     });
@@ -1117,7 +1160,9 @@ async function getListingShippingCostEstimate(input: {
           : shippingEstimateUnavailableCacheTtlMs)
     });
     return resolved;
-  } catch {
+  } catch (error) {
+    if (input.operation?.signal.aborted) throw input.operation.abortError("shipping");
+    if (isMercadoLivreOperationError(error)) throw error;
     const unavailable = preserveStaleShippingCost(
       [cached?.estimate, input.persistedEstimate],
       shippingCostEstimateUnavailable("Custo temporariamente indisponivel.")
@@ -1135,10 +1180,12 @@ async function loadPersistedShippingCostEstimates(input: {
   connectionId: string;
   sellerId: string;
   listings: MercadoLivreClientListing[];
+  operation?: MercadoLivreReadOperation;
 }) {
   const listingsById = new Map(input.listings.map((listing) => [listing.externalId, listing]));
   if (!listingsById.size) return new Map<string, ListingShippingCostEstimate>();
 
+  input.operation?.assertCanStart("local");
   const rows = await prisma.mercadoLivreListingCache.findMany({
     where: {
       organizationId: input.organizationId,
@@ -1147,6 +1194,7 @@ async function loadPersistedShippingCostEstimates(input: {
     orderBy: { lastSyncedAt: "desc" },
     select: { externalItemId: true, rawAttributesJson: true }
   });
+  input.operation?.assertCanContinue("local");
   const estimates = new Map<string, ListingShippingCostEstimate>();
 
   for (const row of rows) {
@@ -1178,11 +1226,17 @@ async function loadPersistedShippingCostEstimates(input: {
   return estimates;
 }
 
-async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>) {
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  mapper: (item: T) => Promise<R>,
+  beforeItem?: () => void
+) {
   const results: R[] = new Array(items.length);
   let nextIndex = 0;
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
     while (nextIndex < items.length) {
+      beforeItem?.();
       const currentIndex = nextIndex;
       nextIndex += 1;
       results[currentIndex] = await mapper(items[currentIndex]);
@@ -1196,6 +1250,7 @@ async function enrichListingFeesReadOnly(input: {
   accessToken: string;
   siteId: string;
   listings: MercadoLivreClientListing[];
+  operation?: MercadoLivreReadOperation;
 }) {
   if (!input.listings.length) return input.listings;
 
@@ -1209,7 +1264,8 @@ async function enrichListingFeesReadOnly(input: {
       categoryId: listing.categoryId,
       listingTypeId: listing.listingTypeId,
       price: listing.price,
-      currencyId: listing.currencyId
+      currencyId: listing.currencyId,
+      operation: input.operation
     });
 
     return {
@@ -1224,7 +1280,7 @@ async function enrichListingFeesReadOnly(input: {
         unavailableReason: estimate.unavailableReason
       }
     };
-  });
+  }, () => input.operation?.assertCanStart("fees"));
 }
 
 async function enrichListingShippingCostsReadOnly(input: {
@@ -1233,6 +1289,7 @@ async function enrichListingShippingCostsReadOnly(input: {
   accessToken: string;
   sellerId: string;
   listings: MercadoLivreClientListing[];
+  operation?: MercadoLivreReadOperation;
 }) {
   if (!input.listings.length) return input.listings;
   const persistedEstimates = await loadPersistedShippingCostEstimates(input);
@@ -1263,7 +1320,8 @@ async function enrichListingShippingCostsReadOnly(input: {
     const estimate = await getListingShippingCostEstimate({
       accessToken: input.accessToken,
       query,
-      persistedEstimate: persistedEstimates.get(listing.externalId)
+      persistedEstimate: persistedEstimates.get(listing.externalId),
+      operation: input.operation
     });
 
     return {
@@ -1278,7 +1336,7 @@ async function enrichListingShippingCostsReadOnly(input: {
         costStale: estimate.stale
       }
     };
-  });
+  }, () => input.operation?.assertCanStart("shipping"));
 }
 
 
@@ -1298,9 +1356,14 @@ function localAvailableQuantity(
   return balances.reduce((total, balance) => total + balance.physicalQuantity - balance.reservedQuantity - balance.safetyQuantity, 0);
 }
 
-async function enrichListingsReadOnly(organizationId: string, listings: MercadoLivreClientListing[]) {
+async function enrichListingsReadOnly(
+  organizationId: string,
+  listings: MercadoLivreClientListing[],
+  operation?: MercadoLivreReadOperation
+) {
   if (!listings.length) return listings;
 
+  operation?.assertCanStart("local");
   const categoryIds = Array.from(new Set(listings.map((listing) => listing.categoryId).filter((value): value is string => Boolean(value))));
   const categoryRows = categoryIds.length
     ? await prisma.marketplaceCategoryCatalog.findMany({
@@ -1315,6 +1378,7 @@ async function enrichListingsReadOnly(organizationId: string, listings: MercadoL
         }
       })
     : [];
+  operation?.assertCanContinue("local");
   const categoryById = new Map(categoryRows.map((category) => [category.marketplaceCategoryId, category]));
 
   const skus = Array.from(new Set(listings.map((listing) => listing.sku?.trim()).filter((value): value is string => Boolean(value))));
@@ -1352,6 +1416,7 @@ async function enrichListingsReadOnly(organizationId: string, listings: MercadoL
           }
         })
       : [];
+  operation?.assertCanContinue("local");
 
   const productBySku = new Map(productRows.filter((product) => product.sku).map((product) => [product.sku as string, product]));
   const productByGtin = new Map(
@@ -1416,6 +1481,7 @@ async function fetchMercadoLivreJson<T>(input: {
   retryOnUnauthorized?: boolean;
   retryTransient?: boolean;
   signal?: AbortSignal;
+  stage?: MercadoLivreOperationStage;
   throwHttpFailures?: boolean;
 }): Promise<MercadoLivreFetchResult<T>> {
   const endpoint = endpointLabel(input.path);
@@ -1425,6 +1491,7 @@ async function fetchMercadoLivreJson<T>(input: {
       endpoint,
       accessToken: input.accessToken,
       signal: input.signal,
+      stage: input.stage,
       retryTransient: input.retryTransient,
       retryOnUnauthorized: input.retryOnUnauthorized,
       refreshAccessToken:
@@ -1433,7 +1500,8 @@ async function fetchMercadoLivreJson<T>(input: {
           : async () => {
               const refreshed = await mercadoLivreClientOAuthService.refreshConnectionToken({
                 organizationId: input.organizationId,
-                connectionId: input.connectionId
+                connectionId: input.connectionId,
+                signal: input.signal
               });
               return refreshed.accessToken;
             }
@@ -1649,6 +1717,7 @@ async function tryMercadoLivreExactSearch(input: {
   signal?: AbortSignal;
   retryTransient?: boolean;
 }): Promise<MercadoLivreExactSearchAttempt> {
+  const operation = getMercadoLivreOperationForSignal(input.signal);
   const classification = classifyMercadoLivreExactSearchTerm(input.query);
   if (classification.kind === "BUSCA_GERAL") {
     return { outcome: "not_applicable", accessToken: input.accessToken, candidateCount: 0, listings: [] };
@@ -1667,6 +1736,7 @@ async function tryMercadoLivreExactSearch(input: {
         throwHttpFailures: true
       });
     } catch (error) {
+      if (isMercadoLivreOperationError(error)) throw error;
       if (isMercadoLivreCoreRequestError(error)) throw error;
       return { outcome: "fallback", accessToken: input.accessToken, candidateCount: 1, listings: [] };
     }
@@ -1720,6 +1790,7 @@ async function tryMercadoLivreExactSearch(input: {
 
   let candidates: Array<{ externalItemId: string }>;
   try {
+    operation?.assertCanStart("local");
     candidates = await prisma.mercadoLivreListingCache.findMany({
       where: buildMercadoLivreExactSearchCandidateWhere({
         organizationId: input.organizationId,
@@ -1730,7 +1801,9 @@ async function tryMercadoLivreExactSearch(input: {
       orderBy: [{ lastSyncedAt: "desc" }, { externalItemId: "asc" }],
       take: exactSearchCandidateLimit + 1
     });
-  } catch {
+    operation?.assertCanContinue("local");
+  } catch (error) {
+    if (isMercadoLivreOperationError(error)) throw error;
     return { outcome: "fallback", accessToken: input.accessToken, candidateCount: 0, listings: [] };
   }
 
@@ -1760,6 +1833,7 @@ async function tryMercadoLivreExactSearch(input: {
           throwHttpFailures: true
         });
       } catch (error) {
+        if (isMercadoLivreOperationError(error)) throw error;
         if (isMercadoLivreCoreRequestError(error)) throw error;
         return { outcome: "fallback", accessToken, candidateCount: 0, listings: [] };
       }
@@ -1811,6 +1885,7 @@ async function tryMercadoLivreExactSearch(input: {
       throwHttpFailures: true
     });
   } catch (error) {
+    if (isMercadoLivreOperationError(error)) throw error;
     if (isMercadoLivreCoreRequestError(error)) throw error;
     return { outcome: "fallback", accessToken: candidateAccessToken, candidateCount: candidateIds.length, listings: [] };
   }
@@ -2056,6 +2131,7 @@ export async function fetchListingDetailsReadOnly(input: {
   retryOnUnauthorized?: boolean;
   retryTransient?: boolean;
   signal?: AbortSignal;
+  stage?: MercadoLivreOperationStage;
   requestJson?: (
     request: Parameters<typeof fetchMercadoLivreJson>[0]
   ) => Promise<MercadoLivreFetchResult<MercadoLivreMultiGetEntry[]>>;
@@ -2067,8 +2143,11 @@ export async function fetchListingDetailsReadOnly(input: {
   let failedBatches = 0;
   let firstFailure: unknown = null;
   const requestJson = input.requestJson ?? fetchMercadoLivreJson;
+  const operation = getMercadoLivreOperationForSignal(input.signal);
+  const stage = input.stage ?? "details";
 
   for (const ids of chunks) {
+    operation?.assertCanStart(stage);
     let response: MercadoLivreFetchResult<MercadoLivreMultiGetEntry[]>;
     try {
       response = await requestJson({
@@ -2078,9 +2157,11 @@ export async function fetchListingDetailsReadOnly(input: {
         path: `/items?ids=${ids.map(encodeURIComponent).join(",")}`,
         retryOnUnauthorized: input.retryOnUnauthorized,
         retryTransient: input.retryTransient,
-        signal: input.signal
+        signal: input.signal,
+        stage
       });
     } catch (error) {
+      if (isMercadoLivreOperationError(error)) throw error;
       if (isMercadoLivreCoreRequestError(error) && error.kind === "aborted") throw error;
       failedBatches += 1;
       firstFailure ??= error;
@@ -2377,7 +2458,11 @@ export class MercadoLivreClientListingsService {
     offset?: number;
     maxListings?: number;
     signal?: AbortSignal;
+    operation?: MercadoLivreReadOperation;
   }) {
+    const signal = input.operation?.signal ?? input.signal;
+    const runStage = <T>(stage: MercadoLivreOperationStage, task: () => Promise<T>) =>
+      input.operation ? input.operation.measure(stage, task) : task();
     const requestedLimit = Math.max(1, Math.min(input.limit ?? defaultLimit, maxLimit));
     const requestedOffset = Math.max(0, input.offset ?? 0);
     const requestedMaxListings = Math.max(requestedLimit, Math.min(input.maxListings ?? globalSearchMaxListings, globalSearchMaxListings));
@@ -2406,7 +2491,9 @@ export class MercadoLivreClientListingsService {
       stock
     });
 
-    const { connection, accessToken: initialAccessToken } = await mercadoLivreClientOAuthService.getAccessTokenForActiveConnection(input.authContext.organizationId);
+    const { connection, accessToken: initialAccessToken } = await runStage("oauth", () =>
+      mercadoLivreClientOAuthService.getAccessTokenForActiveConnection(input.authContext.organizationId, { signal })
+    );
     const sellerId = normalizeMercadoLivreId(connection.sellerId ?? connection.externalAccountId);
     if (!sellerId) throw new Error("Conta Mercado Livre conectada sem seller identificado. Reconecte a conta.");
 
@@ -2423,17 +2510,19 @@ export class MercadoLivreClientListingsService {
     let coreComplete = true;
 
     if (searchTerm) {
-      const exactSearch = await tryMercadoLivreExactSearch({
-        organizationId: input.authContext.organizationId,
-        connectionId: connection.id,
-        sellerId,
-        accessToken,
-        query: input.query ?? "",
-        syncedAt,
-        endpointDiagnostics,
-        signal: input.signal,
-        retryTransient: true
-      });
+      const exactSearch = await runStage("search", () =>
+        tryMercadoLivreExactSearch({
+          organizationId: input.authContext.organizationId,
+          connectionId: connection.id,
+          sellerId,
+          accessToken,
+          query: input.query ?? "",
+          syncedAt,
+          endpointDiagnostics,
+          signal,
+          retryTransient: true
+        })
+      );
       accessToken = exactSearch.accessToken;
 
       if (exactSearch.outcome === "resolved") {
@@ -2450,7 +2539,8 @@ export class MercadoLivreClientListingsService {
 
     let nativePageCompleted = exactSearchResolved;
     if (!exactSearchResolved && (canUseNativeMercadoLivrePage || canUseNativeMercadoLivreTextPage)) {
-      const response = await fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
+      const nativeSearchStage: MercadoLivreOperationStage = canUseNativeMercadoLivreTextPage ? "search" : "ids";
+      const response = await runStage(nativeSearchStage, () => fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
         organizationId: input.authContext.organizationId,
         connectionId: connection.id,
         accessToken,
@@ -2462,10 +2552,11 @@ export class MercadoLivreClientListingsService {
           listingTypeId: listingTypeForSearch,
           query: canUseNativeMercadoLivreTextPage ? input.query : undefined
         }),
-        signal: input.signal,
+        signal,
+        stage: nativeSearchStage,
         retryTransient: true,
         throwHttpFailures: true
-      });
+      }));
       accessToken = response.accessToken;
       const rawResults = response.ok ? response.data.results ?? [] : [];
       const responseTotal = response.ok && typeof response.data.paging?.total === "number" ? response.data.paging.total : null;
@@ -2535,7 +2626,7 @@ export class MercadoLivreClientListingsService {
         foundItemIds = canUseNativeMercadoLivreTextPage ? responseTotal ?? itemIds.length : itemIds.length;
         matchedItemIds = canUseNativeMercadoLivreTextPage ? responseTotal ?? itemIds.length : itemIds.length;
 
-        const detailResult = await fetchListingDetailsReadOnly({
+        const detailResult = await runStage("details", () => fetchListingDetailsReadOnly({
           organizationId: input.authContext.organizationId,
           connectionId: connection.id,
           accessToken,
@@ -2543,9 +2634,10 @@ export class MercadoLivreClientListingsService {
           syncedAt,
           warnings,
           endpointDiagnostics,
-          signal: input.signal,
+          signal,
+          stage: "details",
           retryTransient: true
-        });
+        }));
         accessToken = detailResult.accessToken;
         const uniqueDetails = uniqueListingsByMercadoLivreId(detailResult.listings);
         coreComplete = detailResult.complete;
@@ -2592,16 +2684,18 @@ export class MercadoLivreClientListingsService {
       const matchedListings: MercadoLivreClientListing[] = [];
 
       while (sourceOffset < requestedMaxListings) {
+        input.operation?.assertCanStart("fallback");
         const limit = Math.min(maxLimit, requestedMaxListings - sourceOffset);
-        const response = await fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
+        const response = await runStage("fallback", () => fetchMercadoLivreJson<MercadoLivreItemSearchPayload>({
           organizationId: input.authContext.organizationId,
           connectionId: connection.id,
           accessToken,
           path: sellerItemsPath({ sellerId, offset: sourceOffset, limit, status: statusForSearch }),
-          signal: input.signal,
+          signal,
+          stage: "fallback",
           retryTransient: true,
           throwHttpFailures: true
-        });
+        }));
         accessToken = response.accessToken;
         const returnedIds = response.ok ? response.data.results?.length ?? 0 : 0;
         endpointDiagnostics.push({
@@ -2634,7 +2728,7 @@ export class MercadoLivreClientListingsService {
           .filter((id): id is string => Boolean(id));
         foundItemIds += itemIds.length;
 
-        const detailResult = await fetchListingDetailsReadOnly({
+        const detailResult = await runStage("fallback", () => fetchListingDetailsReadOnly({
           organizationId: input.authContext.organizationId,
           connectionId: connection.id,
           accessToken,
@@ -2642,9 +2736,10 @@ export class MercadoLivreClientListingsService {
           syncedAt,
           warnings,
           endpointDiagnostics,
-          signal: input.signal,
+          signal,
+          stage: "fallback",
           retryTransient: true
-        });
+        }));
         accessToken = detailResult.accessToken;
         if (!detailResult.complete) coreComplete = false;
 
@@ -2669,19 +2764,35 @@ export class MercadoLivreClientListingsService {
       }
     }
 
-    const feeEnrichedListings = await enrichListingFeesReadOnly({
-      accessToken,
-      siteId: connection.siteId ?? "MLB",
-      listings: pageListings
-    });
-    const shippingEnrichedListings = await enrichListingShippingCostsReadOnly({
-      organizationId: input.authContext.organizationId,
-      connectionId: connection.id,
-      accessToken,
-      sellerId,
-      listings: feeEnrichedListings
-    });
-    const enrichedListings = await enrichListingsReadOnly(input.authContext.organizationId, shippingEnrichedListings);
+    let enrichedListings = pageListings;
+    let enrichmentComplete = true;
+    try {
+      enrichedListings = await runStage("fees", () =>
+        enrichListingFeesReadOnly({
+          accessToken,
+          siteId: connection.siteId ?? "MLB",
+          listings: enrichedListings,
+          operation: input.operation
+        })
+      );
+      enrichedListings = await runStage("shipping", () =>
+        enrichListingShippingCostsReadOnly({
+          organizationId: input.authContext.organizationId,
+          connectionId: connection.id,
+          accessToken,
+          sellerId,
+          listings: enrichedListings,
+          operation: input.operation
+        })
+      );
+      enrichedListings = await runStage("local", () =>
+        enrichListingsReadOnly(input.authContext.organizationId, enrichedListings, input.operation)
+      );
+    } catch (error) {
+      if (!isMercadoLivreOperationError(error) || error.kind === "client_abort") throw error;
+      enrichmentComplete = false;
+      warnings.push("A consulta principal foi concluida, mas os dados complementares excederam o tempo esperado.");
+    }
 
     return {
       connected: true,
@@ -2696,7 +2807,7 @@ export class MercadoLivreClientListingsService {
       warnings,
       endpointDiagnostics,
       coreComplete,
-      partial: !coreComplete,
+      partial: !coreComplete || !enrichmentComplete,
       search: {
         mode: "filtered_before_pagination",
         query: input.query ?? "",

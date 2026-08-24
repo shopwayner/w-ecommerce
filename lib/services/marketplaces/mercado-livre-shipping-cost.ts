@@ -114,19 +114,44 @@ export function sellerShippingCostRetryDelayMs(input: {
 export async function requestSellerShippingCostWithRetry(input: {
   fallbackCurrencyId: string | null;
   request: (attempt: number) => Promise<MercadoLivreSellerShippingCostRequestResult>;
-  wait?: (milliseconds: number) => Promise<void>;
+  wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  signal?: AbortSignal;
+  canRetry?: (delayMs: number) => boolean;
   now?: () => Date;
   random?: () => number;
 }): Promise<MercadoLivreSellerShippingCostRetryResult> {
-  const wait = input.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const wait =
+    input.wait ??
+    ((milliseconds: number, signal?: AbortSignal) =>
+      new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(signal?.reason);
+          return;
+        }
+        const done = () => {
+          signal?.removeEventListener("abort", abort);
+          resolve();
+        };
+        const timer = setTimeout(done, milliseconds);
+        const abort = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", abort);
+          reject(signal?.reason);
+        };
+        signal?.addEventListener("abort", abort, { once: true });
+      }));
   const maximumAttempts = MERCADO_LIVRE_SELLER_SHIPPING_COST_MAX_RATE_LIMIT_RETRIES + 1;
   let rateLimitResponses = 0;
+  let attemptsPerformed = 0;
 
   for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+    attemptsPerformed = attempt;
+    if (input.signal?.aborted) throw input.signal.reason;
     let response: MercadoLivreSellerShippingCostRequestResult;
     try {
       response = await input.request(attempt);
     } catch {
+      if (input.signal?.aborted) throw input.signal.reason;
       return {
         shippingCost: sellerShippingCostUnavailable("Custo temporariamente indisponivel."),
         attempts: attempt,
@@ -156,20 +181,20 @@ export async function requestSellerShippingCostWithRetry(input: {
 
     rateLimitResponses += 1;
     if (attempt < maximumAttempts) {
-      await wait(
-        sellerShippingCostRetryDelayMs({
-          retryAfter: response.retryAfter,
-          attempt,
-          now: input.now?.() ?? new Date(),
-          random: input.random
-        })
-      );
+      const delayMs = sellerShippingCostRetryDelayMs({
+        retryAfter: response.retryAfter,
+        attempt,
+        now: input.now?.() ?? new Date(),
+        random: input.random
+      });
+      if (input.canRetry && !input.canRetry(delayMs)) break;
+      await wait(delayMs, input.signal);
     }
   }
 
   return {
     shippingCost: sellerShippingCostUnavailable("Custo temporariamente indisponivel."),
-    attempts: maximumAttempts,
+    attempts: attemptsPerformed,
     rateLimitResponses,
     failureKind: "rate_limit"
   };

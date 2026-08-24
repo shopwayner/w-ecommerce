@@ -190,7 +190,8 @@ test("the text request reuses Phase 15 timeout, abort and retry wiring", () => {
   const filterSource = serviceSource.slice(filterStart, filterEnd);
   const nativeTextPath = filterSource.slice(filterSource.indexOf("canUseNativeMercadoLivreTextPage"));
 
-  assert.match(nativeTextPath, /signal: input\.signal/);
+  assert.match(filterSource, /const signal = input\.operation\?\.signal \?\? input\.signal/);
+  assert.match(nativeTextPath, /signal,/);
   assert.match(nativeTextPath, /retryTransient: true/);
   assert.match(nativeTextPath, /throwHttpFailures: true/);
   assert.doesNotMatch(nativeTextPath, /fetch\(/);

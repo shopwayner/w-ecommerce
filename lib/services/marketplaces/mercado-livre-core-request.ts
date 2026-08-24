@@ -1,3 +1,9 @@
+import {
+  getMercadoLivreOperationForSignal,
+  isMercadoLivreOperationError,
+  type MercadoLivreOperationStage
+} from "@/lib/services/marketplaces/mercado-livre-operation-deadline";
+
 const DEFAULT_TIMEOUT_MS = 8_000;
 const DEFAULT_MAX_RETRY_AFTER_MS = 2_000;
 const TRANSIENT_HTTP_STATUSES = new Set([500, 502, 503, 504]);
@@ -84,6 +90,7 @@ type MercadoLivreCoreRequestInput = {
   endpoint: string;
   accessToken: string;
   signal?: AbortSignal;
+  stage?: MercadoLivreOperationStage;
   timeoutMs?: number;
   retryTransient?: boolean;
   retryOnUnauthorized?: boolean;
@@ -148,7 +155,9 @@ async function requestAttempt(input: {
     });
     return { response, body: await response.text() };
   } catch (error) {
-    if (input.externalSignal?.aborted) throw { kind: "aborted", cause: error };
+    if (input.externalSignal?.aborted) {
+      throw { kind: "aborted", cause: error, reason: input.externalSignal.reason };
+    }
     if (timedOut) throw { kind: "timeout", cause: error };
     throw { kind: "network_failure", cause: error };
   } finally {
@@ -166,10 +175,30 @@ export async function requestMercadoLivreCore(input: MercadoLivreCoreRequestInpu
   const random = input.random ?? Math.random;
   const startedAt = now();
   const retryReasons: RetryReason[] = [];
+  const stage = input.stage ?? "search";
+  const operation = getMercadoLivreOperationForSignal(input.signal);
   let accessToken = input.accessToken;
 
+  const assertOperationBudget = (minimumBudgetMs = 1) => {
+    operation?.assertCanStart(stage, minimumBudgetMs);
+  };
+
+  const operationAbortError = () => {
+    const reason = input.signal?.reason;
+    return isMercadoLivreOperationError(reason) ? reason : null;
+  };
+
+  const prepareRetry = (delayMs: number) => {
+    if (!operation) return;
+    operation.assertCanStart(stage, delayMs + timeoutMs);
+    operation.recordRetry();
+  };
+
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    assertOperationBudget();
     if (input.signal?.aborted) {
+      const operationError = operationAbortError();
+      if (operationError) throw operationError;
       throw abortedError({ endpoint: input.endpoint, attempts: attempt - 1, retryCount: retryReasons.length, durationMs: now() - startedAt });
     }
 
@@ -179,20 +208,29 @@ export async function requestMercadoLivreCore(input: MercadoLivreCoreRequestInpu
         url: input.url,
         accessToken,
         externalSignal: input.signal,
-        timeoutMs,
+        timeoutMs: operation ? Math.max(1, Math.min(timeoutMs, operation.remainingMs())) : timeoutMs,
         fetchImpl
       });
     } catch (error) {
       const kind = (error as { kind?: unknown })?.kind;
       if (kind === "aborted") {
+        const operationReason = (error as { reason?: unknown })?.reason;
+        if (isMercadoLivreOperationError(operationReason)) throw operationReason;
+        const operationError = operationAbortError();
+        if (operationError) throw operationError;
         throw abortedError({ endpoint: input.endpoint, attempts: attempt, retryCount: retryReasons.length, durationMs: now() - startedAt });
       }
       const failureKind = kind === "timeout" ? "timeout" : "network_failure";
+      if (failureKind === "timeout") operation?.recordTimeout();
       if (input.retryTransient === true && attempt === 1) {
+        const delayMs = 250 + Math.floor(random() * 101);
+        prepareRetry(delayMs);
         retryReasons.push(failureKind);
         try {
-          await sleepImpl(250 + Math.floor(random() * 101), input.signal);
+          await sleepImpl(delayMs, input.signal);
         } catch {
+          const operationError = operationAbortError();
+          if (operationError) throw operationError;
           throw abortedError({ endpoint: input.endpoint, attempts: attempt, retryCount: retryReasons.length, durationMs: now() - startedAt });
         }
         continue;
@@ -213,10 +251,13 @@ export async function requestMercadoLivreCore(input: MercadoLivreCoreRequestInpu
       input.retryOnUnauthorized !== false &&
       input.refreshAccessToken
     ) {
+      assertOperationBudget(timeoutMs);
+      operation?.recordRetry();
       retryReasons.push("unauthorized");
       try {
         accessToken = await input.refreshAccessToken();
-      } catch {
+      } catch (error) {
+        if (isMercadoLivreOperationError(error)) throw error;
         throw new MercadoLivreCoreRequestError({
           kind: "unauthorized",
           status: 401,
@@ -238,10 +279,13 @@ export async function requestMercadoLivreCore(input: MercadoLivreCoreRequestInpu
           response.status === 429
             ? retryAfterMs ?? 500 + Math.floor(random() * 101)
             : 250 + Math.floor(random() * 101);
+        prepareRetry(delayMs);
         retryReasons.push(reason);
         try {
           await sleepImpl(delayMs, input.signal);
         } catch {
+          const operationError = operationAbortError();
+          if (operationError) throw operationError;
           throw abortedError({ endpoint: input.endpoint, attempts: attempt, retryCount: retryReasons.length, durationMs: now() - startedAt });
         }
         continue;

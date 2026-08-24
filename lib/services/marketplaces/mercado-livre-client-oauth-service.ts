@@ -4,12 +4,17 @@ import { ConnectionRole, MarketplaceProvider, OAuthProvider } from "@prisma/clie
 import { prisma } from "@/lib/prisma";
 import { decryptSecret, encryptSecret } from "@/lib/security/encryption";
 import { sanitizeLogPayload } from "@/lib/utils";
+import {
+  getMercadoLivreOperationForSignal,
+  isMercadoLivreOperationError
+} from "@/lib/services/marketplaces/mercado-livre-operation-deadline";
 
 const authorizationUrl = "https://auth.mercadolivre.com.br/authorization";
 const tokenUrl = "https://api.mercadolibre.com/oauth/token";
 const apiBaseUrl = "https://api.mercadolibre.com";
 const stateTtlMs = 10 * 60 * 1000;
 const stateConnectionName = "Matrix Marketplace Manager";
+export const MERCADO_LIVRE_TOKEN_REFRESH_TIMEOUT_MS = 8_000;
 
 export const ML_MANAGER_STATE_COOKIE = "ml_manager_oauth_state";
 
@@ -27,6 +32,41 @@ type MercadoLivreManagerUser = {
   nickname?: string;
   site_id?: string;
 };
+
+export async function persistReceivedMercadoLivreToken<TToken, TPersisted>(input: {
+  readToken: () => Promise<TToken>;
+  persist: (token: TToken) => Promise<TPersisted>;
+}) {
+  const token = await input.readToken();
+  // Do not consult the originating request signal here. Refresh tokens may rotate as
+  // soon as this response is issued, so the received token pair must be persisted.
+  return input.persist(token);
+}
+
+export async function fetchMercadoLivreTokenWithTimeout(input: {
+  url: string;
+  init: RequestInit;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  fetchImpl?: typeof fetch;
+}) {
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(input.signal?.reason);
+  input.signal?.addEventListener("abort", abortFromParent, { once: true });
+  if (input.signal?.aborted) abortFromParent();
+  const timer = setTimeout(
+    () => controller.abort(new DOMException("Timed out", "TimeoutError")),
+    input.timeoutMs ?? MERCADO_LIVRE_TOKEN_REFRESH_TIMEOUT_MS
+  );
+  try {
+    const response = await (input.fetchImpl ?? fetch)(input.url, { ...input.init, signal: controller.signal });
+    const body = await response.text();
+    return { response, body };
+  } finally {
+    clearTimeout(timer);
+    input.signal?.removeEventListener("abort", abortFromParent);
+  }
+}
 
 function hashState(state: string) {
   return createHash("sha256").update(state).digest("hex");
@@ -194,7 +234,14 @@ export class MercadoLivreClientOAuthService {
     return response.json() as Promise<MercadoLivreManagerTokenResponse>;
   }
 
-  async refreshConnectionToken(input: { organizationId: string; connectionId: string }) {
+  async refreshConnectionToken(input: {
+    organizationId: string;
+    connectionId: string;
+    signal?: AbortSignal;
+    fetchImpl?: typeof fetch;
+  }) {
+    const operation = getMercadoLivreOperationForSignal(input.signal);
+    operation?.assertCanStart("oauth", MERCADO_LIVRE_TOKEN_REFRESH_TIMEOUT_MS);
     const connection = await prisma.marketplaceConnection.findFirst({
       where: {
         id: input.connectionId,
@@ -202,24 +249,44 @@ export class MercadoLivreClientOAuthService {
         provider: MarketplaceProvider.MERCADOLIVRE
       }
     });
+    operation?.assertCanContinue("oauth");
     if (!connection || !connection.refreshTokenEncrypted) {
       throw new Error("Conta Mercado Livre precisa ser reconectada.");
     }
 
     const credentials = requireCredentials();
     const refreshToken = decryptSecret(connection.refreshTokenEncrypted);
-    const response = await fetch(tokenUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        client_id: credentials.clientId,
-        client_secret: credentials.clientSecret,
-        refresh_token: refreshToken
-      })
-    });
+    let refreshResponse: { response: Response; body: string };
+    try {
+      refreshResponse = await fetchMercadoLivreTokenWithTimeout({
+        url: tokenUrl,
+        signal: input.signal,
+        fetchImpl: input.fetchImpl,
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            client_id: credentials.clientId,
+            client_secret: credentials.clientSecret,
+            refresh_token: refreshToken
+          })
+        }
+      });
+    } catch (error) {
+      if (input.signal?.aborted) {
+        const reason = input.signal.reason;
+        if (isMercadoLivreOperationError(reason)) throw reason;
+        throw operation?.abortError("oauth") ?? error;
+      }
+      if (error instanceof DOMException && error.name === "TimeoutError") operation?.recordTimeout();
+      throw new Error("Nao foi possivel renovar a conexao Mercado Livre no tempo esperado.");
+    }
+
+    const { response } = refreshResponse;
 
     if (!response.ok) {
+      operation?.assertCanContinue("oauth");
       const updated = await prisma.marketplaceConnection.update({
         where: { id: connection.id },
         data: {
@@ -236,31 +303,70 @@ export class MercadoLivreClientOAuthService {
       throw new Error("Nao foi possivel renovar a conexao Mercado Livre. Reconecte a conta.");
     }
 
-    const tokenResponse = (await response.json()) as MercadoLivreManagerTokenResponse;
-    const expiresAt = new Date(Date.now() + Math.max(0, tokenResponse.expires_in - 60) * 1000);
-    const updated = await prisma.marketplaceConnection.update({
-      where: { id: connection.id },
-      data: {
-        status: "ACTIVE",
-        accessTokenEncrypted: encryptSecret(tokenResponse.access_token),
-        refreshTokenEncrypted: encryptSecret(tokenResponse.refresh_token ?? refreshToken),
-        tokenType: tokenResponse.token_type ?? connection.tokenType ?? "Bearer",
-        expiresAt,
-        scopes: tokenResponse.scope ?? connection.scopes,
-        lastError: null
+    let tokenResponse: MercadoLivreManagerTokenResponse;
+    try {
+      tokenResponse = JSON.parse(refreshResponse.body) as MercadoLivreManagerTokenResponse;
+      if (
+        typeof tokenResponse.access_token !== "string" ||
+        !tokenResponse.access_token ||
+        typeof tokenResponse.expires_in !== "number" ||
+        !Number.isFinite(tokenResponse.expires_in)
+      ) {
+        throw new Error("invalid token response");
       }
-    });
+    } catch {
+      throw new Error("Mercado Livre retornou uma resposta invalida ao renovar a conexao.");
+    }
 
-    await audit(input.organizationId, updated.userId, "ML_MANAGER_TOKEN_REFRESH_SUCCESS", {
-      provider: MarketplaceProvider.MERCADOLIVRE,
-      connectionId: updated.id,
-      status: "ACTIVE"
-    });
+    let refreshResult: {
+      tokenResponse: MercadoLivreManagerTokenResponse;
+      updated: Awaited<ReturnType<typeof prisma.marketplaceConnection.update>>;
+    };
+    try {
+      refreshResult = await persistReceivedMercadoLivreToken({
+        readToken: async () => tokenResponse,
+        persist: async (tokenResponse) => {
+          const expiresAt = new Date(Date.now() + Math.max(0, tokenResponse.expires_in - 60) * 1000);
+          const updated = await prisma.marketplaceConnection.update({
+            where: { id: connection.id },
+            data: {
+              status: "ACTIVE",
+              accessTokenEncrypted: encryptSecret(tokenResponse.access_token),
+              refreshTokenEncrypted: encryptSecret(tokenResponse.refresh_token ?? refreshToken),
+              tokenType: tokenResponse.token_type ?? connection.tokenType ?? "Bearer",
+              expiresAt,
+              scopes: tokenResponse.scope ?? connection.scopes,
+              lastError: null
+            }
+          });
 
-    return { connection: updated, accessToken: tokenResponse.access_token };
+          await audit(input.organizationId, updated.userId, "ML_MANAGER_TOKEN_REFRESH_SUCCESS", {
+            provider: MarketplaceProvider.MERCADOLIVRE,
+            connectionId: updated.id,
+            status: "ACTIVE"
+          });
+          return { tokenResponse, updated };
+        }
+      });
+    } catch {
+      console.error(
+        "mercado_livre_token_refresh_persistence_failed",
+        sanitizeLogPayload({
+          organizationId: input.organizationId,
+          connectionId: connection.id,
+          stage: "token_persistence",
+          severity: "critical"
+        })
+      );
+      throw new Error("Nao foi possivel persistir a renovacao da conexao Mercado Livre.");
+    }
+
+    return { connection: refreshResult.updated, accessToken: refreshResult.tokenResponse.access_token };
   }
 
-  async getAccessTokenForActiveConnection(organizationId: string) {
+  async getAccessTokenForActiveConnection(organizationId: string, options: { signal?: AbortSignal } = {}) {
+    const operation = getMercadoLivreOperationForSignal(options.signal);
+    operation?.assertCanStart("oauth");
     const connection = await prisma.marketplaceConnection.findUnique({
       where: {
         organizationId_provider: {
@@ -269,6 +375,7 @@ export class MercadoLivreClientOAuthService {
         }
       }
     });
+    operation?.assertCanContinue("oauth");
     if (!connection || connection.status !== "ACTIVE") {
       throw new Error("Conecte uma conta Mercado Livre do cliente antes de sincronizar anuncios.");
     }
@@ -281,7 +388,7 @@ export class MercadoLivreClientOAuthService {
 
     const expiresAt = connection.expiresAt?.getTime() ?? 0;
     if (expiresAt <= Date.now() + 60_000) {
-      return this.refreshConnectionToken({ organizationId, connectionId: connection.id });
+      return this.refreshConnectionToken({ organizationId, connectionId: connection.id, signal: options.signal });
     }
 
     return {

@@ -393,7 +393,8 @@ test("all details batches failing throws instead of returning an empty successfu
 });
 
 test("GET route propagates request.signal and the existing filter effect cancels stale work", () => {
-  assert.match(routeSource, /signal: request\.signal/);
+  assert.match(routeSource, /createMercadoLivreReadOperation\(\{ clientSignal: request\.signal \}\)/);
+  assert.match(routeSource, /signal: operation\.signal/);
   assert.match(pageSource, /const controller = new AbortController\(\)/);
   assert.match(pageSource, /signal: controller\.signal/);
   assert.match(pageSource, /return \(\) => \{[\s\S]*?controller\.abort\(\)/);
@@ -420,7 +421,7 @@ test("transient exact-search failures do not widen into the previous full scan",
 
   assert.match(exactSource, /if \(isMercadoLivreCoreRequestError\(error\)\) throw error/);
   assert.match(serviceSource, /coreComplete/);
-  assert.match(serviceSource, /partial: !coreComplete/);
+  assert.match(serviceSource, /partial: !coreComplete \|\| !enrichmentComplete/);
 });
 
 test("logs and diagnostics are sanitized and do not include authorization material", () => {

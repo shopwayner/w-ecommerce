@@ -3,6 +3,10 @@ import type { NextRequest } from "next/server";
 import { requireApiAuth } from "@/lib/auth/api";
 import { mercadoLivreClientListingsService } from "@/lib/services/marketplaces/mercado-livre-client-listings-service";
 import { isMercadoLivreCoreRequestError } from "@/lib/services/marketplaces/mercado-livre-core-request";
+import {
+  createMercadoLivreReadOperation,
+  isMercadoLivreOperationError
+} from "@/lib/services/marketplaces/mercado-livre-operation-deadline";
 
 const statusFilters = new Set(["all", "active", "paused", "closed", "under_review", "error"]);
 const listingTypeFilters = new Set(["all", "premium", "classico", "other"]);
@@ -25,6 +29,8 @@ function listingLimitParam(value: string | null, fallback: number) {
 export async function GET(request: NextRequest) {
   const auth = await requireApiAuth("integrations:read");
   if (!auth.ok) return auth.response;
+
+  const operation = createMercadoLivreReadOperation({ clientSignal: request.signal });
 
   try {
     const searchParams = request.nextUrl.searchParams;
@@ -50,10 +56,26 @@ export async function GET(request: NextRequest) {
       offset: numberParam(searchParams.get("offset"), 0),
       limit: listingLimitParam(searchParams.get("limit"), 50),
       maxListings: numberParam(searchParams.get("maxListings"), 500),
-      signal: request.signal
+      signal: operation.signal,
+      operation
     });
-    return NextResponse.json(result);
+    const response = operation.measureFinalSync(() => NextResponse.json(result));
+    operation.finish(operation.abortReason() ?? (result.partial ? "partial" : "completed"), result.partial);
+    return response;
   } catch (error) {
+    if (isMercadoLivreOperationError(error)) {
+      operation.finish(error.kind, false);
+      const response =
+        error.kind === "client_abort"
+          ? { status: 499, message: "Consulta ao Mercado Livre cancelada.", code: "ML_CLIENT_ABORT" }
+          : {
+              status: 504,
+              message: "O Mercado Livre demorou mais que o esperado. Tente novamente.",
+              code: "ML_OPERATION_DEADLINE"
+            };
+      return NextResponse.json({ error: response.message, code: response.code, externalWrite: false }, { status: response.status });
+    }
+    operation.finish("failed", false);
     if (isMercadoLivreCoreRequestError(error)) {
       const responseByKind = {
         aborted: { status: 499, message: "Consulta ao Mercado Livre cancelada." },
@@ -76,5 +98,7 @@ export async function GET(request: NextRequest) {
     const message = error instanceof Error ? error.message : "Nao foi possivel carregar anuncios Mercado Livre.";
     const status = message.includes("Conecte") || message.includes("Reconecte") ? 409 : 400;
     return NextResponse.json({ error: message, externalWrite: false }, { status });
+  } finally {
+    operation.dispose();
   }
 }
