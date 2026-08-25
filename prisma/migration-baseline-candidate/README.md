@@ -1,7 +1,8 @@
 # Prisma baseline candidate
 
-This directory contains the isolated migration chain prepared in Phase 26C.
-It is intentionally not the active `prisma/migrations` directory yet.
+This directory preserves the isolated migration candidate prepared in Phase
+26C. Phase 26D promoted byte-identical copies of its first two migrations into
+the active `prisma/migrations` directory for the cutover rehearsal.
 
 Order of the canonical chain:
 

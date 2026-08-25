@@ -8,9 +8,11 @@ under this directory is part of the active Prisma migration chain.
 - Production history: read-only query of `_prisma_migrations` on 2026-08-25,
   stored in `production-history.psv` as migration name, checksum, finished flag,
   and rolled-back flag.
-- Current Git migrations: the 13 directories still present under
+- Current Git migrations: the 13 directories that were present under
   `prisma/migrations` at `origin/main`
-  `16235bb301524ce583199c4bc8b5069d38a08c9d`.
+  `16235bb301524ce583199c4bc8b5069d38a08c9d`, preserved byte-for-byte under
+  `git-main-chain`. They are forensic evidence and are no longer executable
+  migrations in the Phase 26D branch.
 - Recovered production-only SQL: exact Git blobs reachable from historical
   commit `1a3b7bba8413d5348b27fafcb6ff048eddb5cb6d`.
 
@@ -52,5 +54,14 @@ working-tree bytes.
 | `20260727000100_add_product_full_sync_fields` | `068c688ba7368a147c505df5c49128a9739587dad066082f4a7ef42227e7f3ca` | Match |
 
 The canonical replacement remains a candidate under
-`prisma/migration-baseline-candidate`. The active history must not be replaced
-until production reconciliation is separately authorized.
+`prisma/migration-baseline-candidate`; exact copies of its two migrations are
+the active `prisma/migrations` chain in the Phase 26D rehearsal branch.
+Production history must not be replaced until reconciliation is separately
+authorized.
+
+`production-history-full-20260825.csv` is the sanitized administrative snapshot
+used by the rehearsal. It contains IDs, checksums, timestamps, names, rollback
+timestamps, and applied-step counts for 32 rows. It deliberately excludes the
+`logs` column from the repository. The complete restorable data-only SQL dump,
+including logs, was retained only as a local rehearsal artifact and had SHA-256
+`02294871ebbfd79fa18fb65ab054eb4a795fc8262428db47851e11cdaed613cf`.
