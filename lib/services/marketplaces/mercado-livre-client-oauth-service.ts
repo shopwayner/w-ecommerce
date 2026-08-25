@@ -18,6 +18,13 @@ export const MERCADO_LIVRE_TOKEN_REFRESH_TIMEOUT_MS = 8_000;
 
 export const ML_MANAGER_STATE_COOKIE = "ml_manager_oauth_state";
 
+export function mercadoLivreConnectionNeedsTokenRefresh(
+  expiresAt: Date | null | undefined,
+  nowMs = Date.now()
+) {
+  return !expiresAt || expiresAt.getTime() <= nowMs + 60_000;
+}
+
 type MercadoLivreManagerTokenResponse = {
   access_token: string;
   refresh_token?: string;
@@ -386,8 +393,7 @@ export class MercadoLivreClientOAuthService {
       throw new Error("Conta Mercado Livre precisa ser reconectada.");
     }
 
-    const expiresAt = connection.expiresAt?.getTime() ?? 0;
-    if (expiresAt <= Date.now() + 60_000) {
+    if (mercadoLivreConnectionNeedsTokenRefresh(connection.expiresAt)) {
       return this.refreshConnectionToken({ organizationId, connectionId: connection.id, signal: options.signal });
     }
 
