@@ -1,0 +1,2 @@
+/docs/migration-history-archive/production-only-recovered/**/*.sql -text whitespace=-blank-at-eof
+/prisma/migration-baseline-candidate/migrations/**/*.sql -text
