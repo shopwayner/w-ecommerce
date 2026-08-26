@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { canActivateMercadoLivreProjectionGeneration } from "./mercado-livre-listing-projection";
+import {
+  canActivateMercadoLivreProjectionGeneration,
+  getMercadoLivreProjectionReadiness,
+  sanitizeMercadoLivreProjectionError
+} from "./mercado-livre-listing-projection";
 
 const schema = readFileSync(path.join(process.cwd(), "prisma/schema.prisma"), "utf8");
 
@@ -73,4 +77,51 @@ test("coherent COMPLETE generation can become an activation candidate", () => {
     completedAt: new Date(),
     failedAt: null
   }), true);
+});
+
+test("readiness distinguishes every persisted state with and without an active snapshot", () => {
+  const complete = {
+    status: "COMPLETE" as const,
+    expectedTotal: 1,
+    storedTotal: 1,
+    completedAt: new Date(),
+    failedAt: null
+  };
+  assert.equal(getMercadoLivreProjectionReadiness({
+    stateStatus: null,
+    activeGeneration: null
+  }), "NEVER_SYNCED");
+  assert.equal(getMercadoLivreProjectionReadiness({
+    stateStatus: "SYNCING",
+    activeGeneration: null
+  }), "SYNCING_WITHOUT_SNAPSHOT");
+  assert.equal(getMercadoLivreProjectionReadiness({
+    stateStatus: "SYNCING",
+    activeGeneration: complete
+  }), "SYNCING_WITH_ACTIVE_SNAPSHOT");
+  assert.equal(getMercadoLivreProjectionReadiness({
+    stateStatus: "COMPLETE",
+    activeGeneration: complete
+  }), "READY");
+  assert.equal(getMercadoLivreProjectionReadiness({
+    stateStatus: "ERROR",
+    activeGeneration: null
+  }), "ERROR_WITHOUT_SNAPSHOT");
+  assert.equal(getMercadoLivreProjectionReadiness({
+    stateStatus: "ERROR",
+    activeGeneration: complete
+  }), "ERROR_WITH_ACTIVE_SNAPSHOT");
+});
+
+test("projection errors are stable, bounded and redact credential-shaped data", () => {
+  const sanitized = sanitizeMercadoLivreProjectionError(
+    "provider secret=private-code failure / 503",
+    `Authorization=secret Bearer token-value access_token=hidden ${"x".repeat(300)}`
+  );
+  assert.equal(sanitized.code, "PROVIDER_SECRET_REDACTED_FAILURE_503");
+  assert.ok(sanitized.code.length <= 80);
+  assert.ok(sanitized.summary.length <= 240);
+  assert.doesNotMatch(sanitized.code, /PRIVATE_CODE/);
+  assert.doesNotMatch(sanitized.summary, /secret|token-value|hidden/);
+  assert.match(sanitized.summary, /\[REDACTED\]/);
 });
