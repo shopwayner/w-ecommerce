@@ -52,7 +52,7 @@ export class MercadoLivreProjectionWorkerConfigurationError extends Error {
   }
 }
 
-type ProjectionQueue = Queue<
+export type ProjectionQueue = Queue<
   MercadoLivreProjectionSyncJobData,
   unknown,
   typeof MERCADO_LIVRE_PROJECTION_JOB_NAME
@@ -78,7 +78,13 @@ export function mercadoLivreProjectionRedisConnection(
   env: MercadoLivreProjectionWorkerEnvironment = process.env
 ): ConnectionOptions {
   requireEnabled(env);
-  const rawUrl = env.REDIS_URL?.trim();
+  return parseMercadoLivreProjectionRedisConnection(env.REDIS_URL);
+}
+
+export function parseMercadoLivreProjectionRedisConnection(
+  rawRedisUrl: string | undefined
+): ConnectionOptions {
+  const rawUrl = rawRedisUrl?.trim();
   if (!rawUrl) {
     throw new MercadoLivreProjectionWorkerConfigurationError(
       "PROJECTION_REDIS_NOT_CONFIGURED"
@@ -131,6 +137,19 @@ export function createMercadoLivreProjectionQueue(input: {
   });
 }
 
+export function createMercadoLivreProjectionQueueWithConnection(
+  connection: ConnectionOptions
+): ProjectionQueue {
+  return new Queue(MERCADO_LIVRE_LISTING_PROJECTION_QUEUE_NAME, {
+    connection,
+    defaultJobOptions: {
+      attempts: 1,
+      removeOnComplete: { count: 100 },
+      removeOnFail: { count: 500 }
+    }
+  });
+}
+
 export function getMercadoLivreProjectionQueue(input: {
   env?: MercadoLivreProjectionWorkerEnvironment;
   connection?: ConnectionOptions;
@@ -171,6 +190,54 @@ export async function enqueueMercadoLivreProjectionFullSync(
     jobId: `ml-projection-${jobDigest}`,
     attempts: 1,
     deduplication: { id: `ml-projection-${scopeDigest}` }
+  });
+}
+
+export async function enqueueScheduledMercadoLivreProjectionFullSync(
+  data: MercadoLivreProjectionSyncJobData,
+  input: {
+    slot: number;
+    queue: ProjectionQueue;
+  }
+) {
+  if (!Number.isSafeInteger(input.slot) || input.slot < 0) {
+    throw new Error("Invalid Mercado Livre projection scheduler slot.");
+  }
+  const safeData = normalizeMercadoLivreProjectionSyncJobData(data);
+  if (safeData.reason !== "PERIODIC_RECONCILIATION") {
+    throw new Error("Scheduled Mercado Livre projection jobs require PERIODIC_RECONCILIATION.");
+  }
+  const slotDigest = digest([
+    safeData.organizationId,
+    safeData.marketplaceConnectionId,
+    safeData.sellerId,
+    String(input.slot)
+  ].join("\n"));
+  const identity = `ml-projection-scheduled-${slotDigest}`;
+  return input.queue.add(MERCADO_LIVRE_PROJECTION_JOB_NAME, safeData, {
+    jobId: identity,
+    attempts: 1,
+    deduplication: { id: identity }
+  });
+}
+
+export async function hasPendingMercadoLivreProjectionJob(
+  queue: ProjectionQueue,
+  target: Pick<
+    MercadoLivreProjectionSyncJobData,
+    "organizationId" | "marketplaceConnectionId" | "sellerId"
+  >
+) {
+  const jobs = await queue.getJobs(["waiting", "active", "delayed"], 0, -1, true);
+  return jobs.some((job) => {
+    try {
+      const data = normalizeMercadoLivreProjectionSyncJobData(job.data);
+      return data.organizationId === target.organizationId
+        && data.marketplaceConnectionId === target.marketplaceConnectionId
+        && data.sellerId === target.sellerId;
+    } catch {
+      return false;
+    }
   });
 }
 

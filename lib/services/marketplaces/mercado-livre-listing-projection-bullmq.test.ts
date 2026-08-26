@@ -5,7 +5,9 @@ import {
   MERCADO_LIVRE_PROJECTION_JOB_NAME,
   MERCADO_LIVRE_PROJECTION_WORKER_FLAG,
   MercadoLivreProjectionWorkerConfigurationError,
+  enqueueScheduledMercadoLivreProjectionFullSync,
   enqueueMercadoLivreProjectionFullSync,
+  hasPendingMercadoLivreProjectionJob,
   isMercadoLivreProjectionWorkerEnabled,
   mercadoLivreProjectionRedisConnection
 } from "./mercado-livre-listing-projection-bullmq";
@@ -118,6 +120,70 @@ test("producer uses attempts one and a scope deduplication key without credentia
   assert.match(String(captured.options.jobId), /^ml-projection-[a-f0-9]{64}$/);
   assert.deepEqual(Object.keys(captured.options.deduplication as object), ["id"]);
   assert.doesNotMatch(JSON.stringify(captured), /accessToken|refreshToken|Authorization|Bearer|secret/i);
+});
+
+test("scheduled producer deduplicates one target per cadence slot without blocking future slots", async () => {
+  const calls: Array<Record<string, unknown>> = [];
+  const queue = {
+    async add(_name: unknown, _data: unknown, options: Record<string, unknown>) {
+      calls.push(options);
+      return { id: options.jobId };
+    }
+  };
+  const data = {
+    organizationId: "organization-1",
+    marketplaceConnectionId: "connection-1",
+    sellerId: "seller-1",
+    correlationId: "scheduler-100-safe",
+    reason: "PERIODIC_RECONCILIATION" as const,
+    requestedBy: "projection-scheduler"
+  };
+  await enqueueScheduledMercadoLivreProjectionFullSync(data, {
+    slot: 100,
+    queue: queue as never
+  });
+  await enqueueScheduledMercadoLivreProjectionFullSync(data, {
+    slot: 100,
+    queue: queue as never
+  });
+  await enqueueScheduledMercadoLivreProjectionFullSync({
+    ...data,
+    correlationId: "scheduler-101-safe"
+  }, {
+    slot: 101,
+    queue: queue as never
+  });
+  assert.equal(calls[0].jobId, calls[1].jobId);
+  assert.notEqual(calls[1].jobId, calls[2].jobId);
+  assert.equal(calls[0].attempts, 1);
+  assert.match(String(calls[0].jobId), /^ml-projection-scheduled-[a-f0-9]{64}$/);
+  assert.doesNotMatch(JSON.stringify(calls), /organization-1|connection-1|seller-1/);
+});
+
+test("pending job detection considers waiting, active and delayed work for the exact target", async () => {
+  const queue = {
+    async getJobs() {
+      return [{
+        data: {
+          organizationId: "organization-1",
+          marketplaceConnectionId: "connection-1",
+          sellerId: "seller-1",
+          correlationId: "safe",
+          reason: "PERIODIC_RECONCILIATION"
+        }
+      }];
+    }
+  };
+  assert.equal(await hasPendingMercadoLivreProjectionJob(queue as never, {
+    organizationId: "organization-1",
+    marketplaceConnectionId: "connection-1",
+    sellerId: "seller-1"
+  }), true);
+  assert.equal(await hasPendingMercadoLivreProjectionJob(queue as never, {
+    organizationId: "organization-1",
+    marketplaceConnectionId: "connection-1",
+    sellerId: "other-seller"
+  }), false);
 });
 
 test("BullMQ module has no import-time worker, queue or producer side effect", () => {

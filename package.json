@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "worker:ml-projection": "tsx scripts/workers/mercado-livre-projection-worker.ts",
+    "scheduler:ml-projection": "tsx scripts/workers/mercado-livre-projection-scheduler.ts",
     "lint": "next lint",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
