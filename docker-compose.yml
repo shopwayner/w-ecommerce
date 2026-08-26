@@ -23,6 +23,30 @@ services:
       - w-ecommerce-network
     restart: unless-stopped
 
+  ml-projection-worker:
+    container_name: w-ecommerce-ml-projection-worker
+    image: w-ecommerce-app:latest
+    profiles:
+      - ml-projection-worker
+    env_file:
+      - ${W_ECOMMERCE_ENV_FILE:-.env.production}
+    environment:
+      NODE_ENV: production
+      MERCADO_LIVRE_PROJECTION_WORKER_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command:
+      - ./node_modules/.bin/tsx
+      - scripts/workers/mercado-livre-projection-worker.ts
+    init: true
+    stop_grace_period: 2m
+    networks:
+      - w-ecommerce-network
+    restart: "no"
+
   postgres:
     container_name: w-ecommerce-postgres
     image: postgres:17-bookworm
