@@ -44,7 +44,9 @@ function requiredJobText(value: unknown, field: string) {
   return normalized;
 }
 
-function normalizedJobData(input: MercadoLivreProjectionSyncJobData) {
+export function normalizeMercadoLivreProjectionSyncJobData(
+  input: MercadoLivreProjectionSyncJobData
+) {
   if (!MERCADO_LIVRE_PROJECTION_SYNC_TRIGGER_REASONS.includes(input.reason)) {
     throw new Error("Invalid Mercado Livre projection job reason.");
   }
@@ -71,7 +73,7 @@ export async function processMercadoLivreProjectionSyncJob(
     options?: MercadoLivreProjectionSyncJobOptions;
   }
 ): Promise<MercadoLivreProjectionFullSyncResult> {
-  const safeJob = normalizedJobData(jobData);
+  const safeJob = normalizeMercadoLivreProjectionSyncJobData(jobData);
   return dependencies.fullSyncService.fullSync({
     organizationId: safeJob.organizationId,
     marketplaceConnectionId: safeJob.marketplaceConnectionId,

@@ -128,7 +128,7 @@ type MercadoLivreVariation = {
   attribute_combinations?: MercadoLivreAttribute[];
 };
 
-type MercadoLivreItemBody = {
+export type MercadoLivreItemBody = {
   id?: string;
   seller_id?: number | string;
   title?: string;
@@ -213,7 +213,7 @@ export type MercadoLivreShippingCacheBackfillQuote = {
   shippingCost: ListingShippingCostEstimate | null;
 };
 
-type MercadoLivreMultiGetEntry = {
+export type MercadoLivreMultiGetEntry = {
   code?: number;
   body?: MercadoLivreItemBody;
 };
@@ -741,7 +741,10 @@ function listingTypeLabel(value: string | null) {
   return value || "-";
 }
 
-function normalizeListing(item: MercadoLivreItemBody, syncedAt: Date): MercadoLivreClientListing | null {
+export function normalizeMercadoLivreClientListing(
+  item: MercadoLivreItemBody,
+  syncedAt: Date
+): MercadoLivreClientListing | null {
   const externalId = normalizeMercadoLivreId(item.id);
   const title = typeof item.title === "string" ? item.title.trim() : null;
   if (!externalId || !title) return null;
@@ -1765,7 +1768,7 @@ async function tryMercadoLivreExactSearch(input: {
       };
     }
 
-    const listing = normalizeListing(response.data, input.syncedAt);
+    const listing = normalizeMercadoLivreClientListing(response.data, input.syncedAt);
     const returnedSellerId = normalizeMercadoLivreId(response.data.seller_id);
     if (!returnedSellerId) {
       return { outcome: "fallback", accessToken: response.accessToken, candidateCount: 1, listings: [] };
@@ -1918,7 +1921,9 @@ async function tryMercadoLivreExactSearch(input: {
     }
     const externalId = normalizeMercadoLivreId(entry.body?.id)?.toUpperCase() ?? null;
     const returnedSellerId = normalizeMercadoLivreId(entry.body?.seller_id);
-    const listing = entry.body ? normalizeListing(entry.body, input.syncedAt) : null;
+    const listing = entry.body
+      ? normalizeMercadoLivreClientListing(entry.body, input.syncedAt)
+      : null;
     if (!externalId || !expectedIds.has(externalId) || !listing) {
       return { outcome: "fallback", accessToken: response.accessToken, candidateCount: candidateIds.length, listings: [] };
     }
@@ -2325,7 +2330,9 @@ export async function fetchListingDetailsReadOnly(input: {
         sellerMismatchFound = true;
         continue;
       }
-      const normalized = entry.body ? normalizeListing(entry.body, input.syncedAt) : null;
+      const normalized = entry.body
+        ? normalizeMercadoLivreClientListing(entry.body, input.syncedAt)
+        : null;
       if (normalized) listings.push(normalized);
     }
   }
