@@ -14,7 +14,7 @@ const TRANSACTION_OPTIONS = {
 type ProjectionDatabase = Pick<typeof prisma, "$transaction">;
 type ProjectionTransaction = Prisma.TransactionClient;
 
-type ProjectionScope = {
+export type MercadoLivreProjectionScope = {
   organizationId: string;
   marketplaceConnectionId: string;
   sellerId: string;
@@ -37,6 +37,7 @@ export type MercadoLivreProjectionListingInput = {
   permalink?: string | null;
   dateCreated?: Date | string | null;
   remoteUpdatedAt?: Date | string | null;
+  syncedAt?: Date | string | null;
 };
 
 export type NormalizedMercadoLivreProjectionListing = {
@@ -56,6 +57,7 @@ export type NormalizedMercadoLivreProjectionListing = {
   permalink: string | null;
   dateCreated: Date | null;
   remoteUpdatedAt: Date | null;
+  syncedAt: Date | null;
 };
 
 export class MercadoLivreListingProjectionError extends Error {
@@ -124,7 +126,7 @@ function expectedTotal(value: number | null | undefined) {
   return nullableFiniteNumber(value, "expectedTotal", { integer: true, min: 0 });
 }
 
-function normalizedScope(input: ProjectionScope): ProjectionScope {
+function normalizedScope(input: MercadoLivreProjectionScope): MercadoLivreProjectionScope {
   return {
     organizationId: requiredText(input.organizationId, "organizationId", 191),
     marketplaceConnectionId: requiredText(
@@ -173,11 +175,12 @@ export function normalizeMercadoLivreProjectionListing(
     categoryId: nullableText(input.categoryId, "categoryId", 120),
     permalink: nullableText(input.permalink, "permalink"),
     dateCreated: nullableDate(input.dateCreated, "dateCreated"),
-    remoteUpdatedAt: nullableDate(input.remoteUpdatedAt, "remoteUpdatedAt")
+    remoteUpdatedAt: nullableDate(input.remoteUpdatedAt, "remoteUpdatedAt"),
+    syncedAt: nullableDate(input.syncedAt, "syncedAt")
   };
 }
 
-function projectionLockKey(scope: ProjectionScope) {
+function projectionLockKey(scope: MercadoLivreProjectionScope) {
   return [
     "mercado-livre-listing-projection",
     scope.organizationId,
@@ -188,7 +191,7 @@ function projectionLockKey(scope: ProjectionScope) {
 
 async function lockProjectionScope(
   transaction: ProjectionTransaction,
-  scope: ProjectionScope
+  scope: MercadoLivreProjectionScope
 ) {
   const lockKey = projectionLockKey(scope);
   await transaction.$queryRaw<Array<{ lockState: string }>>`
@@ -198,7 +201,7 @@ async function lockProjectionScope(
 
 async function assertConnectionScope(
   transaction: ProjectionTransaction,
-  scope: ProjectionScope
+  scope: MercadoLivreProjectionScope
 ) {
   const connection = await transaction.marketplaceConnection.findUnique({
     where: {
@@ -220,7 +223,7 @@ async function assertConnectionScope(
 
 async function findScopedGeneration(
   transaction: ProjectionTransaction,
-  scope: ProjectionScope,
+  scope: MercadoLivreProjectionScope,
   generationId: string
 ) {
   const generation = await transaction.mercadoLivreListingProjectionGeneration.findFirst({
@@ -260,11 +263,11 @@ async function runProjectionTransaction<T>(
   }
 }
 
-type BeginProjectionGenerationInput = ProjectionScope & {
+type BeginProjectionGenerationInput = MercadoLivreProjectionScope & {
   expectedTotal?: number | null;
 };
 
-type GenerationOperationInput = ProjectionScope & {
+type GenerationOperationInput = MercadoLivreProjectionScope & {
   generationId: string;
 };
 
@@ -315,6 +318,14 @@ async function markGenerationError(
 
 export class MercadoLivreListingProjectionService {
   constructor(private readonly database: ProjectionDatabase = prisma) {}
+
+  async validateProjectionScope(input: MercadoLivreProjectionScope) {
+    const scope = normalizedScope(input);
+    return runProjectionTransaction(this.database, async (transaction) => {
+      await assertConnectionScope(transaction, scope);
+      return scope;
+    });
+  }
 
   async beginProjectionGeneration(input: BeginProjectionGenerationInput) {
     const scope = normalizedScope(input);
@@ -417,7 +428,7 @@ export class MercadoLivreListingProjectionService {
           permalink: listing.permalink,
           dateCreated: listing.dateCreated,
           remoteUpdatedAt: listing.remoteUpdatedAt,
-          syncedAt: new Date()
+          syncedAt: listing.syncedAt ?? new Date()
         };
         await transaction.mercadoLivreListingProjection.upsert({
           where: { generationId_mlbId: { generationId, mlbId: listing.mlbId } },
@@ -632,7 +643,7 @@ export class MercadoLivreListingProjectionService {
     });
   }
 
-  async getProjectionReadiness(input: ProjectionScope): Promise<{
+  async getProjectionReadiness(input: MercadoLivreProjectionScope): Promise<{
     readiness: MercadoLivreProjectionReadiness;
     activeGenerationId: string | null;
   }> {

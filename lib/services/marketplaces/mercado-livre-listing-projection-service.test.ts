@@ -34,6 +34,18 @@ test("normalization preserves unknown, zero and positive available quantities", 
   }).availableQuantity, 3);
 });
 
+test("normalization preserves an explicit projection synchronization timestamp", () => {
+  const syncedAt = "2026-08-24T12:34:56.000Z";
+  const normalized = normalizeMercadoLivreProjectionListing({
+    mlbId: "MLB-SYNCED-AT",
+    title: "Produto",
+    status: "active",
+    listingTypeId: "gold_special",
+    syncedAt
+  });
+  assert.equal(normalized.syncedAt?.toISOString(), syncedAt);
+});
+
 test("normalization rejects empty identity, invalid currency, numbers and timestamps", () => {
   const base = {
     mlbId: "MLB123",
