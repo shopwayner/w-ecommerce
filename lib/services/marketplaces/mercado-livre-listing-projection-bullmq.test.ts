@@ -204,4 +204,5 @@ test("environment example documents the worker as disabled", () => {
     "utf8"
   );
   assert.match(envExample, /^MERCADO_LIVRE_PROJECTION_WORKER_ENABLED=false$/m);
+  assert.match(envExample, /^MERCADO_LIVRE_PROJECTION_RETENTION_ENABLED=false$/m);
 });

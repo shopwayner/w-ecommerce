@@ -41,6 +41,7 @@ export type MercadoLivreProjectionWorkerRuntimeEvent = {
     | "projection_worker_job_completed"
     | "projection_worker_job_failed"
     | "projection_worker_telemetry"
+    | "projection_worker_retention_warning"
     | "projection_worker_http_telemetry"
     | "projection_worker_error"
     | "projection_worker_stopping"
@@ -95,6 +96,8 @@ function healthEvent(health: MercadoLivreProjectionWorkerHealth) {
     lastOutcome: health.lastOutcome,
     lastDurationMs: health.lastDurationMs,
     lastErrorCode: health.lastErrorCode,
+    lastRetentionOutcome: health.lastRetentionOutcome,
+    lastRetentionErrorCode: health.lastRetentionErrorCode,
     progress: health.progress
   };
 }
@@ -114,7 +117,13 @@ function telemetryEvent(telemetry: MercadoLivreProjectionWorkerTelemetry) {
     maxConcurrency: telemetry.maxConcurrency,
     durationMs: telemetry.durationMs,
     status: telemetry.status,
-    errorCode: telemetry.errorCode
+    errorCode: telemetry.errorCode,
+    retentionEnabled: telemetry.retentionEnabled,
+    retentionOutcome: telemetry.retentionOutcome,
+    retentionDeletedGenerations: telemetry.retentionDeletedGenerations,
+    retentionDeletedListings: telemetry.retentionDeletedListings,
+    retentionDurationMs: telemetry.retentionDurationMs,
+    retentionErrorCode: telemetry.retentionErrorCode
   };
 }
 
@@ -253,6 +262,17 @@ export async function startMercadoLivreProjectionWorkerRuntime(
     },
     onTelemetry(telemetry) {
       log(telemetryEvent(telemetry));
+      if (telemetry.retentionOutcome === "FAILED") {
+        log({
+          event: "projection_worker_retention_warning",
+          jobId: telemetry.jobId,
+          correlationId: telemetry.correlationId,
+          generationId: telemetry.generationId,
+          retentionOutcome: telemetry.retentionOutcome,
+          retentionDurationMs: telemetry.retentionDurationMs,
+          retentionErrorCode: telemetry.retentionErrorCode
+        });
+      }
       const httpTelemetry = httpTelemetryByCorrelation.get(telemetry.correlationId);
       if (httpTelemetry) {
         log(httpTelemetryEvent({

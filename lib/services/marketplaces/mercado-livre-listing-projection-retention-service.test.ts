@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   MERCADO_LIVRE_PROJECTION_RETENTION_DEFAULT_COMPLETE_GENERATIONS,
   MERCADO_LIVRE_PROJECTION_RETENTION_DEFAULT_ERROR_GENERATIONS,
+  MERCADO_LIVRE_PROJECTION_RETENTION_FLAG,
+  isMercadoLivreProjectionRetentionEnabled,
   parseMercadoLivreProjectionRetentionPolicy
 } from "./mercado-livre-listing-projection-retention-config";
 import {
@@ -87,6 +89,26 @@ test("retention configuration uses centralized safe defaults", () => {
   }), { retainComplete: 12, retainError: 6 });
 });
 
+test("post-sync retention feature flag fails closed", () => {
+  assert.equal(isMercadoLivreProjectionRetentionEnabled({}), false);
+  assert.equal(isMercadoLivreProjectionRetentionEnabled({
+    MERCADO_LIVRE_PROJECTION_RETENTION_ENABLED: "false"
+  }), false);
+  assert.equal(isMercadoLivreProjectionRetentionEnabled({
+    MERCADO_LIVRE_PROJECTION_RETENTION_ENABLED: "TRUE"
+  }), false);
+  assert.equal(isMercadoLivreProjectionRetentionEnabled({
+    MERCADO_LIVRE_PROJECTION_RETENTION_ENABLED: "invalid"
+  }), false);
+  assert.equal(isMercadoLivreProjectionRetentionEnabled({
+    MERCADO_LIVRE_PROJECTION_RETENTION_ENABLED: "true"
+  }), true);
+  assert.equal(
+    MERCADO_LIVRE_PROJECTION_RETENTION_FLAG,
+    "MERCADO_LIVRE_PROJECTION_RETENTION_ENABLED"
+  );
+});
+
 for (const count of [0, 1, 4, 7, 8]) {
   test(`${count} COMPLETE generations remain under the retention limit`, () => {
     const result = plan({ complete: count });
@@ -155,10 +177,11 @@ test("plan output contains technical metadata only", () => {
   assert.doesNotMatch(serialized, /title|sku|gtin|price|token|payload/i);
 });
 
-test("retention reuses lifecycle lock semantics and has no automatic wiring", async () => {
-  const [retention, lifecycle, worker, scheduler] = await Promise.all([
+test("retention reuses lifecycle lock semantics and is wired only after the sync job", async () => {
+  const [retention, lifecycle, syncJob, worker, scheduler] = await Promise.all([
     readFile("lib/services/marketplaces/mercado-livre-listing-projection-retention-service.ts", "utf8"),
     readFile("lib/services/marketplaces/mercado-livre-listing-projection-service.ts", "utf8"),
+    readFile("lib/services/marketplaces/mercado-livre-listing-projection-sync-job.ts", "utf8"),
     readFile("lib/services/marketplaces/mercado-livre-listing-projection-bullmq.ts", "utf8"),
     readFile("lib/services/marketplaces/mercado-livre-listing-projection-scheduler.ts", "utf8")
   ]);
@@ -166,7 +189,11 @@ test("retention reuses lifecycle lock semantics and has no automatic wiring", as
     assert.match(source, /"mercado-livre-listing-projection"/);
     assert.match(source, /pg_advisory_xact_lock\(hashtext\(\$\{lockKey\}\)\)::text/);
   }
-  assert.doesNotMatch(worker, /ProjectionRetention|planRetention|applyRetention/);
+  assert.match(syncJob, /fullSyncService\.fullSync/);
+  assert.match(syncJob, /runPostSyncRetention/);
+  assert.match(syncJob, /planRetention/);
+  assert.match(syncJob, /applyRetention/);
+  assert.doesNotMatch(worker, /\.planRetention\(|\.applyRetention\(/);
   assert.doesNotMatch(scheduler, /ProjectionRetention|planRetention|applyRetention/);
   assert.doesNotMatch(retention, /fetch\(|OAuth|BullMQ|setInterval|cron/i);
 });

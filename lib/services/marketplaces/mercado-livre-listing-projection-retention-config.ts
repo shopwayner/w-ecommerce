@@ -1,10 +1,13 @@
 export const MERCADO_LIVRE_PROJECTION_RETENTION_DEFAULT_COMPLETE_GENERATIONS = 8;
 export const MERCADO_LIVRE_PROJECTION_RETENTION_DEFAULT_ERROR_GENERATIONS = 4;
+export const MERCADO_LIVRE_PROJECTION_RETENTION_FLAG =
+  "MERCADO_LIVRE_PROJECTION_RETENTION_ENABLED";
 
 const MAX_RETENTION_GENERATIONS = 10_000;
 
 export type MercadoLivreProjectionRetentionEnvironment = {
   [key: string]: string | undefined;
+  MERCADO_LIVRE_PROJECTION_RETENTION_ENABLED?: string;
   MERCADO_LIVRE_PROJECTION_RETENTION_COMPLETE_GENERATIONS?: string;
   MERCADO_LIVRE_PROJECTION_RETENTION_ERROR_GENERATIONS?: string;
 };
@@ -13,6 +16,12 @@ export type MercadoLivreProjectionRetentionPolicy = {
   retainComplete: number;
   retainError: number;
 };
+
+export function isMercadoLivreProjectionRetentionEnabled(
+  env: MercadoLivreProjectionRetentionEnvironment = process.env
+) {
+  return env.MERCADO_LIVRE_PROJECTION_RETENTION_ENABLED === "true";
+}
 
 function parseRetentionLimit(value: string | undefined, fallback: number) {
   if (value === undefined || value.trim() === "") return fallback;

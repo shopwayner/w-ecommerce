@@ -15,8 +15,16 @@ import {
   MERCADO_LIVRE_LISTING_PROJECTION_QUEUE_NAME,
   normalizeMercadoLivreProjectionSyncJobData,
   processMercadoLivreProjectionSyncJob,
+  type MercadoLivreProjectionRetentionOutcome,
+  type MercadoLivreProjectionRetentionTelemetry,
   type MercadoLivreProjectionSyncJobData
 } from "@/lib/services/marketplaces/mercado-livre-listing-projection-sync-job";
+import {
+  isMercadoLivreProjectionRetentionEnabled
+} from "@/lib/services/marketplaces/mercado-livre-listing-projection-retention-config";
+import type {
+  MercadoLivreListingProjectionRetentionService
+} from "@/lib/services/marketplaces/mercado-livre-listing-projection-retention-service";
 import type { MercadoLivreProjectionSyncSource } from "@/lib/services/marketplaces/mercado-livre-listing-projection-source";
 
 export const MERCADO_LIVRE_PROJECTION_WORKER_FLAG =
@@ -36,6 +44,8 @@ export type MercadoLivreProjectionWorkerHealth = {
   lastOutcome: "COMPLETE" | "ERROR" | null;
   lastDurationMs: number | null;
   lastErrorCode: string | null;
+  lastRetentionOutcome: MercadoLivreProjectionRetentionOutcome | null;
+  lastRetentionErrorCode: string | null;
   progress: MercadoLivreProjectionFullSyncProgress | null;
 };
 
@@ -43,7 +53,7 @@ export type MercadoLivreProjectionWorkerTelemetry =
   MercadoLivreProjectionFullSyncTelemetry & {
     jobId: string;
     reason: MercadoLivreProjectionSyncJobData["reason"];
-  };
+  } & MercadoLivreProjectionRetentionTelemetry;
 
 export class MercadoLivreProjectionWorkerConfigurationError extends Error {
   constructor(readonly code: string) {
@@ -256,6 +266,10 @@ export function createMercadoLivreProjectionWorker(input: {
   serviceFactory?: (
     source: MercadoLivreProjectionSyncSource
   ) => MercadoLivreListingProjectionFullSyncService;
+  retentionService?: Pick<
+    MercadoLivreListingProjectionRetentionService,
+    "planRetention" | "applyRetention"
+  >;
   onTelemetry?: (event: MercadoLivreProjectionWorkerTelemetry) => void;
 }) {
   const env = input.env ?? process.env;
@@ -267,6 +281,8 @@ export function createMercadoLivreProjectionWorker(input: {
     lastOutcome: null,
     lastDurationMs: null,
     lastErrorCode: null,
+    lastRetentionOutcome: null,
+    lastRetentionErrorCode: null,
     progress: null
   };
   const sourceFactory = input.sourceFactory ?? (() => new MercadoLivreHttpProjectionSyncSource());
@@ -287,25 +303,41 @@ export function createMercadoLivreProjectionWorker(input: {
       activeController = controller;
       health.activeJobId = jobId;
       health.progress = null;
+      const telemetryState: {
+        latest: MercadoLivreProjectionFullSyncTelemetry | null;
+      } = { latest: null };
       try {
         const result = await processMercadoLivreProjectionSyncJob(safeData, {
           fullSyncService: serviceFactory(sourceFactory(safeData)),
+          retentionService: input.retentionService,
+          environment: env,
           options: {
             signal: controller.signal,
             onProgress: (progress) => {
               health.progress = progress;
             },
             onTelemetry: (telemetry) => {
-              input.onTelemetry?.({
-                ...telemetry,
-                jobId,
-                reason: safeData.reason
-              });
+              telemetryState.latest = telemetry;
             }
           }
         });
         health.lastOutcome = "COMPLETE";
         health.lastErrorCode = null;
+        health.lastRetentionOutcome = result.retentionOutcome;
+        health.lastRetentionErrorCode = result.retentionErrorCode;
+        if (telemetryState.latest) {
+          input.onTelemetry?.({
+            ...telemetryState.latest,
+            jobId,
+            reason: safeData.reason,
+            retentionEnabled: result.retentionEnabled,
+            retentionOutcome: result.retentionOutcome,
+            retentionDeletedGenerations: result.retentionDeletedGenerations,
+            retentionDeletedListings: result.retentionDeletedListings,
+            retentionDurationMs: result.retentionDurationMs,
+            retentionErrorCode: result.retentionErrorCode
+          });
+        }
         return result;
       } catch (error) {
         health.lastOutcome = "ERROR";
@@ -313,6 +345,21 @@ export function createMercadoLivreProjectionWorker(input: {
           error && typeof error === "object" && "code" in error
             ? String((error as { code: unknown }).code).slice(0, 120)
             : "PROJECTION_WORKER_JOB_FAILED";
+        health.lastRetentionOutcome = "NOT_RUN_SYNC_FAILED";
+        health.lastRetentionErrorCode = null;
+        if (telemetryState.latest) {
+          input.onTelemetry?.({
+            ...telemetryState.latest,
+            jobId,
+            reason: safeData.reason,
+            retentionEnabled: isMercadoLivreProjectionRetentionEnabled(env),
+            retentionOutcome: "NOT_RUN_SYNC_FAILED",
+            retentionDeletedGenerations: 0,
+            retentionDeletedListings: 0,
+            retentionDurationMs: 0,
+            retentionErrorCode: null
+          });
+        }
         throw error;
       } finally {
         if (activeController === controller) activeController = null;

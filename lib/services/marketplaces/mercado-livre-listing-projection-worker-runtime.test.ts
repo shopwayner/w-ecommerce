@@ -34,7 +34,9 @@ function fakeController(input: {
     lastDurationMs: null,
     lastErrorCode: null,
     progress: null,
-    ...input.health
+    ...input.health,
+    lastRetentionOutcome: input.health?.lastRetentionOutcome ?? null,
+    lastRetentionErrorCode: input.health?.lastRetentionErrorCode ?? null
   };
   return {
     worker,
@@ -137,7 +139,13 @@ test("runtime emits only sanitized job and error telemetry", async () => {
           maxConcurrency: 1,
           durationMs: 10,
           status: "COMPLETE",
-          errorCode: null
+          errorCode: null,
+          retentionEnabled: true,
+          retentionOutcome: "FAILED",
+          retentionDeletedGenerations: 0,
+          retentionDeletedListings: 0,
+          retentionDurationMs: 0,
+          retentionErrorCode: "PROJECTION_RETENTION_CONTROLLED_FAILURE"
         });
         return controller;
       }) as unknown as typeof createMercadoLivreProjectionWorker
@@ -150,6 +158,8 @@ test("runtime emits only sanitized job and error telemetry", async () => {
   ));
   await runtime.close();
   assert.match(JSON.stringify(events), /SAFE_FAILURE_CODE/);
+  assert.match(JSON.stringify(events), /projection_worker_retention_warning/);
+  assert.match(JSON.stringify(events), /PROJECTION_RETENTION_CONTROLLED_FAILURE/);
   assert.doesNotMatch(JSON.stringify(events), /must not be logged/);
   assert.doesNotMatch(
     JSON.stringify(events),

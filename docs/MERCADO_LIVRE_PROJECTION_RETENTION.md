@@ -1,7 +1,13 @@
 # Mercado Livre Projection Retention
 
-The retention service is dark infrastructure. It is not called by the worker, scheduler,
-web application, startup, cron, or BullMQ.
+The retention service is dark infrastructure. The BullMQ job handler can call it only
+after a full sync has committed and activated a COMPLETE generation, and only when
+`MERCADO_LIVRE_PROJECTION_RETENTION_ENABLED` is the literal `true`. Missing, false,
+or invalid values keep it disabled. Production defaults to disabled.
+
+The scheduler, web application, startup and direct full-sync service do not call
+retention. A retention failure is reported separately and does not invalidate or roll
+back the newly active snapshot. The BullMQ job remains completed and is not retried.
 
 ## Policy
 
@@ -26,5 +32,6 @@ The existing foreign key from projection listings to their generation uses
 `ON DELETE CASCADE`. Apply therefore deletes eligible generations in one scoped database
 operation and verifies that no listing rows remain. No schema migration is required.
 
-Production apply remains forbidden until a separately authorized retention phase with a
-fresh backup. Deploying this service does not delete any generation automatically.
+Production apply remains forbidden while the feature flag is disabled. Enabling it
+requires a separately authorized phase with a fresh backup. Deploying this integration
+with the flag absent or false does not plan or delete any generation.
