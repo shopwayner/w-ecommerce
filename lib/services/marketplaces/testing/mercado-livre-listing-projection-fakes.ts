@@ -174,6 +174,7 @@ export class FakeMercadoLivreProjectionLifecycle {
 
   async beginProjectionGeneration(input: MercadoLivreProjectionScope & {
     expectedTotal?: number | null;
+    generationId?: string;
   }) {
     if ([...this.generations.values()].some((generation) => generation.status === "BUILDING")) {
       throw new MercadoLivreListingProjectionError(
@@ -184,7 +185,7 @@ export class FakeMercadoLivreProjectionLifecycle {
     this.beginCalls += 1;
     this.sequence += 1;
     const generation: FakeGeneration = {
-      id: `fake-generation-${this.sequence}`,
+      id: input.generationId ?? `fake-generation-${this.sequence}`,
       status: "BUILDING",
       expectedTotal: input.expectedTotal ?? null,
       rows: new Map(),
@@ -200,6 +201,20 @@ export class FakeMercadoLivreProjectionLifecycle {
     } as unknown as Awaited<
       ReturnType<MercadoLivreProjectionLifecycle["beginProjectionGeneration"]>
     >;
+  }
+
+  async inspectProjectionGeneration(input: MercadoLivreProjectionScope & {
+    generationId: string;
+  }) {
+    const generation = this.generations.get(input.generationId);
+    if (!generation) return null;
+    return {
+      generationId: generation.id,
+      status: generation.status,
+      expectedTotal: generation.expectedTotal,
+      storedTotal: generation.rows.size,
+      activeGenerationId: this.activeGenerationId
+    };
   }
 
   async stageProjectionListings(input: MercadoLivreProjectionScope & {

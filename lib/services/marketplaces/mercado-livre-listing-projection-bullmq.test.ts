@@ -5,11 +5,15 @@ import {
   MERCADO_LIVRE_PROJECTION_JOB_NAME,
   MERCADO_LIVRE_PROJECTION_WORKER_FLAG,
   MercadoLivreProjectionWorkerConfigurationError,
+  createMercadoLivreProjectionRecoveryGenerationId,
   enqueueScheduledMercadoLivreProjectionFullSync,
   enqueueMercadoLivreProjectionFullSync,
   hasPendingMercadoLivreProjectionJob,
   isMercadoLivreProjectionWorkerEnabled,
-  mercadoLivreProjectionRedisConnection
+  mercadoLivreProjectionRedisConnection,
+  mercadoLivreProjectionStalledRecoverySignal,
+  normalizeMercadoLivreProjectionPersistedJobData,
+  prepareMercadoLivreProjectionJobRecovery
 } from "./mercado-livre-listing-projection-bullmq";
 import {
   MERCADO_LIVRE_LISTING_PROJECTION_QUEUE_NAME,
@@ -93,6 +97,76 @@ test("job contract remains allowlisted and contains no credentials", () => {
   ]);
   assert.equal(MERCADO_LIVRE_LISTING_PROJECTION_QUEUE_NAME, "mercado-livre-listing-projection");
   assert.equal(MERCADO_LIVRE_PROJECTION_JOB_NAME, "full-sync");
+});
+
+test("public producer data cannot inject internal recovery state", () => {
+  const input = {
+    organizationId: "organization-1",
+    marketplaceConnectionId: "connection-1",
+    sellerId: "seller-1",
+    correlationId: "correlation-1",
+    reason: "MANUAL_REFRESH" as const,
+    recoveryGenerationId: "mlpr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  };
+  const publicData = normalizeMercadoLivreProjectionSyncJobData(input);
+  assert.equal("recoveryGenerationId" in publicData, false);
+  assert.equal(
+    normalizeMercadoLivreProjectionPersistedJobData(input).recoveryGenerationId,
+    input.recoveryGenerationId
+  );
+  assert.match(
+    createMercadoLivreProjectionRecoveryGenerationId(),
+    /^mlpr_[a-f0-9]{32}$/
+  );
+  assert.throws(
+    () => normalizeMercadoLivreProjectionPersistedJobData({
+      ...input,
+      recoveryGenerationId: "../foreign-generation"
+    }),
+    /Projection recovery generation ID is invalid/
+  );
+});
+
+test("BullMQ stalled recovery requires the persisted stalled and start counters", () => {
+  assert.equal(mercadoLivreProjectionStalledRecoverySignal({
+    stalledCounter: 0,
+    attemptsStarted: 1,
+    attemptsMade: 0
+  }), false);
+  assert.equal(mercadoLivreProjectionStalledRecoverySignal({
+    stalledCounter: 1,
+    attemptsStarted: 2,
+    attemptsMade: 0
+  }), true);
+  assert.throws(() => mercadoLivreProjectionStalledRecoverySignal({
+    stalledCounter: 1,
+    attemptsStarted: 1,
+    attemptsMade: 0
+  }), /Projection stalled signal is inconsistent/);
+});
+
+test("recovery ID persistence happens after scope validation and fails before processing", async () => {
+  const order: string[] = [];
+  const failure = new Error("controlled Redis write failure");
+  await assert.rejects(prepareMercadoLivreProjectionJobRecovery({
+    jobData: {
+      organizationId: "organization-1",
+      marketplaceConnectionId: "connection-1",
+      sellerId: "seller-1",
+      correlationId: "correlation-1",
+      reason: "MANUAL_REFRESH"
+    },
+    stalledCounter: 0,
+    attemptsStarted: 1,
+    attemptsMade: 0,
+    validateScope: async () => { order.push("validate"); },
+    updateData: async () => {
+      order.push("persist");
+      throw failure;
+    },
+    createRecoveryGenerationId: () => "mlpr_cccccccccccccccccccccccccccccccc"
+  }), (error: unknown) => error === failure);
+  assert.deepEqual(order, ["validate", "persist"]);
 });
 
 test("producer uses attempts one and a scope deduplication key without credentials", async () => {
@@ -196,6 +270,11 @@ test("BullMQ module has no import-time worker, queue or producer side effect", (
   assert.doesNotMatch(source, /accessToken|refreshToken|Authorization|Bearer/);
   assert.match(source, /attempts:\s*1/);
   assert.match(source, /deduplication:/);
+  assert.ok(source.indexOf("await job.updateData") < source.indexOf(
+    "await processMercadoLivreProjectionSyncJob"
+  ));
+  assert.match(source, /job\.stalledCounter/);
+  assert.match(source, /job\.attemptsStarted/);
 });
 
 test("environment example documents the worker as disabled", () => {

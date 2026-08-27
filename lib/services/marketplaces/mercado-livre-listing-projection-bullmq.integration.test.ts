@@ -138,6 +138,16 @@ test("BullMQ disposable worker completes one projection job and activates its sn
       "requestedBy",
       "sellerId"
     ]);
+    const persistedJob = await queue.getJob(String(job.id));
+    assert.ok(persistedJob);
+    assert.match(
+      String((persistedJob.data as { recoveryGenerationId?: string }).recoveryGenerationId),
+      /^mlpr_[a-f0-9]{32}$/
+    );
+    assert.equal(
+      (persistedJob.data as { recoveryGenerationId?: string }).recoveryGenerationId,
+      result.generationId
+    );
     assert.doesNotMatch(JSON.stringify(job.data), /accessToken|refreshToken|Authorization|Bearer|secret/i);
     const health = worker.getHealth();
     assert.equal(health.running, true);

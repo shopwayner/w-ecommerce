@@ -159,3 +159,124 @@ test("two schedulers enqueue one slot and the next slot can complete a new gener
     await database.$disconnect();
   }
 });
+
+test("the next scheduler slot can replace a recovered ERROR generation", {
+  skip: databaseUrl && redisUrl
+    ? false
+    : "Disposable PostgreSQL and Redis URLs are not configured"
+}, async () => {
+  assert.ok(databaseUrl);
+  assert.ok(redisUrl);
+  const database = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+  const connection = mercadoLivreProjectionRedisConnection({
+    MERCADO_LIVRE_PROJECTION_WORKER_ENABLED: "true",
+    REDIS_URL: redisUrl
+  });
+  const rawQueue = createMercadoLivreProjectionQueueWithConnection(connection);
+  const queue = createBullMqMercadoLivreProjectionSchedulerQueue(rawQueue);
+  const queueEvents = new QueueEvents(MERCADO_LIVRE_LISTING_PROJECTION_QUEUE_NAME, {
+    connection
+  });
+  const organization = await database.organization.create({
+    data: {
+      name: "Phase 39A1 Scheduler Recovery",
+      slug: `phase39a1-scheduler-recovery-${Date.now()}`
+    }
+  });
+  const sellerId = "seller-phase39a1-scheduler-recovery";
+  const marketplaceConnection = await database.marketplaceConnection.create({
+    data: {
+      organizationId: organization.id,
+      provider: "MERCADOLIVRE",
+      accountAlias: "ML Phase 39A1",
+      status: "ACTIVE",
+      configStatus: "READY",
+      sellerId
+    }
+  });
+  const target = {
+    organizationId: organization.id,
+    marketplaceConnectionId: marketplaceConnection.id,
+    sellerId
+  };
+  const lifecycle = new MercadoLivreListingProjectionService(database);
+  const source = new FakeMercadoLivreProjectionSource({
+    sellerId,
+    initialIds: projectionIds(4)
+  });
+  const directSync = new MercadoLivreListingProjectionFullSyncService({ source, lifecycle });
+  const policy = createMercadoLivreProjectionFreshnessPolicy();
+  const scheduler = new MercadoLivreProjectionScheduler({
+    config: {
+      enabled: true,
+      policy,
+      targets: [target],
+      tickMs: 60_000
+    },
+    repository: createPrismaMercadoLivreProjectionSchedulerRepository(database as never),
+    queue,
+    now: () => new Date(Date.now() + policy.cadenceMs)
+  });
+  const worker = createMercadoLivreProjectionWorker({
+    env: {
+      MERCADO_LIVRE_PROJECTION_WORKER_ENABLED: "true",
+      REDIS_URL: redisUrl
+    },
+    connection,
+    sourceFactory: () => source,
+    serviceFactory: (injectedSource) => new MercadoLivreListingProjectionFullSyncService({
+      source: injectedSource,
+      lifecycle
+    })
+  });
+
+  try {
+    await Promise.all([
+      rawQueue.waitUntilReady(),
+      queueEvents.waitUntilReady()
+    ]);
+    const baseline = await directSync.fullSync({
+      ...target,
+      correlationId: "phase39a1-scheduler-baseline"
+    });
+    const crashedGenerationId = `mlpr_${"a".repeat(32)}`;
+    await lifecycle.beginProjectionGeneration({
+      ...target,
+      generationId: crashedGenerationId
+    });
+    await lifecycle.failProjectionGeneration({
+      ...target,
+      generationId: crashedGenerationId,
+      errorCode: "PROJECTION_STALLED_JOB_ABORTED",
+      errorSummary: "Recovered stalled projection job was terminated safely."
+    });
+
+    const nextSlot = await scheduler.tick();
+    assert.equal(nextSlot[0].decision, "ENQUEUED");
+    const nextJob = await rawQueue.getJob(nextSlot[0].jobId ?? "missing");
+    assert.ok(nextJob);
+    await worker.worker.waitUntilReady();
+    const result = await nextJob.waitUntilFinished(queueEvents, 15_000) as {
+      status: string;
+      generationId: string;
+    };
+
+    assert.equal(result.status, "COMPLETE");
+    assert.notEqual(result.generationId, crashedGenerationId);
+    assert.notEqual(result.generationId, baseline.generationId);
+    assert.equal(await database.mercadoLivreListingProjectionGeneration.count({
+      where: { ...target, status: "BUILDING" }
+    }), 0);
+    assert.equal((await lifecycle.getProjectionReadiness(target)).activeGenerationId, result.generationId);
+  } finally {
+    await worker.close().catch(() => undefined);
+    await rawQueue.drain(true).catch(() => undefined);
+    await rawQueue.obliterate({ force: true }).catch(() => undefined);
+    await Promise.all([
+      queueEvents.close(),
+      queue.close()
+    ]);
+    await database.organization.delete({ where: { id: organization.id } }).catch(() => undefined);
+    await database.$disconnect();
+  }
+});

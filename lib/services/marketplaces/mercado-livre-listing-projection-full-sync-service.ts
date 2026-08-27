@@ -21,6 +21,7 @@ export type MercadoLivreProjectionLifecycle = Pick<
   MercadoLivreListingProjectionService,
   | "validateProjectionScope"
   | "beginProjectionGeneration"
+  | "inspectProjectionGeneration"
   | "stageProjectionListings"
   | "finalizeProjectionGeneration"
   | "failProjectionGeneration"
@@ -58,10 +59,17 @@ export type MercadoLivreProjectionFullSyncTelemetry = {
   durationMs: number;
   status: "COMPLETE" | "ERROR";
   errorCode: string | null;
+  recoveryGenerationId?: string | null;
+  recoveryDetected?: boolean;
+  recoveryAction?: string;
+  previousGenerationStatus?: "BUILDING" | "COMPLETE" | "ERROR" | null;
+  syncOutcome?: string;
+  workerLossCode?: string | null;
 };
 
 export type MercadoLivreProjectionFullSyncInput = MercadoLivreProjectionScope & {
   correlationId: string;
+  recoveryGenerationId?: string;
   signal?: AbortSignal;
   budgetMs?: number;
   onProgress?: (progress: MercadoLivreProjectionFullSyncProgress) => void;
@@ -414,6 +422,27 @@ export class MercadoLivreListingProjectionFullSyncService {
     monotonicNow?: () => number;
   }) {}
 
+  async validateScope(input: MercadoLivreProjectionScope) {
+    const lifecycle = this.dependencies.lifecycle ?? mercadoLivreListingProjectionService;
+    return lifecycle.validateProjectionScope(input);
+  }
+
+  async inspectRecoveryGeneration(input: MercadoLivreProjectionScope & {
+    generationId: string;
+  }) {
+    const lifecycle = this.dependencies.lifecycle ?? mercadoLivreListingProjectionService;
+    return lifecycle.inspectProjectionGeneration(input);
+  }
+
+  async abortRecoveryGeneration(input: MercadoLivreProjectionScope & {
+    generationId: string;
+    errorCode: string;
+    errorSummary: string;
+  }) {
+    const lifecycle = this.dependencies.lifecycle ?? mercadoLivreListingProjectionService;
+    return lifecycle.failProjectionGeneration(input);
+  }
+
   async fullSync(input: MercadoLivreProjectionFullSyncInput): Promise<MercadoLivreProjectionFullSyncResult> {
     const lifecycle = this.dependencies.lifecycle ?? mercadoLivreListingProjectionService;
     const scope: MercadoLivreProjectionScope = {
@@ -425,6 +454,9 @@ export class MercadoLivreListingProjectionFullSyncService {
       sellerId: requiredText(input.sellerId, "sellerId")
     };
     const correlationId = requiredText(input.correlationId, "correlationId");
+    const recoveryGenerationId = input.recoveryGenerationId === undefined
+      ? undefined
+      : requiredText(input.recoveryGenerationId, "recoveryGenerationId");
     const budgetMs = positiveBudget(input.budgetMs);
     const now = this.dependencies.now ?? (() => new Date());
     const monotonicNow = this.dependencies.monotonicNow ?? (() => performance.now());
@@ -475,7 +507,11 @@ export class MercadoLivreListingProjectionFullSyncService {
         signal: operation.signal
       });
       total = validateMetadata(initialMetadata, scope.sellerId);
-      const begun = await lifecycle.beginProjectionGeneration({ ...scope, expectedTotal: total });
+      const begun = await lifecycle.beginProjectionGeneration({
+        ...scope,
+        expectedTotal: total,
+        generationId: recoveryGenerationId
+      });
       generationId = begun.generation.id;
       const initialCatalog = await readCatalogSnapshot({
         source: this.dependencies.source,

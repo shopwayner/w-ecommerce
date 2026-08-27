@@ -265,6 +265,7 @@ async function runProjectionTransaction<T>(
 
 type BeginProjectionGenerationInput = MercadoLivreProjectionScope & {
   expectedTotal?: number | null;
+  generationId?: string;
 };
 
 type GenerationOperationInput = MercadoLivreProjectionScope & {
@@ -330,6 +331,9 @@ export class MercadoLivreListingProjectionService {
   async beginProjectionGeneration(input: BeginProjectionGenerationInput) {
     const scope = normalizedScope(input);
     const normalizedExpectedTotal = expectedTotal(input.expectedTotal);
+    const explicitGenerationId = input.generationId === undefined
+      ? undefined
+      : requiredText(input.generationId, "generationId", 191);
 
     return runProjectionTransaction(this.database, async (transaction) => {
       await lockProjectionScope(transaction, scope);
@@ -377,6 +381,7 @@ export class MercadoLivreListingProjectionService {
 
       const generation = await transaction.mercadoLivreListingProjectionGeneration.create({
         data: {
+          id: explicitGenerationId,
           projectionStateId: state.id,
           ...scope,
           status: "BUILDING",
@@ -386,6 +391,53 @@ export class MercadoLivreListingProjectionService {
       });
 
       return { state, generation };
+    });
+  }
+
+  async inspectProjectionGeneration(input: GenerationOperationInput) {
+    const scope = normalizedScope(input);
+    const generationId = requiredText(input.generationId, "generationId", 191);
+
+    return runProjectionTransaction(this.database, async (transaction) => {
+      await lockProjectionScope(transaction, scope);
+      await assertConnectionScope(transaction, scope);
+      const generation = await transaction.mercadoLivreListingProjectionGeneration.findUnique({
+        where: { id: generationId },
+        include: { projectionState: true }
+      });
+      if (!generation) return null;
+      if (
+        generation.organizationId !== scope.organizationId
+        || generation.marketplaceConnectionId !== scope.marketplaceConnectionId
+        || generation.sellerId !== scope.sellerId
+      ) {
+        projectionError(
+          "PROJECTION_RECOVERY_SCOPE_MISMATCH",
+          "Projection recovery generation belongs to another scope."
+        );
+      }
+      if (
+        generation.status === "COMPLETE"
+        && !canActivateMercadoLivreProjectionGeneration({
+          status: generation.status,
+          expectedTotal: generation.expectedTotal,
+          storedTotal: generation.storedTotal,
+          completedAt: generation.completedAt,
+          failedAt: generation.failedAt
+        })
+      ) {
+        projectionError(
+          "PROJECTION_COMPLETE_GENERATION_INVALID",
+          "Completed projection generation is inconsistent."
+        );
+      }
+      return {
+        generationId: generation.id,
+        status: generation.status,
+        expectedTotal: generation.expectedTotal,
+        storedTotal: generation.storedTotal,
+        activeGenerationId: generation.projectionState.activeGenerationId
+      };
     });
   }
 

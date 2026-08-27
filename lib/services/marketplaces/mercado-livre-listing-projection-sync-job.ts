@@ -43,7 +43,12 @@ export type MercadoLivreProjectionSyncJobOptions = {
   onTelemetry?: (telemetry: MercadoLivreProjectionFullSyncTelemetry) => void;
 };
 
-type FullSyncProcessor = Pick<MercadoLivreListingProjectionFullSyncService, "fullSync">;
+type FullSyncProcessor = Pick<MercadoLivreListingProjectionFullSyncService, "fullSync"> & Partial<
+  Pick<
+    MercadoLivreListingProjectionFullSyncService,
+    "inspectRecoveryGeneration" | "abortRecoveryGeneration"
+  >
+>;
 type RetentionProcessor = Pick<
   MercadoLivreListingProjectionRetentionService,
   "planRetention" | "applyRetention"
@@ -70,8 +75,54 @@ export type MercadoLivreProjectionRetentionTelemetry = {
   retentionErrorCode: string | null;
 };
 
-export type MercadoLivreProjectionSyncJobResult =
-  MercadoLivreProjectionFullSyncResult & MercadoLivreProjectionRetentionTelemetry;
+export const MERCADO_LIVRE_PROJECTION_SYNC_OUTCOMES = [
+  "NORMAL_EXECUTION",
+  "RECOVERED_BEFORE_BEGIN",
+  "RECOVERED_BUILDING_ABORTED",
+  "RECOVERED_ALREADY_COMPLETE",
+  "RECOVERED_COMPLETE_RETENTION_APPLIED",
+  "RECOVERED_COMPLETE_RETENTION_NOOP",
+  "RECOVERY_SCOPE_MISMATCH"
+] as const;
+
+export type MercadoLivreProjectionSyncOutcome =
+  (typeof MERCADO_LIVRE_PROJECTION_SYNC_OUTCOMES)[number];
+
+export type MercadoLivreProjectionRecoveryContext = {
+  generationId: string;
+  recoveryDetected: boolean;
+  stalledCounter: number;
+  attemptsStarted: number;
+  attemptsMade: number;
+};
+
+export type MercadoLivreProjectionRecoveryMetadata = {
+  recoveryGenerationId: string | null;
+  recoveryDetected: boolean;
+  recoveryAction: MercadoLivreProjectionSyncOutcome;
+  previousGenerationStatus: "BUILDING" | "COMPLETE" | "ERROR" | null;
+  syncOutcome: MercadoLivreProjectionSyncOutcome;
+  workerLossCode: string | null;
+};
+
+type RecoveredCompleteSyncResult = {
+  status: "COMPLETE";
+  generationId: string;
+  expectedTotal: number;
+  storedTotal: number;
+  durationMs: number;
+};
+
+export type MercadoLivreProjectionSyncJobResult = (
+  MercadoLivreProjectionFullSyncResult | RecoveredCompleteSyncResult
+) & MercadoLivreProjectionRetentionTelemetry & MercadoLivreProjectionRecoveryMetadata;
+
+export class MercadoLivreProjectionJobRecoveryError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = "MercadoLivreProjectionJobRecoveryError";
+  }
+}
 
 function requiredJobText(value: unknown, field: string) {
   const normalized = typeof value === "string" ? value.trim() : "";
@@ -179,35 +230,250 @@ async function runPostSyncRetention(input: {
   }
 }
 
+function recoveryError(code: string, message: string): never {
+  throw new MercadoLivreProjectionJobRecoveryError(code, message);
+}
+
+function errorCode(error: unknown) {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = String((error as { code: unknown }).code).trim();
+    if (code) return code.slice(0, 120);
+  }
+  return "PROJECTION_RECOVERY_FAILED";
+}
+
+function recoveryMetadata(input: Partial<MercadoLivreProjectionRecoveryMetadata> = {}) {
+  return {
+    recoveryGenerationId: input.recoveryGenerationId ?? null,
+    recoveryDetected: input.recoveryDetected ?? false,
+    recoveryAction: input.recoveryAction ?? "NORMAL_EXECUTION",
+    previousGenerationStatus: input.previousGenerationStatus ?? null,
+    syncOutcome: input.syncOutcome ?? "NORMAL_EXECUTION",
+    workerLossCode: input.workerLossCode ?? null
+  } satisfies MercadoLivreProjectionRecoveryMetadata;
+}
+
+function emitRecoveryTelemetry(input: {
+  job: ReturnType<typeof normalizeMercadoLivreProjectionSyncJobData>;
+  options: MercadoLivreProjectionSyncJobOptions | undefined;
+  metadata: MercadoLivreProjectionRecoveryMetadata;
+  status: "COMPLETE" | "ERROR";
+  errorCode: string | null;
+  total?: number | null;
+  staged?: number;
+}) {
+  input.options?.onTelemetry?.({
+    correlationId: input.job.correlationId,
+    generationId: input.metadata.recoveryGenerationId,
+    total: input.total ?? null,
+    staged: input.staged ?? 0,
+    catalogPages: 0,
+    reconciliationPages: 0,
+    batches: 0,
+    maxConcurrency: 0,
+    durationMs: 0,
+    status: input.status,
+    errorCode: input.errorCode,
+    ...input.metadata
+  });
+}
+
 export async function processMercadoLivreProjectionSyncJob(
   jobData: MercadoLivreProjectionSyncJobData,
   dependencies: {
     fullSyncService: FullSyncProcessor;
     retentionService?: RetentionProcessor;
     environment?: MercadoLivreProjectionRetentionEnvironment;
-    options?: MercadoLivreProjectionSyncJobOptions;
+    options?: MercadoLivreProjectionSyncJobOptions & {
+      recovery?: MercadoLivreProjectionRecoveryContext;
+    };
   }
 ): Promise<MercadoLivreProjectionSyncJobResult> {
   const safeJob = normalizeMercadoLivreProjectionSyncJobData(jobData);
-  const syncResult = await dependencies.fullSyncService.fullSync({
+  const scope = {
     organizationId: safeJob.organizationId,
     marketplaceConnectionId: safeJob.marketplaceConnectionId,
-    sellerId: safeJob.sellerId,
-    correlationId: safeJob.correlationId,
-    signal: dependencies.options?.signal,
-    budgetMs: dependencies.options?.budgetMs,
-    onProgress: dependencies.options?.onProgress,
-    onTelemetry: dependencies.options?.onTelemetry
-  });
+    sellerId: safeJob.sellerId
+  };
+  const recovery = dependencies.options?.recovery;
+  let metadata = recoveryMetadata(recovery ? {
+    recoveryGenerationId: recovery.generationId,
+    recoveryDetected: recovery.recoveryDetected
+  } : undefined);
+  let syncResult: MercadoLivreProjectionFullSyncResult | RecoveredCompleteSyncResult;
+
+  if (recovery) {
+    const inspect = dependencies.fullSyncService.inspectRecoveryGeneration;
+    const abort = dependencies.fullSyncService.abortRecoveryGeneration;
+    if (!inspect || !abort) {
+      recoveryError(
+        "PROJECTION_RECOVERY_NOT_CONFIGURED",
+        "Projection job recovery is not configured."
+      );
+    }
+    let previous: Awaited<ReturnType<typeof inspect>>;
+    try {
+      previous = await dependencies.fullSyncService.inspectRecoveryGeneration!({
+        ...scope,
+        generationId: recovery.generationId
+      });
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === "PROJECTION_RECOVERY_SCOPE_MISMATCH") {
+        metadata = recoveryMetadata({
+          ...metadata,
+          recoveryAction: "RECOVERY_SCOPE_MISMATCH",
+          syncOutcome: "RECOVERY_SCOPE_MISMATCH"
+        });
+        emitRecoveryTelemetry({
+          job: safeJob,
+          options: dependencies.options,
+          metadata,
+          status: "ERROR",
+          errorCode: code
+        });
+      }
+      throw error;
+    }
+
+    if (previous?.status === "BUILDING") {
+      if (!recovery.recoveryDetected) {
+        recoveryError(
+          "PROJECTION_RECOVERY_SIGNAL_REQUIRED",
+          "A building projection can only be recovered after a confirmed stalled replay."
+        );
+      }
+      metadata = recoveryMetadata({
+        ...metadata,
+        recoveryAction: "RECOVERED_BUILDING_ABORTED",
+        previousGenerationStatus: "BUILDING",
+        syncOutcome: "RECOVERED_BUILDING_ABORTED",
+        workerLossCode: "PROJECTION_STALLED_JOB_ABORTED"
+      });
+      await dependencies.fullSyncService.abortRecoveryGeneration!({
+        ...scope,
+        generationId: recovery.generationId,
+        errorCode: "PROJECTION_STALLED_JOB_ABORTED",
+        errorSummary: "Projection worker was lost while building this generation."
+      });
+      emitRecoveryTelemetry({
+        job: safeJob,
+        options: dependencies.options,
+        metadata,
+        status: "ERROR",
+        errorCode: "PROJECTION_STALLED_JOB_ABORTED",
+        total: previous.expectedTotal,
+        staged: previous.storedTotal
+      });
+      recoveryError(
+        "PROJECTION_STALLED_JOB_ABORTED",
+        "Projection stalled replay aborted the interrupted generation."
+      );
+    }
+
+    if (previous?.status === "ERROR") {
+      metadata = recoveryMetadata({
+        ...metadata,
+        previousGenerationStatus: "ERROR"
+      });
+      emitRecoveryTelemetry({
+        job: safeJob,
+        options: dependencies.options,
+        metadata,
+        status: "ERROR",
+        errorCode: "PROJECTION_RECOVERY_GENERATION_ERROR",
+        total: previous.expectedTotal,
+        staged: previous.storedTotal
+      });
+      recoveryError(
+        "PROJECTION_RECOVERY_GENERATION_ERROR",
+        "Projection recovery generation is already terminal with an error."
+      );
+    }
+
+    if (previous?.status === "COMPLETE") {
+      if (!recovery.recoveryDetected) {
+        recoveryError(
+          "PROJECTION_RECOVERY_SIGNAL_REQUIRED",
+          "A completed projection can only be recovered after a confirmed stalled replay."
+        );
+      }
+      metadata = recoveryMetadata({
+        ...metadata,
+        recoveryAction: "RECOVERED_ALREADY_COMPLETE",
+        previousGenerationStatus: "COMPLETE",
+        syncOutcome: "RECOVERED_ALREADY_COMPLETE"
+      });
+      syncResult = {
+        status: "COMPLETE",
+        generationId: previous.generationId,
+        expectedTotal: previous.expectedTotal!,
+        storedTotal: previous.storedTotal,
+        durationMs: 0
+      };
+      emitRecoveryTelemetry({
+        job: safeJob,
+        options: dependencies.options,
+        metadata,
+        status: "COMPLETE",
+        errorCode: null,
+        total: previous.expectedTotal,
+        staged: previous.storedTotal
+      });
+    } else {
+      metadata = recoveryMetadata({
+        ...metadata,
+        recoveryAction: recovery.recoveryDetected
+          ? "RECOVERED_BEFORE_BEGIN"
+          : "NORMAL_EXECUTION",
+        syncOutcome: recovery.recoveryDetected
+          ? "RECOVERED_BEFORE_BEGIN"
+          : "NORMAL_EXECUTION"
+      });
+      syncResult = await dependencies.fullSyncService.fullSync({
+        ...scope,
+        correlationId: safeJob.correlationId,
+        recoveryGenerationId: recovery.generationId,
+        signal: dependencies.options?.signal,
+        budgetMs: dependencies.options?.budgetMs,
+        onProgress: dependencies.options?.onProgress,
+        onTelemetry: (telemetry) => dependencies.options?.onTelemetry?.({
+          ...telemetry,
+          ...metadata
+        })
+      });
+    }
+  } else {
+    syncResult = await dependencies.fullSyncService.fullSync({
+      ...scope,
+      correlationId: safeJob.correlationId,
+      signal: dependencies.options?.signal,
+      budgetMs: dependencies.options?.budgetMs,
+      onProgress: dependencies.options?.onProgress,
+      onTelemetry: (telemetry) => dependencies.options?.onTelemetry?.({
+        ...telemetry,
+        ...metadata
+      })
+    });
+  }
   const retention = await runPostSyncRetention({
-    scope: {
-      organizationId: safeJob.organizationId,
-      marketplaceConnectionId: safeJob.marketplaceConnectionId,
-      sellerId: safeJob.sellerId
-    },
+    scope,
     environment: dependencies.environment ?? process.env,
     retentionService: dependencies.retentionService
       ?? mercadoLivreListingProjectionRetentionService
   });
-  return { ...syncResult, ...retention };
+  if (metadata.syncOutcome === "RECOVERED_ALREADY_COMPLETE") {
+    if (retention.retentionOutcome === "APPLIED") {
+      metadata = recoveryMetadata({
+        ...metadata,
+        syncOutcome: "RECOVERED_COMPLETE_RETENTION_APPLIED"
+      });
+    } else if (retention.retentionOutcome === "NOOP") {
+      metadata = recoveryMetadata({
+        ...metadata,
+        syncOutcome: "RECOVERED_COMPLETE_RETENTION_NOOP"
+      });
+    }
+  }
+  return { ...syncResult, ...retention, ...metadata };
 }

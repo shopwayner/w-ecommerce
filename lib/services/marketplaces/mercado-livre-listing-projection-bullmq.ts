@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   Queue,
   Worker,
@@ -13,6 +13,7 @@ import {
 import { MercadoLivreHttpProjectionSyncSource } from "@/lib/services/marketplaces/mercado-livre-listing-projection-http-source";
 import {
   MERCADO_LIVRE_LISTING_PROJECTION_QUEUE_NAME,
+  MercadoLivreProjectionJobRecoveryError,
   normalizeMercadoLivreProjectionSyncJobData,
   processMercadoLivreProjectionSyncJob,
   type MercadoLivreProjectionRetentionOutcome,
@@ -69,6 +70,106 @@ export type ProjectionQueue = Queue<
 >;
 
 let sharedQueue: ProjectionQueue | null = null;
+
+const RECOVERY_GENERATION_ID_PATTERN = /^mlpr_[a-f0-9]{32}$/;
+
+export type MercadoLivreProjectionPersistedJobData =
+  ReturnType<typeof normalizeMercadoLivreProjectionSyncJobData> & {
+    recoveryGenerationId?: string;
+  };
+
+export function createMercadoLivreProjectionRecoveryGenerationId() {
+  return `mlpr_${randomUUID().replaceAll("-", "")}`;
+}
+
+export function normalizeMercadoLivreProjectionPersistedJobData(
+  input: unknown
+): MercadoLivreProjectionPersistedJobData {
+  const publicData = normalizeMercadoLivreProjectionSyncJobData(
+    input as MercadoLivreProjectionSyncJobData
+  );
+  const recoveryGenerationId = input && typeof input === "object"
+    ? (input as { recoveryGenerationId?: unknown }).recoveryGenerationId
+    : undefined;
+  if (recoveryGenerationId === undefined) return publicData;
+  if (
+    typeof recoveryGenerationId !== "string"
+    || !RECOVERY_GENERATION_ID_PATTERN.test(recoveryGenerationId)
+  ) {
+    throw new MercadoLivreProjectionJobRecoveryError(
+      "PROJECTION_RECOVERY_ID_INVALID",
+      "Projection recovery generation ID is invalid."
+    );
+  }
+  return { ...publicData, recoveryGenerationId };
+}
+
+export function mercadoLivreProjectionStalledRecoverySignal(input: {
+  stalledCounter: number;
+  attemptsStarted: number;
+  attemptsMade: number;
+}) {
+  for (const value of [input.stalledCounter, input.attemptsStarted, input.attemptsMade]) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new MercadoLivreProjectionJobRecoveryError(
+        "PROJECTION_RECOVERY_SIGNAL_INVALID",
+        "Projection recovery signal is invalid."
+      );
+    }
+  }
+  if (input.stalledCounter === 0) return false;
+  if (input.attemptsStarted > 1) return true;
+  throw new MercadoLivreProjectionJobRecoveryError(
+    "PROJECTION_RECOVERY_SIGNAL_INVALID",
+    "Projection stalled signal is inconsistent."
+  );
+}
+
+export async function prepareMercadoLivreProjectionJobRecovery(input: {
+  jobData: unknown;
+  stalledCounter: number;
+  attemptsStarted: number;
+  attemptsMade: number;
+  validateScope: (
+    scope: ReturnType<typeof normalizeMercadoLivreProjectionSyncJobData>
+  ) => Promise<unknown>;
+  updateData: (data: MercadoLivreProjectionPersistedJobData) => Promise<unknown>;
+  createRecoveryGenerationId?: () => string;
+}) {
+  const safeData = normalizeMercadoLivreProjectionSyncJobData(
+    input.jobData as MercadoLivreProjectionSyncJobData
+  );
+  await input.validateScope(safeData);
+  const persistedData = normalizeMercadoLivreProjectionPersistedJobData(input.jobData);
+  let recoveryGenerationId = persistedData.recoveryGenerationId;
+  if (!recoveryGenerationId) {
+    recoveryGenerationId = (
+      input.createRecoveryGenerationId
+      ?? createMercadoLivreProjectionRecoveryGenerationId
+    )();
+    if (!RECOVERY_GENERATION_ID_PATTERN.test(recoveryGenerationId)) {
+      throw new MercadoLivreProjectionJobRecoveryError(
+        "PROJECTION_RECOVERY_ID_INVALID",
+        "Projection recovery generation ID is invalid."
+      );
+    }
+    await input.updateData({ ...safeData, recoveryGenerationId });
+  }
+  return {
+    safeData,
+    recovery: {
+      generationId: recoveryGenerationId,
+      recoveryDetected: mercadoLivreProjectionStalledRecoverySignal({
+        stalledCounter: input.stalledCounter,
+        attemptsStarted: input.attemptsStarted,
+        attemptsMade: input.attemptsMade
+      }),
+      stalledCounter: input.stalledCounter,
+      attemptsStarted: input.attemptsStarted,
+      attemptsMade: input.attemptsMade
+    }
+  };
+}
 
 export function isMercadoLivreProjectionWorkerEnabled(
   env: MercadoLivreProjectionWorkerEnvironment = process.env
@@ -266,6 +367,7 @@ export function createMercadoLivreProjectionWorker(input: {
   serviceFactory?: (
     source: MercadoLivreProjectionSyncSource
   ) => MercadoLivreListingProjectionFullSyncService;
+  createRecoveryGenerationId?: () => string;
   retentionService?: Pick<
     MercadoLivreListingProjectionRetentionService,
     "planRetention" | "applyRetention"
@@ -288,15 +390,17 @@ export function createMercadoLivreProjectionWorker(input: {
   const sourceFactory = input.sourceFactory ?? (() => new MercadoLivreHttpProjectionSyncSource());
   const serviceFactory = input.serviceFactory
     ?? ((source) => new MercadoLivreListingProjectionFullSyncService({ source }));
+  const createRecoveryGenerationId = input.createRecoveryGenerationId
+    ?? createMercadoLivreProjectionRecoveryGenerationId;
   let activeController: AbortController | null = null;
   const worker = new Worker<
-    MercadoLivreProjectionSyncJobData,
+    MercadoLivreProjectionPersistedJobData,
     unknown,
     typeof MERCADO_LIVRE_PROJECTION_JOB_NAME
   >(
     MERCADO_LIVRE_LISTING_PROJECTION_QUEUE_NAME,
-    async (job: Job<MercadoLivreProjectionSyncJobData>) => {
-      const safeData = normalizeMercadoLivreProjectionSyncJobData(job.data);
+    async (job: Job<MercadoLivreProjectionPersistedJobData>) => {
+      const publicJobData = normalizeMercadoLivreProjectionSyncJobData(job.data);
       const jobId = String(job.id ?? "unknown");
       const startedAt = performance.now();
       const controller = new AbortController();
@@ -307,11 +411,23 @@ export function createMercadoLivreProjectionWorker(input: {
         latest: MercadoLivreProjectionFullSyncTelemetry | null;
       } = { latest: null };
       try {
+        const fullSyncService = serviceFactory(sourceFactory(publicJobData));
+        const prepared = await prepareMercadoLivreProjectionJobRecovery({
+          jobData: job.data,
+          stalledCounter: job.stalledCounter,
+          attemptsStarted: job.attemptsStarted,
+          attemptsMade: job.attemptsMade,
+          validateScope: (scope) => fullSyncService.validateScope(scope),
+          updateData: (data) => job.updateData(data),
+          createRecoveryGenerationId
+        });
+        const safeData = prepared.safeData;
         const result = await processMercadoLivreProjectionSyncJob(safeData, {
-          fullSyncService: serviceFactory(sourceFactory(safeData)),
+          fullSyncService,
           retentionService: input.retentionService,
           environment: env,
           options: {
+            recovery: prepared.recovery,
             signal: controller.signal,
             onProgress: (progress) => {
               health.progress = progress;
@@ -328,8 +444,14 @@ export function createMercadoLivreProjectionWorker(input: {
         if (telemetryState.latest) {
           input.onTelemetry?.({
             ...telemetryState.latest,
+            recoveryGenerationId: result.recoveryGenerationId,
+            recoveryDetected: result.recoveryDetected,
+            recoveryAction: result.recoveryAction,
+            previousGenerationStatus: result.previousGenerationStatus,
+            syncOutcome: result.syncOutcome,
+            workerLossCode: result.workerLossCode,
             jobId,
-            reason: safeData.reason,
+            reason: publicJobData.reason,
             retentionEnabled: result.retentionEnabled,
             retentionOutcome: result.retentionOutcome,
             retentionDeletedGenerations: result.retentionDeletedGenerations,
@@ -351,7 +473,7 @@ export function createMercadoLivreProjectionWorker(input: {
           input.onTelemetry?.({
             ...telemetryState.latest,
             jobId,
-            reason: safeData.reason,
+            reason: publicJobData.reason,
             retentionEnabled: isMercadoLivreProjectionRetentionEnabled(env),
             retentionOutcome: "NOT_RUN_SYNC_FAILED",
             retentionDeletedGenerations: 0,
