@@ -8,8 +8,7 @@ import type {
 } from "./mercado-livre-listing-projection-scheduler";
 import {
   sanitizeMercadoLivreProjectionSchedulerRuntimeError,
-  startMercadoLivreProjectionSchedulerRuntime,
-  type MercadoLivreProjectionSchedulerRuntimeEvent
+  startMercadoLivreProjectionSchedulerRuntime
 } from "./mercado-livre-listing-projection-scheduler-runtime";
 
 class Signals extends EventEmitter {
@@ -30,6 +29,12 @@ const environment = {
   MERCADO_LIVRE_PROJECTION_SCHEDULER_ENABLED: "true",
   MERCADO_LIVRE_PROJECTION_SCHEDULER_TARGETS: JSON.stringify([target]),
   DATABASE_URL: "postgresql://not-used.invalid/test"
+};
+
+const heartbeat = {
+  async starting() {},
+  async ready() {},
+  async stopped() {}
 };
 
 function queue(onEnqueue?: () => void): MercadoLivreProjectionSchedulerQueue {
@@ -82,10 +87,8 @@ test("scheduler runtime fails closed when disabled", async () => {
   }), /PROJECTION_SCHEDULER_DISABLED/);
 });
 
-test("enabled scheduler with an empty allowlist starts healthy and enqueues nobody", async () => {
-  const events: MercadoLivreProjectionSchedulerRuntimeEvent[] = [];
-  let enqueues = 0;
-  const runtime = await startMercadoLivreProjectionSchedulerRuntime({
+test("enabled scheduler with an empty allowlist fails closed", async () => {
+  await assert.rejects(() => startMercadoLivreProjectionSchedulerRuntime({
     MERCADO_LIVRE_PROJECTION_SCHEDULER_ENABLED: "true",
     MERCADO_LIVRE_PROJECTION_SCHEDULER_TARGETS: "[]",
     DATABASE_URL: "postgresql://not-used.invalid/test"
@@ -93,18 +96,8 @@ test("enabled scheduler with an empty allowlist starts healthy and enqueues nobo
     validateDatabase: async () => undefined,
     disconnectDatabase: async () => undefined,
     repository: repository(),
-    queue: queue(() => { enqueues += 1; }),
-    log: (event) => events.push(event),
-    sleep: (_duration, signal) => new Promise((resolve) => {
-      signal.addEventListener("abort", () => resolve(), { once: true });
-    })
-  });
-  await waitFor(() => runtime.getHealth().lastDecision === "NO_TARGETS");
-  assert.equal(runtime.getHealth().configuredTargets, 0);
-  assert.equal(enqueues, 0);
-  await runtime.close();
-  assert.equal(runtime.getHealth().running, false);
-  assert.doesNotMatch(JSON.stringify(events), /accessToken|refreshToken|Authorization|Bearer|secret/i);
+    queue: queue()
+  }), /PROJECTION_RUNTIME_SINGLE_TARGET_REQUIRED/);
 });
 
 test("SIGTERM during a tick waits for that evaluation and starts no overlapping tick", async () => {
@@ -123,6 +116,7 @@ test("SIGTERM during a tick waits for that evaluation and starts no overlapping 
   };
   const runtime = await startMercadoLivreProjectionSchedulerRuntime(environment, {
     signalSource: signals,
+    heartbeat,
     validateDatabase: async () => undefined,
     disconnectDatabase: async () => undefined,
     repository: delayedRepository,
@@ -179,7 +173,9 @@ test("scheduler entrypoint and Compose profile are dedicated, dark and portless"
   assert.match(runtime, /SIGINT/);
   const service = compose.match(/ml-projection-scheduler:[\s\S]*?\n  postgres:/)?.[0] ?? "";
   assert.match(service, /profiles:\s*\n\s*- ml-projection-scheduler/);
-  assert.match(service, /restart: "no"/);
+  assert.match(service, /restart: unless-stopped/);
+  assert.match(service, /mercado-livre-projection-health\.ts", "scheduler", "150"/);
+  assert.match(service, /max-file: "5"/);
   assert.doesNotMatch(service, /ports:/);
   assert.match(envExample, /^MERCADO_LIVRE_PROJECTION_SCHEDULER_ENABLED=false$/m);
   assert.match(envExample, /^MERCADO_LIVRE_PROJECTION_SCHEDULER_TARGETS=\[\]$/m);

@@ -368,6 +368,9 @@ export function createMercadoLivreProjectionWorker(input: {
     source: MercadoLivreProjectionSyncSource
   ) => MercadoLivreListingProjectionFullSyncService;
   createRecoveryGenerationId?: () => string;
+  authorizeJob?: (
+    jobData: MercadoLivreProjectionSyncJobData
+  ) => Promise<void> | void;
   retentionService?: Pick<
     MercadoLivreListingProjectionRetentionService,
     "planRetention" | "applyRetention"
@@ -401,6 +404,7 @@ export function createMercadoLivreProjectionWorker(input: {
     MERCADO_LIVRE_LISTING_PROJECTION_QUEUE_NAME,
     async (job: Job<MercadoLivreProjectionPersistedJobData>) => {
       const publicJobData = normalizeMercadoLivreProjectionSyncJobData(job.data);
+      await input.authorizeJob?.(publicJobData);
       const jobId = String(job.id ?? "unknown");
       const startedAt = performance.now();
       const controller = new AbortController();

@@ -15,6 +15,14 @@ import {
 } from "@/lib/services/marketplaces/mercado-livre-listing-projection-http-source";
 import type { MercadoLivreProjectionSyncJobData } from "@/lib/services/marketplaces/mercado-livre-listing-projection-sync-job";
 import type { MercadoLivreProjectionSyncSource } from "@/lib/services/marketplaces/mercado-livre-listing-projection-source";
+import {
+  assertMercadoLivreProjectionWorkerTargetAllowlisted,
+  parseMercadoLivreProjectionRuntimeConfig,
+  type MercadoLivreProjectionRuntimeEnvironment
+} from "@/lib/services/marketplaces/mercado-livre-listing-projection-runtime-config";
+import {
+  createMercadoLivreProjectionRuntimeHeartbeat
+} from "@/lib/services/marketplaces/mercado-livre-listing-projection-runtime-health";
 
 const HEALTH_POLL_INTERVAL_MS = 1_000;
 
@@ -24,7 +32,8 @@ type ProjectionWorkerController = ReturnType<
 
 type RuntimeSignal = "SIGINT" | "SIGTERM";
 
-type RuntimeEnvironment = MercadoLivreProjectionWorkerEnvironment & {
+type RuntimeEnvironment = MercadoLivreProjectionWorkerEnvironment &
+  MercadoLivreProjectionRuntimeEnvironment & {
   DATABASE_URL?: string;
 };
 
@@ -43,6 +52,7 @@ export type MercadoLivreProjectionWorkerRuntimeEvent = {
     | "projection_worker_telemetry"
     | "projection_worker_retention_warning"
     | "projection_worker_http_telemetry"
+    | "projection_worker_heartbeat_error"
     | "projection_worker_error"
     | "projection_worker_stopping"
     | "projection_worker_stopped";
@@ -66,6 +76,11 @@ type RuntimeDependencies = {
   signalSource?: RuntimeSignalSource;
   log?: (event: MercadoLivreProjectionWorkerRuntimeEvent) => void;
   healthPollIntervalMs?: number;
+  heartbeat?: {
+    starting(): Promise<unknown>;
+    ready(busy?: boolean): Promise<unknown>;
+    stopped(): Promise<unknown>;
+  };
 };
 
 export type MercadoLivreProjectionWorkerRuntime = {
@@ -224,7 +239,8 @@ export async function startMercadoLivreProjectionWorkerRuntime(
   env: RuntimeEnvironment = process.env,
   dependencies: RuntimeDependencies = {}
 ): Promise<MercadoLivreProjectionWorkerRuntime> {
-  if (!isMercadoLivreProjectionWorkerEnabled(env)) {
+  const runtimeConfig = parseMercadoLivreProjectionRuntimeConfig(env);
+  if (!runtimeConfig.workerEnabled || !isMercadoLivreProjectionWorkerEnabled(env)) {
     throw new MercadoLivreProjectionWorkerConfigurationError(
       "PROJECTION_WORKER_DISABLED"
     );
@@ -244,7 +260,14 @@ export async function startMercadoLivreProjectionWorkerRuntime(
   const signalSource = dependencies.signalSource ?? process;
   const createWorker = dependencies.createWorker
     ?? createMercadoLivreProjectionWorker;
+  const heartbeat = dependencies.heartbeat
+    ?? createMercadoLivreProjectionRuntimeHeartbeat({
+      service: "worker",
+      filePath: env.MERCADO_LIVRE_PROJECTION_HEALTH_FILE,
+      targetCount: runtimeConfig.targets.length
+    });
 
+  await heartbeat.starting();
   await validateDatabase();
 
   let resolveDone!: () => void;
@@ -261,6 +284,12 @@ export async function startMercadoLivreProjectionWorkerRuntime(
   const controller: ProjectionWorkerController = createWorker({
     env,
     connection,
+    authorizeJob(jobData) {
+      assertMercadoLivreProjectionWorkerTargetAllowlisted(
+        jobData,
+        runtimeConfig.targets
+      );
+    },
     sourceFactory(jobData: MercadoLivreProjectionSyncJobData) {
       const observed = createObservedHttpSource();
       httpTelemetryByCorrelation.set(jobData.correlationId, observed.telemetry);
@@ -318,7 +347,14 @@ export async function startMercadoLivreProjectionWorkerRuntime(
     });
   });
 
-  await controller.worker.waitUntilReady();
+  try {
+    await controller.worker.waitUntilReady();
+    await heartbeat.ready(false);
+  } catch (error) {
+    await controller.close().catch(() => undefined);
+    await disconnectDatabase().catch(() => undefined);
+    throw error;
+  }
   log({
     event: "projection_worker_started",
     running: true,
@@ -327,6 +363,12 @@ export async function startMercadoLivreProjectionWorkerRuntime(
 
   const emitHealth = () => {
     const health = controller.getHealth();
+    void heartbeat.ready(Boolean(health.activeJobId)).catch((error) => {
+      log({
+        event: "projection_worker_heartbeat_error",
+        errorCode: safeErrorCode(error)
+      });
+    });
     const signature = JSON.stringify(health);
     if (signature === lastHealthSignature) return;
     lastHealthSignature = signature;
@@ -354,6 +396,7 @@ export async function startMercadoLivreProjectionWorkerRuntime(
         await controller.close();
       } finally {
         await disconnectDatabase();
+        await heartbeat.stopped().catch(() => undefined);
         log({
           event: "projection_worker_stopped",
           reason,

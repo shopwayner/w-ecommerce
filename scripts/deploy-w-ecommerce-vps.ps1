@@ -48,7 +48,27 @@ $criticalRuntimePaths = @(
   "app/api/products/import-from-bling/route.ts",
   "app/api/products/route.ts",
   "components/pages/products-page.tsx",
-  "lib/services/bling-oauth-service.ts"
+  "lib/services/bling-oauth-service.ts",
+  "docker-compose.yml",
+  "config/ml-projection-runtime.disabled.env",
+  "prisma/schema.prisma",
+  "lib/services/marketplaces/mercado-livre-listing-projection-bullmq.ts",
+  "lib/services/marketplaces/mercado-livre-listing-projection-full-sync-service.ts",
+  "lib/services/marketplaces/mercado-livre-listing-projection-http-source.ts",
+  "lib/services/marketplaces/mercado-livre-listing-projection-retention-config.ts",
+  "lib/services/marketplaces/mercado-livre-listing-projection-retention-service.ts",
+  "lib/services/marketplaces/mercado-livre-listing-projection-runtime-config.ts",
+  "lib/services/marketplaces/mercado-livre-listing-projection-runtime-health.ts",
+  "lib/services/marketplaces/mercado-livre-listing-projection-scheduler-config.ts",
+  "lib/services/marketplaces/mercado-livre-listing-projection-scheduler.ts",
+  "lib/services/marketplaces/mercado-livre-listing-projection-worker-runtime.ts",
+  "lib/services/marketplaces/mercado-livre-listing-projection-scheduler-runtime.ts",
+  "lib/services/marketplaces/mercado-livre-listing-projection-sync-job.ts",
+  "scripts/workers/mercado-livre-projection-worker.ts",
+  "scripts/workers/mercado-livre-projection-scheduler.ts",
+  "scripts/workers/mercado-livre-projection-health.ts",
+  "scripts/ops/ml-projection-shadow-runtime.sh",
+  "scripts/ops/ml-projection-runtime-state.ts"
 )
 
 function Assert-Command {
@@ -1090,6 +1110,10 @@ fi
 
 validate_critical_hashes "`$RELEASE_DIR" "pacote extraido" || fail_remote "Hashes do pacote extraido divergentes."
 cp "`$REMOTE_MANIFEST" "`$RELEASE_DIR/.deploy-manifest.json" || fail_remote "Falha ao anexar manifesto ao contexto limpo."
+
+if docker ps -a --format '{{.Names}}' | grep -Eq '^(w-ecommerce-ml-projection-worker|w-ecommerce-ml-projection-scheduler)$'; then
+  fail_remote "Deploy bloqueado: pare e remova os runtimes de projecao pelo procedimento operacional antes de trocar a imagem compartilhada."
+fi
 
 echo "==> Criando e validando backup do codigo atual"
 mkdir -p .deploy-backups

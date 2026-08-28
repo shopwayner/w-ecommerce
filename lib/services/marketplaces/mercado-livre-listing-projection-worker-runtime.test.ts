@@ -15,7 +15,18 @@ import {
 
 const enabledEnvironment = {
   MERCADO_LIVRE_PROJECTION_WORKER_ENABLED: "true",
+  MERCADO_LIVRE_PROJECTION_SCHEDULER_TARGETS: JSON.stringify([{
+    organizationId: "organization-runtime",
+    marketplaceConnectionId: "connection-runtime",
+    sellerId: "seller-runtime"
+  }]),
   REDIS_URL: "redis://localhost:6379/0"
+};
+
+const heartbeat = {
+  async starting() {},
+  async ready() {},
+  async stopped() {}
 };
 
 function fakeController(input: {
@@ -82,6 +93,7 @@ test("runtime creates one worker and closes database and worker on SIGTERM", asy
     enabledEnvironment,
     {
       signalSource: signals,
+      heartbeat,
       healthPollIntervalMs: 100,
       log: (event) => events.push(event),
       validateDatabase: async () => {
@@ -123,6 +135,7 @@ test("runtime emits only sanitized job and error telemetry", async () => {
     enabledEnvironment,
     {
       log: (event) => events.push(event),
+      heartbeat,
       validateDatabase: async () => undefined,
       disconnectDatabase: async () => undefined,
       createWorker: ((input: Parameters<typeof createMercadoLivreProjectionWorker>[0]) => {
@@ -203,8 +216,10 @@ test("dedicated entrypoint and Compose profile stay isolated from Next.js", () =
   assert.match(runtime, /oauthRefreshes/);
   assert.match(compose, /ml-projection-worker:/);
   assert.match(compose, /profiles:\s*\n\s*- ml-projection-worker/);
-  assert.match(compose, /MERCADO_LIVRE_PROJECTION_WORKER_ENABLED: "true"/);
-  assert.match(compose, /restart: "no"/);
+  assert.match(compose, /MERCADO_LIVRE_PROJECTION_RUNTIME_ENV_FILE/);
+  assert.match(compose, /restart: unless-stopped/);
+  assert.match(compose, /mercado-livre-projection-health\.ts", "worker", "45"/);
+  assert.match(compose, /max-size: "10m"/);
   assert.doesNotMatch(
     compose.match(/ml-projection-worker:[\s\S]*?\n  postgres:/)?.[0] ?? "",
     /ports:/

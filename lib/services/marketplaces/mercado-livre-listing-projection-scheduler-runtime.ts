@@ -1,7 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { parseMercadoLivreProjectionRedisConnection } from "@/lib/services/marketplaces/mercado-livre-listing-projection-bullmq";
 import {
-  parseMercadoLivreProjectionSchedulerConfig,
   MercadoLivreProjectionSchedulerConfigurationError,
   type MercadoLivreProjectionSchedulerEnvironment
 } from "@/lib/services/marketplaces/mercado-livre-listing-projection-scheduler-config";
@@ -14,6 +13,13 @@ import {
   type MercadoLivreProjectionSchedulerQueue,
   type MercadoLivreProjectionSchedulerRepository
 } from "@/lib/services/marketplaces/mercado-livre-listing-projection-scheduler";
+import {
+  parseMercadoLivreProjectionRuntimeConfig,
+  type MercadoLivreProjectionRuntimeEnvironment
+} from "@/lib/services/marketplaces/mercado-livre-listing-projection-runtime-config";
+import {
+  createMercadoLivreProjectionRuntimeHeartbeat
+} from "@/lib/services/marketplaces/mercado-livre-listing-projection-runtime-health";
 
 type RuntimeSignal = "SIGINT" | "SIGTERM";
 
@@ -36,6 +42,7 @@ export type MercadoLivreProjectionSchedulerRuntimeEvent = {
   event:
     | "projection_scheduler_started"
     | "projection_scheduler_health"
+    | "projection_scheduler_heartbeat_error"
     | "projection_scheduler_decision"
     | "projection_scheduler_stopping"
     | "projection_scheduler_stopped";
@@ -51,6 +58,11 @@ type RuntimeDependencies = {
   log?: (event: MercadoLivreProjectionSchedulerRuntimeEvent) => void;
   now?: () => Date;
   sleep?: (durationMs: number, signal: AbortSignal) => Promise<void>;
+  heartbeat?: {
+    starting(): Promise<unknown>;
+    ready(busy?: boolean): Promise<unknown>;
+    stopped(): Promise<unknown>;
+  };
 };
 
 export type MercadoLivreProjectionSchedulerRuntime = {
@@ -107,11 +119,13 @@ function decisionEvent(result: MercadoLivreProjectionSchedulerEvaluation) {
 }
 
 export async function startMercadoLivreProjectionSchedulerRuntime(
-  env: MercadoLivreProjectionSchedulerEnvironment = process.env,
+  env: MercadoLivreProjectionSchedulerEnvironment &
+    MercadoLivreProjectionRuntimeEnvironment = process.env,
   dependencies: RuntimeDependencies = {}
 ): Promise<MercadoLivreProjectionSchedulerRuntime> {
-  const config = parseMercadoLivreProjectionSchedulerConfig(env);
-  if (!config.enabled) {
+  const runtimeConfig = parseMercadoLivreProjectionRuntimeConfig(env);
+  const config = runtimeConfig.scheduler;
+  if (!runtimeConfig.schedulerEnabled || !config.enabled) {
     throw new MercadoLivreProjectionSchedulerConfigurationError(
       "PROJECTION_SCHEDULER_DISABLED"
     );
@@ -140,6 +154,13 @@ export async function startMercadoLivreProjectionSchedulerRuntime(
     ?? (() => prisma.$disconnect());
   const signalSource = dependencies.signalSource ?? process;
   const sleep = dependencies.sleep ?? defaultSleep;
+  const heartbeat = dependencies.heartbeat
+    ?? createMercadoLivreProjectionRuntimeHeartbeat({
+      service: "scheduler",
+      filePath: env.MERCADO_LIVRE_PROJECTION_HEALTH_FILE,
+      targetCount: runtimeConfig.targets.length
+    });
+  await heartbeat.starting();
   await validateDatabase();
 
   const health: MercadoLivreProjectionSchedulerHealth = {
@@ -188,6 +209,12 @@ export async function startMercadoLivreProjectionSchedulerRuntime(
       if (stopping) break;
       health.nextTickAt = new Date(tickAt.getTime() + config.tickMs).toISOString();
       emitHealth();
+      await heartbeat.ready(false).catch((error) => {
+        log({
+          event: "projection_scheduler_heartbeat_error",
+          errorCode: safeErrorCode(error)
+        });
+      });
       await sleep(config.tickMs, sleepController.signal);
     }
   };
@@ -222,6 +249,7 @@ export async function startMercadoLivreProjectionSchedulerRuntime(
         await queue.close();
       } finally {
         await disconnectDatabase();
+        await heartbeat.stopped().catch(() => undefined);
         health.running = false;
         health.nextTickAt = null;
         emitHealth();
@@ -251,7 +279,8 @@ export async function startMercadoLivreProjectionSchedulerRuntime(
 }
 
 export async function runMercadoLivreProjectionSchedulerRuntime(
-  env: MercadoLivreProjectionSchedulerEnvironment = process.env
+  env: MercadoLivreProjectionSchedulerEnvironment &
+    MercadoLivreProjectionRuntimeEnvironment = process.env
 ) {
   const runtime = await startMercadoLivreProjectionSchedulerRuntime(env);
   await runtime.done;

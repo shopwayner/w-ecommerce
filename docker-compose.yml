@@ -30,9 +30,10 @@ services:
       - ml-projection-worker
     env_file:
       - ${W_ECOMMERCE_ENV_FILE:-.env.production}
+      - ${MERCADO_LIVRE_PROJECTION_RUNTIME_ENV_FILE:-config/ml-projection-runtime.disabled.env}
     environment:
       NODE_ENV: production
-      MERCADO_LIVRE_PROJECTION_WORKER_ENABLED: "true"
+      MERCADO_LIVRE_PROJECTION_HEALTH_FILE: /tmp/w-ecommerce-ml-projection-worker-health.json
     depends_on:
       postgres:
         condition: service_healthy
@@ -43,9 +44,20 @@ services:
       - scripts/workers/mercado-livre-projection-worker.ts
     init: true
     stop_grace_period: 2m
+    healthcheck:
+      test: ["CMD", "./node_modules/.bin/tsx", "scripts/workers/mercado-livre-projection-health.ts", "worker", "45"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     networks:
       - w-ecommerce-network
-    restart: "no"
+    restart: unless-stopped
 
   ml-projection-scheduler:
     container_name: w-ecommerce-ml-projection-scheduler
@@ -54,9 +66,10 @@ services:
       - ml-projection-scheduler
     env_file:
       - ${W_ECOMMERCE_ENV_FILE:-.env.production}
+      - ${MERCADO_LIVRE_PROJECTION_RUNTIME_ENV_FILE:-config/ml-projection-runtime.disabled.env}
     environment:
       NODE_ENV: production
-      MERCADO_LIVRE_PROJECTION_SCHEDULER_ENABLED: "true"
+      MERCADO_LIVRE_PROJECTION_HEALTH_FILE: /tmp/w-ecommerce-ml-projection-scheduler-health.json
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,9 +80,20 @@ services:
       - scripts/workers/mercado-livre-projection-scheduler.ts
     init: true
     stop_grace_period: 2m
+    healthcheck:
+      test: ["CMD", "./node_modules/.bin/tsx", "scripts/workers/mercado-livre-projection-health.ts", "scheduler", "150"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     networks:
       - w-ecommerce-network
-    restart: "no"
+    restart: unless-stopped
 
   postgres:
     container_name: w-ecommerce-postgres

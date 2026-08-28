@@ -68,7 +68,7 @@ function normalizedIdentifier(value: unknown, field: string) {
   return normalized;
 }
 
-function parseTargets(rawValue: string | undefined) {
+export function parseMercadoLivreProjectionSchedulerTargets(rawValue: string | undefined) {
   if (!rawValue?.trim()) return [];
   let value: unknown;
   try {
@@ -152,7 +152,9 @@ export function parseMercadoLivreProjectionSchedulerConfig(
   return {
     enabled,
     policy,
-    targets: parseTargets(env.MERCADO_LIVRE_PROJECTION_SCHEDULER_TARGETS),
+    targets: parseMercadoLivreProjectionSchedulerTargets(
+      env.MERCADO_LIVRE_PROJECTION_SCHEDULER_TARGETS
+    ),
     tickMs: MERCADO_LIVRE_PROJECTION_SCHEDULER_TICK_MS
   };
 }
