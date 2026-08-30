@@ -222,3 +222,110 @@ test("15. rollback preserva ambiente e conteudo persistente", () => {
     "o rollback deve recriar somente o app",
   );
 });
+
+test("16. project root e canonico e cada comando recebe cwd explicito", () => {
+  assertContains(
+    /\$projectRoot = \(Resolve-Path \(Join-Path \$PSScriptRoot "\.\."\)\)\.Path/,
+    "a raiz deve ser calculada pelo caminho do proprio script",
+  );
+  assertContains(
+    /Push-Location -LiteralPath \$WorkingDirectory[\s\S]*Pop-Location/,
+    "cada comando deve executar no working directory informado",
+  );
+  assertContains(
+    /Push-Location -LiteralPath \$projectRoot[\s\S]*Remove-Item -LiteralPath \$archivePath[\s\S]*Pop-Location/,
+    "o script deve restaurar o cwd do processo chamador",
+  );
+  assertContains(
+    /PROJECT_ROOT_INVALID/,
+    "uma raiz invalida deve falhar fechada",
+  );
+});
+
+test("17. Prisma e resolvido localmente e nunca por npx", () => {
+  assertContains(
+    /Join-Path \$nodeModulesPath "\.bin\\prisma\.cmd"/,
+    "o Prisma deve vir de node_modules local",
+  );
+  assertContains(
+    /PRISMA_VERSION_MISMATCH/,
+    "as versoes instaladas devem coincidir com o lockfile",
+  );
+  assert.doesNotMatch(
+    deployScript,
+    /npx\.cmd|npx\s+prisma/i,
+    "npx nao pode instalar Prisma implicitamente",
+  );
+});
+
+test("18. node_modules ausente falha antes de qualquer instalacao", () => {
+  assertContains(
+    /LOCAL_NODE_MODULES_NOT_FOUND/,
+    "node_modules ausente deve produzir erro estavel",
+  );
+  assertContains(
+    /LOCAL_PRISMA_NOT_FOUND/,
+    "Prisma ausente deve produzir erro estavel",
+  );
+  assertContains(
+    /LOCAL_ESLINT_NOT_FOUND/,
+    "ESLint ausente deve produzir erro estavel",
+  );
+  assert.doesNotMatch(
+    deployScript,
+    /npm\s+(?:ci|install)|npm\.cmd[^\r\n]*(?:ci|install)/i,
+    "o deploy nao pode instalar dependencias",
+  );
+});
+
+test("19. lint usa config, plugins e alvos locais equivalentes ao next lint", () => {
+  assertContains(
+    /Join-Path \$nodeModulesPath "\.bin\\eslint\.cmd"/,
+    "o ESLint deve vir de node_modules local",
+  );
+  assertContains(
+    /"--no-eslintrc",[\s\S]*"--config", \$Toolchain\.EslintConfigPath,[\s\S]*"--resolve-plugins-relative-to", \$Toolchain\.NodeModulesPath/,
+    "config e plugins devem ser explicitamente locais",
+  );
+  assert.ok(
+    deployScript.includes('@("app", "pages", "components", "lib", "src")'),
+    "os alvos devem ser equivalentes aos diretorios padrao do next lint",
+  );
+  assert.doesNotMatch(
+    deployScript,
+    /npm\.cmd"?\s+@?\("run",\s*"lint"\)/,
+    "o deploy nao deve delegar root resolution ao npm/next lint",
+  );
+});
+
+test("20. build usa Next local depois do lint deterministico", () => {
+  assertContains(
+    /Join-Path \$nodeModulesPath "\.bin\\next\.cmd"/,
+    "o Next deve vir de node_modules local",
+  );
+  assertContains(
+    /NEXT_PRIVATE_OUTPUT_TRACE_ROOT = \$projectRoot[\s\S]*Invoke-Checked \$Toolchain\.NextPath @\("build", \$projectRoot, "--no-lint"\)/,
+    "o build deve fixar o tracing root e evitar apenas o lint duplicado",
+  );
+  assert.ok(
+    deployScript.indexOf("ESLint com config e plugins locais") <
+      deployScript.indexOf("Next build com binario local"),
+    "o lint fail-closed deve ocorrer antes do build sem lint duplicado",
+  );
+});
+
+test("21. preflight-only termina antes de SSH, pacote ou upload", () => {
+  assertContains(
+    /\[switch\]\$PreflightOnly/,
+    "o script deve oferecer validacao local sem deploy",
+  );
+  const preflightExit = deployScript.indexOf('Write-Host "PREFLIGHT_ONLY=passed"');
+  const sshInitialization = deployScript.indexOf("Initialize-SshOptions", preflightExit);
+  const upload = deployScript.indexOf("Enviando pacote e manifesto para a VPS");
+  assert.ok(preflightExit >= 0 && preflightExit < sshInitialization);
+  assert.ok(preflightExit < upload);
+  assertContains(
+    /PREFLIGHT_ONLY=passed[\s\S]*return/,
+    "preflight-only deve encerrar antes do caminho de deploy",
+  );
+});

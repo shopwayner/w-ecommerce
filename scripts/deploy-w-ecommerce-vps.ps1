@@ -8,7 +8,8 @@ param(
   [string]$SshKeyPathEnvName = "W_ECOMMERCE_SSH_KEY_PATH",
   [string]$SshPortEnvName = "W_ECOMMERCE_SSH_PORT",
   [switch]$RunProductionSeed,
-  [switch]$ResetMasterPassword
+  [switch]$ResetMasterPassword,
+  [switch]$PreflightOnly
 )
 
 Set-StrictMode -Version Latest
@@ -86,9 +87,112 @@ function Invoke-Checked {
     [string]$WorkingDirectory = $projectRoot
   )
 
-  & $FilePath @Arguments
-  if ($LASTEXITCODE -ne 0) {
-    throw "Comando falhou: $FilePath $($Arguments -join ' ')"
+  Push-Location -LiteralPath $WorkingDirectory
+  try {
+    & $FilePath @Arguments
+    if ($LASTEXITCODE -ne 0) {
+      throw "Comando falhou: $FilePath $($Arguments -join ' ')"
+    }
+  } finally {
+    Pop-Location
+  }
+}
+
+function Assert-CanonicalProjectRoot {
+  $expectedScript = Join-Path $projectRoot "scripts\deploy-w-ecommerce-vps.ps1"
+  $resolvedScript = (Resolve-Path -LiteralPath $PSCommandPath).Path
+  $resolvedExpectedScript = (Resolve-Path -LiteralPath $expectedScript).Path
+
+  if (-not $resolvedScript.Equals($resolvedExpectedScript, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "PROJECT_ROOT_INVALID: o script nao pertence ao project root calculado."
+  }
+
+  foreach ($requiredFile in @("package.json", "package-lock.json", ".eslintrc.json", "prisma\schema.prisma")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $projectRoot $requiredFile) -PathType Leaf)) {
+      throw "PROJECT_ROOT_INVALID: arquivo obrigatorio ausente: $requiredFile"
+    }
+  }
+}
+
+function Get-LocalDeployToolchain {
+  $nodeModulesPath = Join-Path $projectRoot "node_modules"
+  if (-not (Test-Path -LiteralPath $nodeModulesPath -PathType Container)) {
+    throw "LOCAL_NODE_MODULES_NOT_FOUND: provisione as dependencias do lockfile antes do deploy."
+  }
+
+  $prismaPath = Join-Path $nodeModulesPath ".bin\prisma.cmd"
+  $eslintPath = Join-Path $nodeModulesPath ".bin\eslint.cmd"
+  $nextPath = Join-Path $nodeModulesPath ".bin\next.cmd"
+  $eslintConfigPath = Join-Path $projectRoot ".eslintrc.json"
+
+  foreach ($tool in @(
+    @{ Path = $prismaPath; Code = "LOCAL_PRISMA_NOT_FOUND" },
+    @{ Path = $eslintPath; Code = "LOCAL_ESLINT_NOT_FOUND" },
+    @{ Path = $nextPath; Code = "LOCAL_NEXT_NOT_FOUND" }
+  )) {
+    if (-not (Test-Path -LiteralPath $tool.Path -PathType Leaf)) {
+      throw "$($tool.Code): dependencias locais incompletas; nenhuma instalacao automatica sera executada."
+    }
+  }
+
+  $lockfile = Get-Content -LiteralPath (Join-Path $projectRoot "package-lock.json") -Raw | ConvertFrom-Json -AsHashtable
+  $installedPrisma = Get-Content -LiteralPath (Join-Path $nodeModulesPath "prisma\package.json") -Raw | ConvertFrom-Json
+  $installedPrismaClient = Get-Content -LiteralPath (Join-Path $nodeModulesPath "@prisma\client\package.json") -Raw | ConvertFrom-Json
+  $lockedPrismaVersion = $lockfile.packages['node_modules/prisma'].version
+  $lockedPrismaClientVersion = $lockfile.packages['node_modules/@prisma/client'].version
+
+  if (
+    $installedPrisma.version -ne $lockedPrismaVersion -or
+    $installedPrismaClient.version -ne $lockedPrismaClientVersion
+  ) {
+    throw "PRISMA_VERSION_MISMATCH: Prisma e @prisma/client locais devem coincidir com package-lock.json."
+  }
+
+  Write-Host "PROJECT_ROOT=$projectRoot"
+  Write-Host "LOCAL_TOOLCHAIN=node_modules"
+  Write-Host "PRISMA_VERSION=$($installedPrisma.version)"
+  Write-Host "PRISMA_CLIENT_VERSION=$($installedPrismaClient.version)"
+  Write-Host "ESLINT_CONFIG=$eslintConfigPath"
+
+  return [pscustomobject]@{
+    NodeModulesPath = $nodeModulesPath
+    PrismaPath = $prismaPath
+    EslintPath = $eslintPath
+    NextPath = $nextPath
+    EslintConfigPath = $eslintConfigPath
+  }
+}
+
+function Invoke-LocalDeployPreflight {
+  param([pscustomobject]$Toolchain)
+
+  $lintTargets = @("app", "pages", "components", "lib", "src") |
+    ForEach-Object { Join-Path $projectRoot $_ } |
+    Where-Object { Test-Path -LiteralPath $_ -PathType Container }
+
+  if ($lintTargets.Count -eq 0) {
+    throw "LINT_TARGETS_NOT_FOUND: nenhum diretorio padrao do Next.js foi encontrado."
+  }
+
+  Write-Host "==> Prisma validate com binario local"
+  Invoke-Checked $Toolchain.PrismaPath @("validate") $projectRoot
+
+  Write-Host "==> ESLint com config e plugins locais"
+  $lintArguments = @(
+    "--no-eslintrc",
+    "--config", $Toolchain.EslintConfigPath,
+    "--resolve-plugins-relative-to", $Toolchain.NodeModulesPath,
+    "--ext", ".js,.jsx,.ts,.tsx"
+  ) + $lintTargets
+  Invoke-Checked -FilePath $Toolchain.EslintPath -Arguments $lintArguments -WorkingDirectory $projectRoot
+
+  Write-Host "==> Next build com binario local"
+  $previousTracingRoot = $env:NEXT_PRIVATE_OUTPUT_TRACE_ROOT
+  try {
+    $env:NEXT_PRIVATE_OUTPUT_TRACE_ROOT = $projectRoot
+    Invoke-Checked $Toolchain.NextPath @("build", $projectRoot, "--no-lint") $projectRoot
+  } finally {
+    $env:NEXT_PRIVATE_OUTPUT_TRACE_ROOT = $previousTracingRoot
   }
 }
 
@@ -713,28 +817,35 @@ fi
   }
 }
 
+Push-Location -LiteralPath $projectRoot
 try {
-Set-Location -LiteralPath $projectRoot
 
-Assert-Command "npm.cmd"
-Assert-Command "npx.cmd"
+Assert-CanonicalProjectRoot
+Assert-Command "node.exe"
+Assert-Command "git.exe"
+$localToolchain = Get-LocalDeployToolchain
+
+if ($PreflightOnly) {
+  Write-Host "==> Validando projeto local em modo preflight-only"
+  Invoke-LocalDeployPreflight -Toolchain $localToolchain
+  Write-Host "PREFLIGHT_ONLY=passed"
+  return
+}
+
 Assert-Command "ssh.exe"
 Assert-Command "scp.exe"
 Assert-Command "curl.exe"
 Assert-Command "tar.exe"
-Assert-Command "git.exe"
 
 $gitDeployState = Get-ValidatedGitDeployState
 $deployCommit = $gitDeployState.LocalCommit
 $deployBranch = $gitDeployState.Branch
 
+Write-Host "==> Validando projeto local"
+Invoke-LocalDeployPreflight -Toolchain $localToolchain
+
 Initialize-SshOptions
 Test-SshAccess
-
-Write-Host "==> Validando projeto local"
-Invoke-Checked "npx.cmd" @("prisma", "validate")
-Invoke-Checked "npm.cmd" @("run", "lint")
-Invoke-Checked "npm.cmd" @("run", "build")
 
 Write-Host "==> Preparando pacote exclusivamente a partir do commit $deployCommit"
 if (-not (Test-Path -LiteralPath $deployDir)) {
@@ -1297,4 +1408,5 @@ if ($ResetMasterPassword) {
 } finally {
   Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+  Pop-Location
 }
